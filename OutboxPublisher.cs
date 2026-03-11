@@ -64,6 +64,11 @@ public sealed class OutboxPublisher : IAsyncDisposable
     private volatile int _consecutiveEmptyPolls = 0;
     private volatile int _currentPollIntervalMs;
 
+    // Circuit breaker: tracks consecutive failures per topic.
+    private readonly Dictionary<string, int> _topicFailureCount = new();
+    private readonly Dictionary<string, DateTime> _topicCircuitOpenUntil = new();
+    private readonly object _circuitLock = new();
+
     private bool _disposed;
 
     // -------------------------------------------------------------------------
@@ -853,6 +858,13 @@ WHERE  OwnerProducerId = @ProducerId
         {
             string topicName = group.Key.TopicName;
             string partitionKey = group.Key.PartitionKey;
+
+            if (IsCircuitOpen(topicName))
+            {
+                OnError($"Circuit open for topic '{topicName}', skipping batch (rows will be retried after circuit closes)", null);
+                continue;
+            }
+
             try
             {
                 EventHubProducerClient producer = await GetOrCreateProducerAsync(topicName, ct)
@@ -872,10 +884,12 @@ WHERE  OwnerProducerId = @ProducerId
                         {
                             await producer.SendAsync(eventBatch, sendCts.Token).ConfigureAwait(false);
                             published.AddRange(batchSequenceNumbers);
+                            RecordSendSuccess(topicName);
                         }
                         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                         {
                             OnError($"EventHub send timeout for topic '{topicName}' key '{partitionKey}'", null);
+                            RecordSendFailure(topicName);
                         }
                     }
                 }
@@ -883,6 +897,7 @@ WHERE  OwnerProducerId = @ProducerId
             catch (Exception ex)
             {
                 OnError($"EventHub publish error for topic '{topicName}' key '{partitionKey}'", ex);
+                RecordSendFailure(topicName);
             }
         }
 
@@ -1033,6 +1048,51 @@ WHERE  OwnerProducerId = @ProducerId
     }
 
     // -------------------------------------------------------------------------
+    // Circuit breaker
+    // -------------------------------------------------------------------------
+
+    private bool IsCircuitOpen(string topicName)
+    {
+        lock (_circuitLock)
+        {
+            if (_topicCircuitOpenUntil.TryGetValue(topicName, out var openUntil))
+            {
+                if (DateTime.UtcNow < openUntil)
+                    return true;
+                // Half-open: allow one attempt
+                _topicCircuitOpenUntil.Remove(topicName);
+            }
+            return false;
+        }
+    }
+
+    private void RecordSendSuccess(string topicName)
+    {
+        lock (_circuitLock)
+        {
+            _topicFailureCount.Remove(topicName);
+            _topicCircuitOpenUntil.Remove(topicName);
+        }
+    }
+
+    private void RecordSendFailure(string topicName)
+    {
+        lock (_circuitLock)
+        {
+            _topicFailureCount.TryGetValue(topicName, out int count);
+            count++;
+            _topicFailureCount[topicName] = count;
+
+            if (count >= _options.CircuitBreakerFailureThreshold)
+            {
+                var openUntil = DateTime.UtcNow.AddSeconds(_options.CircuitBreakerOpenDurationSeconds);
+                _topicCircuitOpenUntil[topicName] = openUntil;
+                OnError($"Circuit breaker OPEN for topic '{topicName}' until {openUntil:O}", null);
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
@@ -1130,6 +1190,19 @@ public sealed class OutboxPublisherOptions
 
     /// <summary>Timeout for a single EventHub SendAsync call in seconds. Default: 15.</summary>
     public int EventHubSendTimeoutSeconds { get; set; } = 15;
+
+    /// <summary>
+    /// Consecutive send failures before the circuit opens for a topic.
+    /// While open, the publisher pauses polling to avoid burning retry counts.
+    /// Default: 3.
+    /// </summary>
+    public int CircuitBreakerFailureThreshold { get; set; } = 3;
+
+    /// <summary>
+    /// Seconds to keep the circuit open before attempting a half-open probe.
+    /// Default: 30.
+    /// </summary>
+    public int CircuitBreakerOpenDurationSeconds { get; set; } = 30;
 
     /// <summary>Maximum EventHub batch size in bytes (1 MB). Default: 1 048 576.</summary>
     public long EventHubMaxBatchBytes { get; set; } = 1_048_576;
