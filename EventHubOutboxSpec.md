@@ -101,6 +101,7 @@ This breaks per-key ordering. **Partition affinity is required if ordered delive
 When partition affinity is active (see §4):
 
 - A given EventHub partition number is owned by at most one publisher at any time.
+- **Both the primary poll and the recovery poll** use the same partition affinity join, so a publisher only leases and recovers rows for its own partitions. This prevents a different publisher from re-sending rows for a partition it doesn't own, which would interleave with the owner's primary sends.
 - The publisher processes all rows for its assigned partitions in `SequenceNumber` order.
 - Ordering within a partition is preserved end-to-end.
 - During rebalance (ownership transfer), a grace period ensures the outgoing publisher completes or expires any in-flight leases before the incoming publisher starts polling that partition.
@@ -157,8 +158,8 @@ Rows in the outbox whose `PartitionKey` maps to an unowned partition accumulate 
 | Crash point | State after crash | Recovery |
 |---|---|---|
 | Before lease UPDATE | Row never leased. `LeasedUntilUtc IS NULL`. | Normal poll picks it up immediately. |
-| After lease UPDATE, before EventHub send | Row leased, not sent. | Lease expires → recovery path re-leases. No data loss. |
-| After EventHub send, before DELETE | Row leased, already sent. | Lease expires → recovery path re-leases → re-sent (duplicate). At-least-once, as designed. |
+| After lease UPDATE, before EventHub send | Row leased, not sent. | Lease expires → recovery path (same partition owner) re-leases. No data loss. |
+| After EventHub send, before DELETE | Row leased, already sent. | Lease expires → recovery path (same partition owner) re-leases → re-sent (duplicate). At-least-once, as designed. Ordering preserved because only the partition owner recovers the row. |
 | After DELETE | Clean. Nothing to recover. | — |
 | After partition claim, before processing any rows | Partition marked owned, no rows leased. | Next publisher sees expired heartbeat, starts grace period, reclaims partition. |
 
@@ -241,7 +242,7 @@ FairShare = CEILING(TotalPartitions / ActiveProducers)
 
 Where `ActiveProducers` = count of producers with `LastHeartbeatUtc >= SYSUTCDATETIME() - @HeartbeatTimeoutSeconds`.
 
-A publisher with more than `FairShare` partitions releases excess ones by setting `OwnerProducerId = NULL`.
+A publisher with more than `FairShare` partitions releases excess ones by setting `OwnerProducerId = NULL`. The claim and release run inside a single SQL transaction to prevent concurrent publishers from observing an inconsistent partition assignment.
 
 ### Stealable partitions
 
@@ -319,7 +320,7 @@ The recovery path (expired leases) uses a separate, fixed interval (default: 30s
 | `PartitionKey` | `NVARCHAR(256)` | NOT NULL | — | EventHub partition key. Determines partition affinity bucket. |
 | `EventType` | `NVARCHAR(256)` | NOT NULL | — | Discriminator for consumers. |
 | `Headers` | `NVARCHAR(4000)` | NULL | — | JSON key-value blob → EventHub `Properties`. |
-| `Payload` | `NVARCHAR(4000)` | NOT NULL | — | Event body. |
+| `Payload` | `NVARCHAR(4000)` | NOT NULL | — | Event body. Intentionally capped at 4000 chars (~8 KB) to enable covering index INCLUDEs; `NVARCHAR(MAX)` cannot be included in nonclustered indexes, forcing key lookups on every poll. Producers must validate payload size before inserting. |
 | `CreatedAtUtc` | `DATETIME2(3)` | NOT NULL | `SYSUTCDATETIME()` | Insert timestamp. Audit/diagnostic. |
 | `LeasedUntilUtc` | `DATETIME2(3)` | NULL | — | NULL = fresh. Past = expired. Future = active lease. |
 | `LeaseOwner` | `NVARCHAR(128)` | NULL | — | ProducerId holding the current lease. |
@@ -407,14 +408,14 @@ All queries are parameterized. See `EventHubOutbox.sql` for complete, runnable S
 | Query | Trigger | Purpose |
 |---|---|---|
 | `LeaseUnleasedBatch` | Primary poll (adaptive interval) | Acquire a batch of fresh rows |
-| `LeaseExpiredBatch` | Recovery poll (fixed 30s) | Acquire a batch of expired-lease rows; increment `RetryCount` |
+| `LeaseExpiredBatch` | Recovery poll (fixed 30s) | Acquire a batch of expired-lease rows for owned partitions; increment `RetryCount` |
 | `DeletePublishedTVP` | After successful EventHub send | Delete by TVP with `LeaseOwner` guard |
+| `ReleaseLeasedRows` | Circuit breaker open | Release leases on skipped rows via TVP; rows return unleased without incrementing `RetryCount` |
 | `DeadLetterExceeded` | During recovery poll | Move rows at `RetryCount >= @MaxRetryCount` to dead-letter |
 | `RegisterProducer` | On startup | Upsert producer heartbeat record |
 | `HeartbeatProducer` | Every `@HeartbeatIntervalSeconds` | Refresh `LastHeartbeatUtc` |
 | `UnregisterProducer` | On graceful shutdown | Delete producer record, release partitions |
-| `ClaimPartitions` | After registration; after rebalance trigger | Claim unowned or stale partitions up to fair share |
-| `ReleaseExcessPartitions` | After rebalance trigger | Release partitions above fair share |
+| `Rebalance` | After registration; after rebalance trigger | Atomic claim + release in a single transaction: claim unowned/stale partitions up to fair share, then release excess |
 | `GetOwnedPartitions` | Before each poll cycle | Retrieve current owned partition set |
 | `OrphanSweep` | Every `@OrphanSweepIntervalSeconds` | Move orphan partition rows into accessible lease pool |
 
@@ -506,7 +507,7 @@ During an EventHub outage:
 - Leases expire; recovery path increments `RetryCount`.
 - After `@MaxRetryCount` retries, rows are dead-lettered.
 
-**Mitigation**: A per-topic circuit breaker is implemented in `OutboxPublisher`. After `@CircuitBreakerFailureThreshold` consecutive send failures (default: 3), the circuit opens and the publisher skips batches for that topic for `@CircuitBreakerOpenDurationSeconds` (default: 30s). While the circuit is open, rows are not leased for that topic, so retry counts are not burned. After the open duration elapses, the circuit enters half-open state and allows one probe send. On success, the circuit closes and normal publishing resumes. On failure, the circuit re-opens.
+**Mitigation**: A per-topic circuit breaker is implemented in `OutboxPublisher`. After `@CircuitBreakerFailureThreshold` consecutive send failures (default: 3), the circuit opens and the publisher skips batches for that topic for `@CircuitBreakerOpenDurationSeconds` (default: 30s). When a batch is skipped because the circuit is open, the publisher **releases the leases** on the affected rows (resets `LeasedUntilUtc` and `LeaseOwner` to NULL) so they return to the unleased pool without incrementing `RetryCount`. After the open duration elapses, the circuit enters half-open state and allows one probe send. On success, the circuit closes and normal publishing resumes. On failure, the circuit re-opens.
 
 This prevents dead-lettering during transient EventHub outages while preserving at-least-once delivery semantics.
 
@@ -541,6 +542,14 @@ After heavy deletes, SQL Server's ghost cleanup task processes deleted records a
 ### Partition hash collisions
 
 Multiple `PartitionKey` values may hash to the same EventHub partition. The affinity model assigns ownership at the *partition number* level, not the key level, so all keys mapping to partition P are handled by P's owner. No special handling needed.
+
+### CHECKSUM vs EventHub internal hashing
+
+The SQL-side partition assignment uses `ABS(CHECKSUM(PartitionKey)) % TotalPartitions`. EventHub uses its own internal hashing algorithm (MurmurHash-based). These two hashes are **not equivalent**: SQL partition bucket N does not correspond to EventHub partition N for the same `PartitionKey`.
+
+**Why this doesn't break correctness**: ordering depends on the same `PartitionKey` always being routed to the same publisher — the SQL CHECKSUM guarantees this deterministically. The actual EventHub partition is determined by the EventHub SDK when `PartitionKey` is set on `CreateBatchOptions`. The SQL partition number is a *logical work distribution bucket*, not a physical EventHub partition identifier.
+
+**Operational note**: the `dbo.OutboxPartitions.PartitionId` values are logical bucket IDs, not actual EventHub partition numbers. Monitoring queries that display partition ownership show bucket assignments, not EventHub partition-level ownership.
 
 ---
 
@@ -606,3 +615,5 @@ Because of at-least-once delivery, **all event consumers must be idempotent**. T
 | `@EventHubMaxBatchBytes` | 1,048,576 | EventHub max batch size (1 MB). Publisher splits batches to stay under this limit. |
 | `@CircuitBreakerFailureThreshold` | 3 | Consecutive send failures before the circuit opens for a topic. |
 | `@CircuitBreakerOpenDurationSeconds` | 30 | Seconds to keep the circuit open before attempting a half-open probe. |
+| `@SqlRetryMaxAttempts` | 3 | Maximum attempts for lease and delete operations on transient SQL errors (deadlock, timeout, Azure SQL transient). |
+| `OnError` | `null` | `Action<string, Exception?>` callback for logging/observability. When null, errors are written to `Console.Error`. |

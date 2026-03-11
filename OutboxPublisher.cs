@@ -214,7 +214,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
                 _consecutiveEmptyPolls = 0;
                 _currentPollIntervalMs = _options.MinPollIntervalMs;
 
-                await PublishBatchAsync(batch, lastError: null, ct).ConfigureAwait(false);
+                await PublishBatchAsync(batch, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -243,7 +243,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
 
                 IReadOnlyList<OutboxRow> batch = await LeaseExpiredBatchAsync(ct).ConfigureAwait(false);
                 if (batch.Count > 0)
-                    await PublishBatchAsync(batch, lastError: null, ct).ConfigureAwait(false);
+                    await PublishBatchAsync(batch, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -464,19 +464,27 @@ OUTPUT inserted.SequenceNumber,
 
     private async Task<IReadOnlyList<OutboxRow>> LeaseExpiredBatchAsync(CancellationToken ct)
     {
+        // Partition affinity join mirrors the primary poll so that each publisher
+        // only recovers expired rows for its own partitions. Without this, a
+        // different publisher could re-send rows for a partition it doesn't own,
+        // interleaving with the owner's primary sends and breaking ordering.
         const string sql = @"
 WITH Expired AS
 (
     SELECT TOP (@BatchSize)
-        SequenceNumber,
-        LeasedUntilUtc,
-        LeaseOwner,
-        RetryCount
-    FROM dbo.Outbox WITH (ROWLOCK, READPAST)
-    WHERE LeasedUntilUtc IS NOT NULL
-      AND LeasedUntilUtc < SYSUTCDATETIME()
-      AND RetryCount < @MaxRetryCount
-    ORDER BY SequenceNumber
+        o.SequenceNumber,
+        o.LeasedUntilUtc,
+        o.LeaseOwner,
+        o.RetryCount
+    FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
+    INNER JOIN dbo.OutboxPartitions op
+        ON  op.OwnerProducerId = @PublisherId
+        AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
+        AND (ABS(CHECKSUM(o.PartitionKey)) % @TotalPartitions) = op.PartitionId
+    WHERE o.LeasedUntilUtc IS NOT NULL
+      AND o.LeasedUntilUtc < SYSUTCDATETIME()
+      AND o.RetryCount < @MaxRetryCount
+    ORDER BY o.SequenceNumber
 )
 UPDATE Expired
 SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
@@ -495,45 +503,47 @@ OUTPUT inserted.SequenceNumber,
     private async Task<IReadOnlyList<OutboxRow>> ExecuteLeaseQueryAsync(
         string sql, bool incrementRetry, CancellationToken ct)
     {
-        await _partitionLock.WaitAsync(ct).ConfigureAwait(false);
-        int totalPartitions;
-        try
-        {
-            totalPartitions = _totalPartitionCount;
-        }
-        finally
-        {
-            _partitionLock.Release();
-        }
-
+        // _totalPartitionCount is set once in StartAsync before any loops start,
+        // so no lock is needed for reads.
+        int totalPartitions = _totalPartitionCount;
         if (totalPartitions == 0)
             return Array.Empty<OutboxRow>();
 
-        await using var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(ct).ConfigureAwait(false);
-
-        await using var cmd = new SqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@BatchSize", _options.BatchSize);
-        cmd.Parameters.AddWithValue("@LeaseDurationSeconds", _options.LeaseDurationSeconds);
-        cmd.Parameters.AddWithValue("@PublisherId", _producerId);
-        cmd.Parameters.AddWithValue("@TotalPartitions", totalPartitions);
-        cmd.Parameters.AddWithValue("@MaxRetryCount", _options.MaxRetryCount);
-        cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
-
-        var rows = new List<OutboxRow>();
-        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        for (int attempt = 1; ; attempt++)
         {
-            rows.Add(new OutboxRow(
-                SequenceNumber: reader.GetInt64(0),
-                TopicName: reader.GetString(1),
-                PartitionKey: reader.GetString(2),
-                EventType: reader.GetString(3),
-                Headers: reader.IsDBNull(4) ? null : reader.GetString(4),
-                Payload: reader.GetString(5)));
-        }
+            try
+            {
+                await using var conn = new SqlConnection(_connectionString);
+                await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        return rows;
+                await using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@BatchSize", _options.BatchSize);
+                cmd.Parameters.AddWithValue("@LeaseDurationSeconds", _options.LeaseDurationSeconds);
+                cmd.Parameters.AddWithValue("@PublisherId", _producerId);
+                cmd.Parameters.AddWithValue("@TotalPartitions", totalPartitions);
+                cmd.Parameters.AddWithValue("@MaxRetryCount", _options.MaxRetryCount);
+                cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
+
+                var rows = new List<OutboxRow>();
+                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    rows.Add(new OutboxRow(
+                        SequenceNumber: reader.GetInt64(0),
+                        TopicName: reader.GetString(1),
+                        PartitionKey: reader.GetString(2),
+                        EventType: reader.GetString(3),
+                        Headers: reader.IsDBNull(4) ? null : reader.GetString(4),
+                        Payload: reader.GetString(5)));
+                }
+
+                return rows;
+            }
+            catch (SqlException ex) when (IsTransientSqlError(ex) && attempt < 3)
+            {
+                await Task.Delay(50 * attempt, ct).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>
@@ -550,6 +560,48 @@ FROM   dbo.Outbox o
 INNER JOIN @PublishedIds p ON o.SequenceNumber = p.SequenceNumber
 WHERE  o.LeaseOwner = @PublisherId;";
 
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await using var conn = new SqlConnection(_connectionString);
+                await conn.OpenAsync(ct).ConfigureAwait(false);
+
+                await using var cmd = new SqlCommand(sql, conn);
+                cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
+                cmd.Parameters.AddWithValue("@PublisherId", _producerId);
+
+                var tvp = BuildSequenceNumberTvp(sequenceNumbers);
+                var tvpParam = cmd.Parameters.AddWithValue("@PublishedIds", tvp);
+                tvpParam.SqlDbType = SqlDbType.Structured;
+                tvpParam.TypeName = "dbo.SequenceNumberList";
+
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                return;
+            }
+            catch (SqlException ex) when (IsTransientSqlError(ex) && attempt < 3)
+            {
+                await Task.Delay(50 * attempt, ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Releases the lease on rows that were skipped (e.g. circuit breaker open).
+    /// Resets LeasedUntilUtc and LeaseOwner to NULL so the rows return to the
+    /// unleased pool without incrementing RetryCount.
+    /// </summary>
+    private async Task ReleaseLeasedRowsAsync(
+        IEnumerable<long> sequenceNumbers, CancellationToken ct)
+    {
+        const string sql = @"
+UPDATE o
+SET    o.LeasedUntilUtc = NULL,
+       o.LeaseOwner     = NULL
+FROM   dbo.Outbox o
+INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
+WHERE  o.LeaseOwner = @PublisherId;";
+
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct).ConfigureAwait(false);
 
@@ -558,7 +610,7 @@ WHERE  o.LeaseOwner = @PublisherId;";
         cmd.Parameters.AddWithValue("@PublisherId", _producerId);
 
         var tvp = BuildSequenceNumberTvp(sequenceNumbers);
-        var tvpParam = cmd.Parameters.AddWithValue("@PublishedIds", tvp);
+        var tvpParam = cmd.Parameters.AddWithValue("@Ids", tvp);
         tvpParam.SqlDbType = SqlDbType.Structured;
         tvpParam.TypeName = "dbo.SequenceNumberList";
 
@@ -713,12 +765,11 @@ COMMIT TRANSACTION;";
 
     private async Task RebalanceAsync(CancellationToken ct)
     {
-        // Step 1: Mark stale (crashed) producers' partitions as entering grace period.
-        // Step 2: Claim unowned / grace-expired partitions up to fair share.
-        // Step 3: Release excess partitions above fair share.
-        // Step 4: Refresh local owned-partition list.
+        // Claim + release run inside a single transaction so concurrent publishers
+        // cannot observe an inconsistent partition assignment mid-rebalance.
+        const string rebalanceSql = @"
+BEGIN TRANSACTION;
 
-        const string claimSql = @"
 DECLARE @TotalPartitions   INT;
 DECLARE @ActiveProducers   INT;
 DECLARE @FairShare         INT;
@@ -741,6 +792,7 @@ SET @ToAcquire = @FairShare - @CurrentlyOwned;
 
 IF @ToAcquire > 0
 BEGIN
+    -- Mark stale producers' partitions as entering grace period
     UPDATE dbo.OutboxPartitions
     SET    GraceExpiresUtc = DATEADD(SECOND, @PartitionGracePeriodSeconds, SYSUTCDATETIME())
     WHERE  OwnerProducerId <> @ProducerId
@@ -753,43 +805,32 @@ BEGIN
                WHERE  LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
            );
 
+    -- Claim unowned or grace-expired partitions up to fair share
     UPDATE TOP (@ToAcquire) dbo.OutboxPartitions WITH (UPDLOCK)
     SET    OwnerProducerId = @ProducerId,
            OwnedSinceUtc   = SYSUTCDATETIME(),
            GraceExpiresUtc = NULL
     WHERE  (OwnerProducerId IS NULL
             OR GraceExpiresUtc < SYSUTCDATETIME());
-END;";
+END;
 
-        const string releaseSql = @"
-DECLARE @TotalPartitions INT;
-DECLARE @ActiveProducers INT;
-DECLARE @FairShare       INT;
-DECLARE @CurrentlyOwned  INT;
-DECLARE @ToRelease       INT;
-
-SELECT @TotalPartitions = COUNT(*) FROM dbo.OutboxPartitions;
-
-SELECT @ActiveProducers = COUNT(*)
-FROM dbo.OutboxProducers
-WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME());
-
-SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActiveProducers, 0));
-
+-- Recalculate after claims to check if we need to release excess
 SELECT @CurrentlyOwned = COUNT(*)
 FROM dbo.OutboxPartitions
 WHERE OwnerProducerId = @ProducerId;
 
-SET @ToRelease = @CurrentlyOwned - @FairShare;
-
-IF @ToRelease > 0
+IF @CurrentlyOwned > @FairShare
 BEGIN
+    DECLARE @ToRelease INT = @CurrentlyOwned - @FairShare;
+
     UPDATE TOP (@ToRelease) dbo.OutboxPartitions
     SET    OwnerProducerId = NULL,
            OwnedSinceUtc  = NULL,
            GraceExpiresUtc = NULL
     WHERE  OwnerProducerId = @ProducerId;
-END;";
+END;
+
+COMMIT TRANSACTION;";
 
         const string getOwnedSql = @"
 SELECT PartitionId
@@ -800,20 +841,12 @@ WHERE  OwnerProducerId = @ProducerId
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        await using (var cmd = new SqlCommand(claimSql, conn))
+        await using (var cmd = new SqlCommand(rebalanceSql, conn))
         {
             cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
             cmd.Parameters.AddWithValue("@ProducerId", _producerId);
             cmd.Parameters.AddWithValue("@HeartbeatTimeoutSeconds", _options.HeartbeatTimeoutSeconds);
             cmd.Parameters.AddWithValue("@PartitionGracePeriodSeconds", _options.PartitionGracePeriodSeconds);
-            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
-
-        await using (var cmd = new SqlCommand(releaseSql, conn))
-        {
-            cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
-            cmd.Parameters.AddWithValue("@ProducerId", _producerId);
-            cmd.Parameters.AddWithValue("@HeartbeatTimeoutSeconds", _options.HeartbeatTimeoutSeconds);
             await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
@@ -850,7 +883,7 @@ WHERE  OwnerProducerId = @ProducerId
     /// Moves poison messages to dead-letter on persistent failure.
     /// </summary>
     private async Task PublishBatchAsync(
-        IReadOnlyList<OutboxRow> rows, string? lastError, CancellationToken ct)
+        IReadOnlyList<OutboxRow> rows, CancellationToken ct)
     {
         var byTopicAndKey = rows.GroupBy(r => (r.TopicName, r.PartitionKey));
         var published = new List<long>(rows.Count);
@@ -862,7 +895,13 @@ WHERE  OwnerProducerId = @ProducerId
 
             if (IsCircuitOpen(topicName))
             {
-                OnError($"Circuit open for topic '{topicName}', skipping batch (rows will be retried after circuit closes)", null);
+                // Release the lease so rows return to the unleased pool without
+                // burning RetryCount. Without this, leased rows would expire,
+                // the recovery path would increment RetryCount, and messages
+                // could be dead-lettered during a transient EventHub outage.
+                OnError($"Circuit open for topic '{topicName}', releasing leased rows", null);
+                await ReleaseLeasedRowsAsync(group.Select(r => r.SequenceNumber), ct)
+                    .ConfigureAwait(false);
                 continue;
             }
 
@@ -1005,9 +1044,12 @@ WHERE  OwnerProducerId = @ProducerId
                         eventData.Properties[key] = value;
                 }
             }
-            catch
+            catch (JsonException ex)
             {
-                // Malformed headers: skip header propagation rather than failing the message.
+                // Malformed headers: skip header propagation rather than failing the message,
+                // but log so operators know headers are being dropped.
+                _options.OnError?.Invoke(
+                    $"Malformed headers JSON on SequenceNumber={row.SequenceNumber}, headers skipped", ex);
             }
         }
 
@@ -1108,6 +1150,14 @@ WHERE  OwnerProducerId = @ProducerId
         return dt;
     }
 
+    private static bool IsTransientSqlError(SqlException ex)
+        => ex.Number is 1205    // deadlock victim
+            or -2              // timeout
+            or 40613           // Azure SQL database not available
+            or 40197           // Azure SQL service error
+            or 40501           // Azure SQL service busy
+            or 49918 or 49919 or 49920; // Azure SQL transient errors
+
     private static async Task DelayAsync(int milliseconds, CancellationToken ct)
     {
         try
@@ -1121,13 +1171,13 @@ WHERE  OwnerProducerId = @ProducerId
         }
     }
 
-    /// <summary>
-    /// Override in a subclass or replace with a logging framework call.
-    /// Default implementation writes to Console.Error.
-    /// </summary>
-    protected virtual void OnError(string context, Exception? exception)
+    private void OnError(string context, Exception? exception)
     {
-        Console.Error.WriteLine($"[OutboxPublisher] {context}: {exception?.Message}");
+        var handler = _options.OnError;
+        if (handler is not null)
+            handler(context, exception);
+        else
+            Console.Error.WriteLine($"[OutboxPublisher] {context}: {exception?.Message}");
     }
 }
 
@@ -1212,6 +1262,12 @@ public sealed class OutboxPublisherOptions
 
     /// <summary>SQL command timeout in seconds. Default: 30.</summary>
     public int SqlCommandTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Error callback for logging/observability integration. Receives context string
+    /// and optional exception. When null, errors are written to Console.Error.
+    /// </summary>
+    public Action<string, Exception?>? OnError { get; set; }
 }
 
 // =============================================================================

@@ -225,10 +225,16 @@ OUTPUT inserted.SequenceNumber,
 -- ---------------------------------------------------------------------------
 -- 4c. Recovery poll — lease expired rows and increment RetryCount.
 --
+-- Uses the same partition affinity join as the primary poll (4b) so that
+-- each publisher only recovers expired rows for its own partitions. Without
+-- this, a different publisher could re-send rows for a partition it doesn't
+-- own, interleaving with the owner's primary sends and breaking ordering.
+--
 -- Parameters:
 --   @BatchSize             INT            — rows to lease per call
 --   @LeaseDurationSeconds  INT            — seconds until lease expires
 --   @PublisherId           NVARCHAR(128)  — identity of this publisher instance
+--   @TotalPartitions       INT            — total number of EventHub partitions
 --   @MaxRetryCount         INT            — rows at or above this count are NOT
 --                                          re-leased here; they are dead-lettered
 --                                          by the dead-letter sweep (4e) instead
@@ -237,20 +243,25 @@ OUTPUT inserted.SequenceNumber,
 DECLARE @BatchSize            INT           = 100;
 DECLARE @LeaseDurationSeconds INT           = 45;
 DECLARE @PublisherId          NVARCHAR(128) = N'publisher-01';
+DECLARE @TotalPartitions      INT           = 8;
 DECLARE @MaxRetryCount        INT           = 5;
 
 WITH Expired AS
 (
     SELECT TOP (@BatchSize)
-        SequenceNumber,
-        LeasedUntilUtc,
-        LeaseOwner,
-        RetryCount
-    FROM dbo.Outbox WITH (ROWLOCK, READPAST)
-    WHERE LeasedUntilUtc IS NOT NULL
-      AND LeasedUntilUtc < SYSUTCDATETIME()
-      AND RetryCount < @MaxRetryCount         -- exclude poison messages
-    ORDER BY SequenceNumber
+        o.SequenceNumber,
+        o.LeasedUntilUtc,
+        o.LeaseOwner,
+        o.RetryCount
+    FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
+    INNER JOIN dbo.OutboxPartitions op
+        ON  op.OwnerProducerId = @PublisherId
+        AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
+        AND (ABS(CHECKSUM(o.PartitionKey)) % @TotalPartitions) = op.PartitionId
+    WHERE o.LeasedUntilUtc IS NOT NULL
+      AND o.LeasedUntilUtc < SYSUTCDATETIME()
+      AND o.RetryCount < @MaxRetryCount       -- exclude poison messages
+    ORDER BY o.SequenceNumber
 )
 UPDATE Expired
 SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
@@ -291,7 +302,30 @@ WHERE  o.LeaseOwner = @PublisherId;
 */
 
 -- ---------------------------------------------------------------------------
--- 4e. Dead-letter sweep — move poison messages to dbo.OutboxDeadLetter.
+-- 4e. Release leased rows — return rows to the unleased pool without
+--     incrementing RetryCount. Used when the circuit breaker is open:
+--     rows were already leased by the primary poll but cannot be sent.
+--
+-- Parameters:
+--   @Ids          dbo.SequenceNumberList  — TVP of SequenceNumbers to release
+--   @PublisherId  NVARCHAR(128)           — must match LeaseOwner on each row
+-- ---------------------------------------------------------------------------
+/*
+DECLARE @Ids dbo.SequenceNumberList;
+-- INSERT INTO @Ids (SequenceNumber) VALUES (1), (2), (3), ...;
+
+DECLARE @PublisherId NVARCHAR(128) = N'publisher-01';
+
+UPDATE o
+SET    o.LeasedUntilUtc = NULL,
+       o.LeaseOwner     = NULL
+FROM   dbo.Outbox o
+INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
+WHERE  o.LeaseOwner = @PublisherId;
+*/
+
+-- ---------------------------------------------------------------------------
+-- 4f. Dead-letter sweep — move poison messages to dbo.OutboxDeadLetter.
 --
 -- Uses DELETE...OUTPUT INTO instead of separate INSERT + DELETE so that the
 -- set of rows removed from dbo.Outbox is guaranteed to be exactly the set
@@ -423,25 +457,27 @@ END;
 */
 
 -- ---------------------------------------------------------------------------
--- 6b. Claim partitions — called after registration and after each rebalance.
+-- 6b. Rebalance — claim + release in a single transaction.
 --
--- A publisher claims up to its fair share of unowned or stale partitions.
--- Fair share = CEILING(TotalPartitions / ActiveProducers).
+-- Runs claim and release atomically so concurrent publishers cannot observe
+-- an inconsistent partition assignment mid-rebalance.
 --
--- Atomicity: each claim attempt uses an optimistic CAS that only succeeds if
--- the partition is still unowned (or grace has expired) at the moment of update.
--- Concurrent publishers racing for the same partition will have at most one
--- winner per partition.
+-- Steps:
+--   1. Mark stale producers' partitions as entering grace period.
+--   2. Claim unowned / grace-expired partitions up to fair share.
+--   3. Re-check ownership count and release excess above fair share.
 --
 -- Parameters:
---   @ProducerId              NVARCHAR(128)
---   @HeartbeatTimeoutSeconds INT
+--   @ProducerId                  NVARCHAR(128)
+--   @HeartbeatTimeoutSeconds     INT
 --   @PartitionGracePeriodSeconds INT
 -- ---------------------------------------------------------------------------
 /*
 DECLARE @ProducerId                  NVARCHAR(128) = N'publisher-01';
 DECLARE @HeartbeatTimeoutSeconds     INT           = 30;
 DECLARE @PartitionGracePeriodSeconds INT           = 60;
+
+BEGIN TRANSACTION;
 
 DECLARE @TotalPartitions   INT;
 DECLARE @ActiveProducers   INT;
@@ -479,60 +515,35 @@ BEGIN
            );
 
     -- Claim unowned or grace-expired partitions up to fair share
-    -- UPDLOCK prevents two publishers from claiming the same partition simultaneously
-    UPDATE top (@ToAcquire) dbo.OutboxPartitions WITH (UPDLOCK)
+    UPDATE TOP (@ToAcquire) dbo.OutboxPartitions WITH (UPDLOCK)
     SET    OwnerProducerId = @ProducerId,
            OwnedSinceUtc   = SYSUTCDATETIME(),
            GraceExpiresUtc = NULL
     WHERE  (OwnerProducerId IS NULL
-            OR GraceExpiresUtc < SYSUTCDATETIME());    -- grace period has elapsed
+            OR GraceExpiresUtc < SYSUTCDATETIME());
 END;
-*/
 
--- ---------------------------------------------------------------------------
--- 6c. Release excess partitions — called after rebalance when this publisher
---     owns more than its fair share.
---
--- Parameters:
---   @ProducerId              NVARCHAR(128)
---   @HeartbeatTimeoutSeconds INT
--- ---------------------------------------------------------------------------
-/*
-DECLARE @ProducerId              NVARCHAR(128) = N'publisher-01';
-DECLARE @HeartbeatTimeoutSeconds INT           = 30;
-
-DECLARE @TotalPartitions INT;
-DECLARE @ActiveProducers INT;
-DECLARE @FairShare       INT;
-DECLARE @CurrentlyOwned  INT;
-DECLARE @ToRelease       INT;
-
-SELECT @TotalPartitions = COUNT(*) FROM dbo.OutboxPartitions;
-
-SELECT @ActiveProducers = COUNT(*)
-FROM dbo.OutboxProducers
-WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME());
-
-SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActiveProducers, 0));
-
+-- Recalculate after claims to check if we need to release excess
 SELECT @CurrentlyOwned = COUNT(*)
 FROM dbo.OutboxPartitions
 WHERE OwnerProducerId = @ProducerId;
 
-SET @ToRelease = @CurrentlyOwned - @FairShare;
-
-IF @ToRelease > 0
+IF @CurrentlyOwned > @FairShare
 BEGIN
+    DECLARE @ToRelease INT = @CurrentlyOwned - @FairShare;
+
     UPDATE TOP (@ToRelease) dbo.OutboxPartitions
     SET    OwnerProducerId = NULL,
            OwnedSinceUtc  = NULL,
            GraceExpiresUtc = NULL
     WHERE  OwnerProducerId = @ProducerId;
 END;
+
+COMMIT TRANSACTION;
 */
 
 -- ---------------------------------------------------------------------------
--- 6d. Get owned partitions — called before each poll cycle to refresh the
+-- 6c. Get owned partitions — called before each poll cycle to refresh the
 --     publisher's local partition set.
 --
 -- Parameters:
@@ -548,7 +559,7 @@ WHERE  OwnerProducerId = @ProducerId
 */
 
 -- ---------------------------------------------------------------------------
--- 6e. Orphan sweep — pick up rows belonging to unowned partitions.
+-- 6d. Orphan sweep — pick up rows belonging to unowned partitions.
 --     Runs every @OrphanSweepIntervalSeconds (default 60s).
 --     Any publisher can claim an unowned partition and process its rows.
 -- ---------------------------------------------------------------------------
