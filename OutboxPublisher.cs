@@ -457,20 +457,15 @@ WHERE  o.LeaseOwner = @PublisherId;";
         const string sql = @"
 BEGIN TRANSACTION;
 
-    INSERT INTO dbo.OutboxDeadLetter
-        (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload,
-         CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
-    SELECT
-        SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload,
-        CreatedAtUtc, RetryCount, SYSUTCDATETIME(), @LastError
-    FROM dbo.Outbox WITH (ROWLOCK, READPAST)
-    WHERE RetryCount >= @MaxRetryCount
-      AND (LeasedUntilUtc IS NULL OR LeasedUntilUtc < SYSUTCDATETIME());
-
     DELETE o
-    FROM   dbo.Outbox o
-    WHERE  RetryCount >= @MaxRetryCount
-      AND  (LeasedUntilUtc IS NULL OR LeasedUntilUtc < SYSUTCDATETIME());
+    OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
+           deleted.EventType, deleted.Headers, deleted.Payload,
+           deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
+    INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
+         Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
+    FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
+    WHERE o.RetryCount >= @MaxRetryCount
+      AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME());
 
 COMMIT TRANSACTION;";
 

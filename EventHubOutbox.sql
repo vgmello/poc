@@ -304,6 +304,13 @@ WHERE  o.LeaseOwner = @PublisherId;
 -- ---------------------------------------------------------------------------
 -- 4e. Dead-letter sweep — move poison messages to dbo.OutboxDeadLetter.
 --
+-- Uses DELETE...OUTPUT INTO instead of separate INSERT + DELETE so that the
+-- set of rows removed from dbo.Outbox is guaranteed to be exactly the set
+-- inserted into dbo.OutboxDeadLetter. The previous INSERT + DELETE pattern
+-- was not atomic: INSERT used READPAST (skipping locked rows) but DELETE
+-- did not, so they could operate on different row sets — risking data loss
+-- (row deleted without being dead-lettered) or duplicates under concurrency.
+--
 -- Runs periodically (every @DeadLetterSweepIntervalSeconds, default 60s).
 -- Also called directly by the publisher when it detects RetryCount >= @MaxRetryCount
 -- during its own processing loop (belt-and-suspenders against the sweep).
@@ -318,20 +325,15 @@ DECLARE @LastError     NVARCHAR(2000) = NULL;
 
 BEGIN TRANSACTION;
 
-    INSERT INTO dbo.OutboxDeadLetter
-        (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload,
-         CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
-    SELECT
-        SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload,
-        CreatedAtUtc, RetryCount, SYSUTCDATETIME(), @LastError
-    FROM dbo.Outbox WITH (ROWLOCK, READPAST)
-    WHERE RetryCount >= @MaxRetryCount
-      AND (LeasedUntilUtc IS NULL OR LeasedUntilUtc < SYSUTCDATETIME());
-
     DELETE o
-    FROM   dbo.Outbox o
-    WHERE  RetryCount >= @MaxRetryCount
-      AND  (LeasedUntilUtc IS NULL OR LeasedUntilUtc < SYSUTCDATETIME());
+    OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
+           deleted.EventType, deleted.Headers, deleted.Payload,
+           deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
+    INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
+         Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
+    FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
+    WHERE o.RetryCount >= @MaxRetryCount
+      AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME());
 
 COMMIT TRANSACTION;
 */
