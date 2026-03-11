@@ -743,19 +743,19 @@ WHERE  OwnerProducerId = @ProducerId
     private async Task PublishBatchAsync(
         IReadOnlyList<OutboxRow> rows, string? lastError, CancellationToken ct)
     {
-        var byTopic = rows.GroupBy(r => r.TopicName);
+        var byTopicAndKey = rows.GroupBy(r => (r.TopicName, r.PartitionKey));
         var published = new List<long>(rows.Count);
 
-        foreach (var topicGroup in byTopic)
+        foreach (var group in byTopicAndKey)
         {
-            string topicName = topicGroup.Key;
+            string topicName = group.Key.TopicName;
+            string partitionKey = group.Key.PartitionKey;
             try
             {
                 EventHubProducerClient producer = await GetOrCreateProducerAsync(topicName, ct)
                     .ConfigureAwait(false);
 
-                // Split into size-bounded batches.
-                var batches = await BuildEventHubBatchesAsync(producer, topicGroup, ct)
+                var batches = await BuildEventHubBatchesAsync(producer, partitionKey, group, ct)
                     .ConfigureAwait(false);
 
                 foreach ((EventDataBatch eventBatch, List<long> batchSequenceNumbers) in batches)
@@ -772,16 +772,14 @@ WHERE  OwnerProducerId = @ProducerId
                         }
                         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                         {
-                            // EventHub send timed out. Leave rows leased; they will be recovered.
-                            OnError($"EventHub send timeout for topic '{topicName}'", null);
+                            OnError($"EventHub send timeout for topic '{topicName}' key '{partitionKey}'", null);
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                // EventHub errors for this topic do not affect other topics.
-                OnError($"EventHub publish error for topic '{topicName}'", ex);
+                OnError($"EventHub publish error for topic '{topicName}' key '{partitionKey}'", ex);
             }
         }
 
@@ -800,13 +798,19 @@ WHERE  OwnerProducerId = @ProducerId
     /// </summary>
     private async Task<List<(EventDataBatch Batch, List<long> SequenceNumbers)>> BuildEventHubBatchesAsync(
         EventHubProducerClient producer,
+        string partitionKey,
         IEnumerable<OutboxRow> rows,
         CancellationToken ct)
     {
         var result = new List<(EventDataBatch, List<long>)>();
+        var batchOptions = new CreateBatchOptions
+        {
+            MaximumSizeInBytes = _options.EventHubMaxBatchBytes,
+            PartitionKey = partitionKey
+        };
 
         EventDataBatch? currentBatch = await producer
-            .CreateBatchAsync(new CreateBatchOptions { MaximumSizeInBytes = _options.EventHubMaxBatchBytes }, ct)
+            .CreateBatchAsync(batchOptions, ct)
             .ConfigureAwait(false);
         var currentIds = new List<long>();
 
@@ -823,7 +827,7 @@ WHERE  OwnerProducerId = @ProducerId
                     currentBatch.Dispose();
 
                 currentBatch = await producer
-                    .CreateBatchAsync(new CreateBatchOptions { MaximumSizeInBytes = _options.EventHubMaxBatchBytes }, ct)
+                    .CreateBatchAsync(batchOptions, ct)
                     .ConfigureAwait(false);
                 currentIds = new List<long>();
 
