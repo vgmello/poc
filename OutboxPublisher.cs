@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
-using System.Data.SqlClient;
+using Microsoft.Data.SqlClient;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -60,8 +60,8 @@ public sealed class OutboxPublisher : IAsyncDisposable
     private readonly SemaphoreSlim _partitionLock = new(1, 1);
 
     // Adaptive backoff state for the primary poll loop.
-    private int _consecutiveEmptyPolls = 0;
-    private int _currentPollIntervalMs;
+    private volatile int _consecutiveEmptyPolls = 0;
+    private volatile int _currentPollIntervalMs;
 
     private bool _disposed;
 
@@ -97,12 +97,19 @@ public sealed class OutboxPublisher : IAsyncDisposable
     /// </summary>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
+        if (_options.PartitionGracePeriodSeconds <= _options.LeaseDurationSeconds)
+            throw new InvalidOperationException(
+                $"PartitionGracePeriodSeconds ({_options.PartitionGracePeriodSeconds}) must exceed LeaseDurationSeconds ({_options.LeaseDurationSeconds}) to prevent ordering violations during partition handover.");
+
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
         await RegisterProducerAsync(_cts.Token).ConfigureAwait(false);
 
-        // Discover the total partition count from the table and claim initial share.
         _totalPartitionCount = await GetTotalPartitionCountAsync(_cts.Token).ConfigureAwait(false);
+        if (_totalPartitionCount == 0)
+            throw new InvalidOperationException(
+                "dbo.OutboxPartitions is empty. Run the partition initialisation script (EventHubOutbox.sql §6a) before starting publishers.");
+
         await RebalanceAsync(_cts.Token).ConfigureAwait(false);
 
         _heartbeatLoop = HeartbeatLoopAsync(_cts.Token);
@@ -120,14 +127,19 @@ public sealed class OutboxPublisher : IAsyncDisposable
     {
         _cts.Cancel();
 
-        await Task.WhenAll(
-            _publishLoop,
-            _recoveryLoop,
-            _heartbeatLoop,
-            _deadLetterSweepLoop,
-            _rebalanceLoop).ConfigureAwait(false);
-
-        await UnregisterProducerAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await Task.WhenAll(
+                _publishLoop,
+                _recoveryLoop,
+                _heartbeatLoop,
+                _deadLetterSweepLoop,
+                _rebalanceLoop).ConfigureAwait(false);
+        }
+        finally
+        {
+            await UnregisterProducerAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -521,7 +533,7 @@ COMMIT TRANSACTION;";
     private async Task RegisterProducerAsync(CancellationToken ct)
     {
         const string sql = @"
-MERGE dbo.OutboxProducers AS target
+MERGE dbo.OutboxProducers WITH (HOLDLOCK) AS target
 USING (SELECT @ProducerId AS ProducerId, @HostName AS HostName) AS source
     ON target.ProducerId = source.ProducerId
 WHEN MATCHED THEN
