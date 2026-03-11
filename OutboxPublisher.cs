@@ -64,7 +64,9 @@ public sealed class OutboxPublisher : IAsyncDisposable
     private volatile int _consecutiveEmptyPolls = 0;
     private volatile int _currentPollIntervalMs;
 
-    // Last known error per topic, for dead-letter diagnostics.
+    // Last known publish error, for dead-letter diagnostics.
+    // Limitation: this is a global singleton, not per-row. Under concurrent multi-topic
+    // publishing, the error may not correspond to the specific row being dead-lettered.
     private volatile string? _lastPublishError;
 
     // Circuit breaker: tracks consecutive failures per topic.
@@ -606,19 +608,15 @@ COMMIT TRANSACTION;";
     {
         const string sql = @"
 BEGIN TRANSACTION;
-    INSERT INTO dbo.OutboxDeadLetter
-        (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload,
-         CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
-    SELECT
-        SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload,
-        CreatedAtUtc, RetryCount, SYSUTCDATETIME(), @LastError
-    FROM dbo.Outbox
-    WHERE SequenceNumber = @SequenceNumber
-      AND LeaseOwner = @PublisherId;
-
-    DELETE FROM dbo.Outbox
-    WHERE  SequenceNumber = @SequenceNumber
-      AND  LeaseOwner     = @PublisherId;
+    DELETE o
+    OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
+           deleted.EventType, deleted.Headers, deleted.Payload,
+           deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
+    INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
+         Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
+    FROM dbo.Outbox o
+    WHERE o.SequenceNumber = @SequenceNumber
+      AND o.LeaseOwner = @PublisherId;
 COMMIT TRANSACTION;";
 
         await using var conn = new SqlConnection(_connectionString);

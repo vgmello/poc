@@ -345,7 +345,7 @@ COMMIT TRANSACTION;
 DECLARE @ProducerId NVARCHAR(128) = N'publisher-01';
 DECLARE @HostName   NVARCHAR(256) = N'app-server-01';
 
-MERGE dbo.OutboxProducers AS target
+MERGE dbo.OutboxProducers WITH (HOLDLOCK) AS target
 USING (SELECT @ProducerId AS ProducerId, @HostName AS HostName) AS source
     ON target.ProducerId = source.ProducerId
 WHEN MATCHED THEN
