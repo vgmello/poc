@@ -402,6 +402,13 @@ DECLARE @ProducerId NVARCHAR(128) = N'publisher-01';
 UPDATE dbo.OutboxProducers
 SET    LastHeartbeatUtc = SYSUTCDATETIME()
 WHERE  ProducerId = @ProducerId;
+
+-- If a rebalance marked our partitions with a grace window while we were
+-- briefly unresponsive, clear it now that we are heartbeating again.
+UPDATE dbo.OutboxPartitions
+SET    GraceExpiresUtc = NULL
+WHERE  OwnerProducerId = @ProducerId
+  AND  GraceExpiresUtc IS NOT NULL;
 */
 
 -- ---------------------------------------------------------------------------

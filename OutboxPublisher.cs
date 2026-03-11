@@ -242,8 +242,31 @@ public sealed class OutboxPublisher : IAsyncDisposable
                 await DelayAsync(_options.RecoveryPollIntervalMs, ct).ConfigureAwait(false);
 
                 IReadOnlyList<OutboxRow> batch = await LeaseExpiredBatchAsync(ct).ConfigureAwait(false);
-                if (batch.Count > 0)
-                    await PublishBatchAsync(batch, ct).ConfigureAwait(false);
+                if (batch.Count == 0)
+                    continue;
+
+                // Inline dead-letter: rows that have exhausted retries should be
+                // moved immediately rather than waiting for the background sweep.
+                var poison = batch.Where(r => r.RetryCount >= _options.MaxRetryCount).ToList();
+                foreach (var row in poison)
+                {
+                    try
+                    {
+                        await DeadLetterSingleRowAsync(row, _lastPublishError ?? "MaxRetryCount exceeded", ct)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        OnError($"InlineDeadLetter(Seq={row.SequenceNumber})", ex);
+                    }
+                }
+
+                var publishable = poison.Count > 0
+                    ? batch.Where(r => r.RetryCount < _options.MaxRetryCount).ToList()
+                    : batch;
+
+                if (publishable.Count > 0)
+                    await PublishBatchAsync(publishable, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -495,7 +518,8 @@ OUTPUT inserted.SequenceNumber,
        inserted.PartitionKey,
        inserted.EventType,
        inserted.Headers,
-       inserted.Payload;";
+       inserted.Payload,
+       inserted.RetryCount;";
 
         return await ExecuteLeaseQueryAsync(sql, incrementRetry: true, ct).ConfigureAwait(false);
     }
@@ -526,6 +550,7 @@ OUTPUT inserted.SequenceNumber,
 
                 var rows = new List<OutboxRow>();
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                bool hasRetryCount = reader.FieldCount > 6;
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
                     rows.Add(new OutboxRow(
@@ -534,7 +559,8 @@ OUTPUT inserted.SequenceNumber,
                         PartitionKey: reader.GetString(2),
                         EventType: reader.GetString(3),
                         Headers: reader.IsDBNull(4) ? null : reader.GetString(4),
-                        Payload: reader.GetString(5)));
+                        Payload: reader.GetString(5),
+                        RetryCount: hasRetryCount ? reader.GetInt32(6) : 0));
                 }
 
                 return rows;
@@ -602,19 +628,30 @@ FROM   dbo.Outbox o
 INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
 WHERE  o.LeaseOwner = @PublisherId;";
 
-        await using var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(ct).ConfigureAwait(false);
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await using var conn = new SqlConnection(_connectionString);
+                await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        await using var cmd = new SqlCommand(sql, conn);
-        cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
-        cmd.Parameters.AddWithValue("@PublisherId", _producerId);
+                await using var cmd = new SqlCommand(sql, conn);
+                cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
+                cmd.Parameters.AddWithValue("@PublisherId", _producerId);
 
-        var tvp = BuildSequenceNumberTvp(sequenceNumbers);
-        var tvpParam = cmd.Parameters.AddWithValue("@Ids", tvp);
-        tvpParam.SqlDbType = SqlDbType.Structured;
-        tvpParam.TypeName = "dbo.SequenceNumberList";
+                var tvp = BuildSequenceNumberTvp(sequenceNumbers);
+                var tvpParam = cmd.Parameters.AddWithValue("@Ids", tvp);
+                tvpParam.SqlDbType = SqlDbType.Structured;
+                tvpParam.TypeName = "dbo.SequenceNumberList";
 
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                return;
+            }
+            catch (SqlException ex) when (IsTransientSqlError(ex) && attempt < 3)
+            {
+                await Task.Delay(50 * attempt, ct).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>
@@ -625,19 +662,15 @@ WHERE  o.LeaseOwner = @PublisherId;";
     private async Task SweepDeadLettersAsync(string? lastError, CancellationToken ct)
     {
         const string sql = @"
-BEGIN TRANSACTION;
-
-    DELETE o
-    OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
-           deleted.EventType, deleted.Headers, deleted.Payload,
-           deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
-    INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
-         Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
-    FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
-    WHERE o.RetryCount >= @MaxRetryCount
-      AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME());
-
-COMMIT TRANSACTION;";
+DELETE o
+OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
+       deleted.EventType, deleted.Headers, deleted.Payload,
+       deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
+INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
+     Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
+FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
+WHERE o.RetryCount >= @MaxRetryCount
+  AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME());";
 
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct).ConfigureAwait(false);
@@ -659,17 +692,15 @@ COMMIT TRANSACTION;";
     private async Task DeadLetterSingleRowAsync(OutboxRow row, string reason, CancellationToken ct)
     {
         const string sql = @"
-BEGIN TRANSACTION;
-    DELETE o
-    OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
-           deleted.EventType, deleted.Headers, deleted.Payload,
-           deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
-    INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
-         Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
-    FROM dbo.Outbox o
-    WHERE o.SequenceNumber = @SequenceNumber
-      AND o.LeaseOwner = @PublisherId;
-COMMIT TRANSACTION;";
+DELETE o
+OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
+       deleted.EventType, deleted.Headers, deleted.Payload,
+       deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
+INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
+     Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
+FROM dbo.Outbox o
+WHERE o.SequenceNumber = @SequenceNumber
+  AND o.LeaseOwner = @PublisherId;";
 
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct).ConfigureAwait(false);
@@ -713,7 +744,14 @@ WHEN NOT MATCHED THEN
         const string sql = @"
 UPDATE dbo.OutboxProducers
 SET    LastHeartbeatUtc = SYSUTCDATETIME()
-WHERE  ProducerId = @ProducerId;";
+WHERE  ProducerId = @ProducerId;
+
+-- If a rebalance marked our partitions with a grace window while we were
+-- briefly unresponsive, clear it now that we are heartbeating again.
+UPDATE dbo.OutboxPartitions
+SET    GraceExpiresUtc = NULL
+WHERE  OwnerProducerId = @ProducerId
+  AND  GraceExpiresUtc IS NOT NULL;";
 
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct).ConfigureAwait(false);
@@ -727,26 +765,33 @@ WHERE  ProducerId = @ProducerId;";
 
     private async Task UnregisterProducerAsync(CancellationToken ct)
     {
-        const string sql = @"
-BEGIN TRANSACTION;
-    UPDATE dbo.OutboxPartitions
-    SET    OwnerProducerId = NULL,
-           OwnedSinceUtc  = NULL,
-           GraceExpiresUtc = NULL
-    WHERE  OwnerProducerId = @ProducerId;
+        const string releaseSql = @"
+UPDATE dbo.OutboxPartitions
+SET    OwnerProducerId = NULL,
+       OwnedSinceUtc  = NULL,
+       GraceExpiresUtc = NULL
+WHERE  OwnerProducerId = @ProducerId;";
 
-    DELETE FROM dbo.OutboxProducers
-    WHERE  ProducerId = @ProducerId;
-COMMIT TRANSACTION;";
+        const string deleteSql = @"
+DELETE FROM dbo.OutboxProducers
+WHERE  ProducerId = @ProducerId;";
 
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        await using var cmd = new SqlCommand(sql, conn);
-        cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
-        cmd.Parameters.AddWithValue("@ProducerId", _producerId);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
 
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        await using var releaseCmd = new SqlCommand(releaseSql, conn, tx);
+        releaseCmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
+        releaseCmd.Parameters.AddWithValue("@ProducerId", _producerId);
+        await releaseCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        await using var deleteCmd = new SqlCommand(deleteSql, conn, tx);
+        deleteCmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
+        deleteCmd.Parameters.AddWithValue("@ProducerId", _producerId);
+        await deleteCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        await tx.CommitAsync(ct).ConfigureAwait(false);
     }
 
     private async Task<int> GetTotalPartitionCountAsync(CancellationToken ct)
@@ -1026,7 +1071,7 @@ WHERE  OwnerProducerId = @ProducerId
         return result;
     }
 
-    private static EventData BuildEventData(OutboxRow row)
+    private EventData BuildEventData(OutboxRow row)
     {
         byte[] body = System.Text.Encoding.UTF8.GetBytes(row.Payload);
         var eventData = new EventData(body);
@@ -1104,7 +1149,10 @@ WHERE  OwnerProducerId = @ProducerId
             {
                 if (DateTime.UtcNow < openUntil)
                     return true;
-                // Half-open: allow one attempt
+                // Half-open: allow one probe attempt.
+                // NOTE: both the primary PublishLoop and RecoveryLoop may
+                // concurrently see the circuit as closed and send for the
+                // same topic, so the "single probe" guarantee is approximate.
                 _topicCircuitOpenUntil.Remove(topicName);
             }
             return false;
@@ -1281,4 +1329,5 @@ internal sealed record OutboxRow(
     string PartitionKey,
     string EventType,
     string? Headers,
-    string Payload);
+    string Payload,
+    int RetryCount = 0);
