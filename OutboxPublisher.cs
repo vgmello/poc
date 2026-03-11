@@ -64,6 +64,9 @@ public sealed class OutboxPublisher : IAsyncDisposable
     private volatile int _consecutiveEmptyPolls = 0;
     private volatile int _currentPollIntervalMs;
 
+    // Last known error per topic, for dead-letter diagnostics.
+    private volatile string? _lastPublishError;
+
     // Circuit breaker: tracks consecutive failures per topic.
     private readonly Dictionary<string, int> _topicFailureCount = new();
     private readonly Dictionary<string, DateTime> _topicCircuitOpenUntil = new();
@@ -403,7 +406,7 @@ WHERE  OwnerProducerId = @OwnerId
             try
             {
                 await DelayAsync(_options.DeadLetterSweepIntervalMs, ct).ConfigureAwait(false);
-                await SweepDeadLettersAsync(lastError: null, ct).ConfigureAwait(false);
+                await SweepDeadLettersAsync(lastError: _lastPublishError, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -888,6 +891,7 @@ WHERE  OwnerProducerId = @ProducerId
                         }
                         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                         {
+                            _lastPublishError = $"[{topicName}/{partitionKey}] EventHub send timeout";
                             OnError($"EventHub send timeout for topic '{topicName}' key '{partitionKey}'", null);
                             RecordSendFailure(topicName);
                         }
@@ -896,6 +900,7 @@ WHERE  OwnerProducerId = @ProducerId
             }
             catch (Exception ex)
             {
+                _lastPublishError = $"[{topicName}/{partitionKey}] {ex.GetType().Name}: {ex.Message}";
                 OnError($"EventHub publish error for topic '{topicName}' key '{partitionKey}'", ex);
                 RecordSendFailure(topicName);
             }
