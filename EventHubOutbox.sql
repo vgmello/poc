@@ -113,7 +113,7 @@ GO
 -- ---------------------------------------------------------------------------
 CREATE NONCLUSTERED INDEX IX_Outbox_Unleased
 ON dbo.Outbox (SequenceNumber)
-INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload)
+INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
 WHERE LeasedUntilUtc IS NULL;
 GO
 
@@ -124,19 +124,8 @@ GO
 -- ---------------------------------------------------------------------------
 CREATE NONCLUSTERED INDEX IX_Outbox_LeaseExpiry
 ON dbo.Outbox (LeasedUntilUtc, SequenceNumber)
-INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload)
+INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
 WHERE LeasedUntilUtc IS NOT NULL;
-GO
-
--- ---------------------------------------------------------------------------
--- Partition affinity poll: "give me unleased rows for this PartitionKey"
--- The leading PartitionKey column allows an equality/IN seek per owned
--- partition bucket when the publisher operates in affinity mode.
--- ---------------------------------------------------------------------------
-CREATE NONCLUSTERED INDEX IX_Outbox_Partition
-ON dbo.Outbox (PartitionKey, SequenceNumber)
-INCLUDE (TopicName, EventType, Headers, Payload)
-WHERE LeasedUntilUtc IS NULL;
 GO
 
 -- =============================================================================
@@ -626,10 +615,10 @@ SELECT
     p.OwnedSinceUtc,
     p.GraceExpiresUtc,
     CASE
-        WHEN p.GraceExpiresUtc IS NOT NULL
-             AND p.GraceExpiresUtc > SYSUTCDATETIME() THEN 'IN_GRACE'
         WHEN p.OwnerProducerId IS NULL THEN 'UNOWNED'
         WHEN pr.ProducerId IS NULL THEN 'ORPHANED'
+        WHEN p.GraceExpiresUtc IS NOT NULL
+             AND p.GraceExpiresUtc > SYSUTCDATETIME() THEN 'IN_GRACE'
         ELSE 'OWNED'
     END AS Status
 FROM dbo.OutboxPartitions p

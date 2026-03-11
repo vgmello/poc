@@ -140,7 +140,7 @@ A publisher that owns partition P processes only rows whose `PartitionKey` hashe
 1. **Stale detection** — Identify partitions whose owner has not heartbeated within `@HeartbeatTimeoutSeconds`.
 2. **Grace period** — Set `GraceExpiresUtc = SYSUTCDATETIME() + @PartitionGracePeriodSeconds` on the stale partition. This prevents the new owner from starting before in-flight leases held by the old owner can expire.
 3. **Claim** — After the grace period elapses, any publisher can claim the partition via an optimistic CAS update (`UPDATE ... WHERE OwnerProducerId = @OldOwner OR GraceExpiresUtc < SYSUTCDATETIME()`).
-4. **Fair-share** — Each publisher claims `FLOOR(TotalPartitions / ActiveProducers)` partitions. Publishers with more than their fair share release excess partitions (mark them as stealable by setting `OwnerProducerId = NULL`).
+4. **Fair-share** — Each publisher claims `CEILING(TotalPartitions / ActiveProducers)` partitions. Publishers with more than their fair share release excess partitions (mark them as stealable by setting `OwnerProducerId = NULL`).
 
 ### Orphan sweep
 
@@ -370,7 +370,7 @@ Used for batch deletes with proper cardinality estimates (replaces `OPENJSON` wh
 ```sql
 CREATE NONCLUSTERED INDEX IX_Outbox_Unleased
 ON dbo.Outbox (SequenceNumber)
-INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload)
+INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
 WHERE LeasedUntilUtc IS NULL;
 ```
 
@@ -381,7 +381,7 @@ Filtered on `LeasedUntilUtc IS NULL`. Covers all columns needed by the primary p
 ```sql
 CREATE NONCLUSTERED INDEX IX_Outbox_LeaseExpiry
 ON dbo.Outbox (LeasedUntilUtc, SequenceNumber)
-INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload)
+INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
 WHERE LeasedUntilUtc IS NOT NULL;
 ```
 
@@ -395,18 +395,7 @@ Filtered on `LeasedUntilUtc IS NOT NULL`, leading on `LeasedUntilUtc`. Enables e
 | UPDATE (lease) | modify | −1 | +1 |
 | DELETE | −1 | — | −1 |
 
-**Total: 6 index operations per message.** Acceptable for most workloads. Profile at >10K msg/sec.
-
-### `IX_Outbox_Partition` — partition affinity poll path
-
-```sql
-CREATE NONCLUSTERED INDEX IX_Outbox_Partition
-ON dbo.Outbox (PartitionKey, SequenceNumber)
-INCLUDE (TopicName, EventType, Headers, Payload)
-WHERE LeasedUntilUtc IS NULL;
-```
-
-Used when the publisher polls for a specific set of partition keys (affinity mode). The leading `PartitionKey` column enables an equality or range seek per owned partition hash bucket.
+**Total: 4 index operations per message.** Acceptable for most workloads. Profile at >10K msg/sec.
 
 ---
 
@@ -478,9 +467,9 @@ SELECT
     pr.HostName,
     p.OwnedSinceUtc,
     p.GraceExpiresUtc,
-    CASE WHEN p.GraceExpiresUtc > SYSUTCDATETIME() THEN 'IN_GRACE'
-         WHEN p.OwnerProducerId IS NULL THEN 'UNOWNED'
+    CASE WHEN p.OwnerProducerId IS NULL THEN 'UNOWNED'
          WHEN pr.ProducerId IS NULL THEN 'ORPHANED'
+         WHEN p.GraceExpiresUtc > SYSUTCDATETIME() THEN 'IN_GRACE'
          ELSE 'OWNED'
     END AS Status
 FROM dbo.OutboxPartitions p
