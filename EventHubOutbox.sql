@@ -553,13 +553,38 @@ WHERE  OwnerProducerId = @ProducerId
 --     Any publisher can claim an unowned partition and process its rows.
 -- ---------------------------------------------------------------------------
 /*
--- Step 1: identify unowned partitions that have rows in the outbox
-SELECT DISTINCT
-    op.PartitionId
-FROM dbo.OutboxPartitions op
-WHERE op.OwnerProducerId IS NULL
-   OR (op.GraceExpiresUtc IS NOT NULL AND op.GraceExpiresUtc < SYSUTCDATETIME())
--- Step 2: claim them (use query 6b with the result of step 1)
+DECLARE @ProducerId              NVARCHAR(128) = N'publisher-01';
+DECLARE @HeartbeatTimeoutSeconds INT           = 30;
+
+DECLARE @TotalPartitions   INT;
+DECLARE @ActiveProducers   INT;
+DECLARE @FairShare         INT;
+DECLARE @CurrentlyOwned    INT;
+DECLARE @ToAcquire         INT;
+
+SELECT @TotalPartitions = COUNT(*) FROM dbo.OutboxPartitions;
+
+SELECT @ActiveProducers = COUNT(*)
+FROM dbo.OutboxProducers
+WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME());
+
+SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActiveProducers, 0));
+
+SELECT @CurrentlyOwned = COUNT(*)
+FROM dbo.OutboxPartitions
+WHERE OwnerProducerId = @ProducerId;
+
+SET @ToAcquire = @FairShare - @CurrentlyOwned;
+
+-- Only claim partitions that are truly unowned (NULL owner)
+IF @ToAcquire > 0
+BEGIN
+    UPDATE TOP (@ToAcquire) dbo.OutboxPartitions WITH (UPDLOCK)
+    SET    OwnerProducerId = @ProducerId,
+           OwnedSinceUtc   = SYSUTCDATETIME(),
+           GraceExpiresUtc = NULL
+    WHERE  OwnerProducerId IS NULL;
+END;
 */
 
 -- =============================================================================

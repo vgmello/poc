@@ -53,6 +53,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
     private Task _heartbeatLoop = Task.CompletedTask;
     private Task _deadLetterSweepLoop = Task.CompletedTask;
     private Task _rebalanceLoop = Task.CompletedTask;
+    private Task _orphanSweepLoop = Task.CompletedTask;
 
     // Current owned partition IDs. Refreshed after each rebalance.
     private IReadOnlyList<int> _ownedPartitions = Array.Empty<int>();
@@ -117,6 +118,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
         _publishLoop = PublishLoopAsync(_cts.Token);
         _recoveryLoop = RecoveryLoopAsync(_cts.Token);
         _deadLetterSweepLoop = DeadLetterSweepLoopAsync(_cts.Token);
+        _orphanSweepLoop = OrphanSweepLoopAsync(_cts.Token);
     }
 
     /// <summary>
@@ -134,7 +136,8 @@ public sealed class OutboxPublisher : IAsyncDisposable
                 _recoveryLoop,
                 _heartbeatLoop,
                 _deadLetterSweepLoop,
-                _rebalanceLoop).ConfigureAwait(false);
+                _rebalanceLoop,
+                _orphanSweepLoop).ConfigureAwait(false);
         }
         finally
         {
@@ -288,6 +291,99 @@ public sealed class OutboxPublisher : IAsyncDisposable
             {
                 OnError("RebalanceLoop", ex);
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Orphan sweep loop
+    // -------------------------------------------------------------------------
+
+    private async Task OrphanSweepLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await DelayAsync(_options.OrphanSweepIntervalMs, ct).ConfigureAwait(false);
+                await ClaimOrphanPartitionsAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                OnError("OrphanSweepLoop", ex);
+            }
+        }
+    }
+
+    private async Task ClaimOrphanPartitionsAsync(CancellationToken ct)
+    {
+        const string sql = @"
+DECLARE @TotalPartitions   INT;
+DECLARE @ActiveProducers   INT;
+DECLARE @FairShare         INT;
+DECLARE @CurrentlyOwned    INT;
+DECLARE @ToAcquire         INT;
+
+SELECT @TotalPartitions = COUNT(*) FROM dbo.OutboxPartitions;
+
+SELECT @ActiveProducers = COUNT(*)
+FROM dbo.OutboxProducers
+WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME());
+
+SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActiveProducers, 0));
+
+SELECT @CurrentlyOwned = COUNT(*)
+FROM dbo.OutboxPartitions
+WHERE OwnerProducerId = @ProducerId;
+
+SET @ToAcquire = @FairShare - @CurrentlyOwned;
+
+IF @ToAcquire > 0
+BEGIN
+    UPDATE TOP (@ToAcquire) dbo.OutboxPartitions WITH (UPDLOCK)
+    SET    OwnerProducerId = @ProducerId,
+           OwnedSinceUtc   = SYSUTCDATETIME(),
+           GraceExpiresUtc = NULL
+    WHERE  OwnerProducerId IS NULL;
+END;";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
+        cmd.Parameters.AddWithValue("@ProducerId", _producerId);
+        cmd.Parameters.AddWithValue("@HeartbeatTimeoutSeconds", _options.HeartbeatTimeoutSeconds);
+
+        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        // Refresh local partition list after claiming orphans.
+        const string getOwnedSql = @"
+SELECT PartitionId
+FROM   dbo.OutboxPartitions
+WHERE  OwnerProducerId = @OwnerId
+  AND  (GraceExpiresUtc IS NULL OR GraceExpiresUtc < SYSUTCDATETIME());";
+
+        var owned = new List<int>();
+        await using var cmd2 = new SqlCommand(getOwnedSql, conn);
+        cmd2.CommandTimeout = _options.SqlCommandTimeoutSeconds;
+        cmd2.Parameters.AddWithValue("@OwnerId", _producerId);
+
+        await using var reader = await cmd2.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            owned.Add(reader.GetInt32(0));
+
+        await _partitionLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            _ownedPartitions = owned;
+        }
+        finally
+        {
+            _partitionLock.Release();
         }
     }
 
@@ -1025,6 +1121,9 @@ public sealed class OutboxPublisherOptions
 
     /// <summary>How often to run the dead-letter sweep in milliseconds. Default: 60 000.</summary>
     public int DeadLetterSweepIntervalMs { get; set; } = 60_000;
+
+    /// <summary>How often to scan for rows in unowned partitions in milliseconds. Default: 60 000.</summary>
+    public int OrphanSweepIntervalMs { get; set; } = 60_000;
 
     /// <summary>How often to run the rebalance check in milliseconds. Default: 30 000.</summary>
     public int RebalanceIntervalMs { get; set; } = 30_000;
