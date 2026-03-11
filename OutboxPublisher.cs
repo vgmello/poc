@@ -804,47 +804,59 @@ WHERE  OwnerProducerId = @ProducerId
             PartitionKey = partitionKey
         };
 
-        EventDataBatch? currentBatch = await producer
-            .CreateBatchAsync(batchOptions, ct)
-            .ConfigureAwait(false);
+        EventDataBatch? currentBatch = null;
         var currentIds = new List<long>();
 
-        foreach (var row in rows)
+        try
         {
-            EventData eventData = BuildEventData(row);
+            currentBatch = await producer
+                .CreateBatchAsync(batchOptions, ct)
+                .ConfigureAwait(false);
 
-            if (!currentBatch.TryAdd(eventData))
+            foreach (var row in rows)
             {
-                // Current batch is full. Save it and open a new one.
-                if (currentBatch.Count > 0)
-                    result.Add((currentBatch, currentIds));
-                else
-                    currentBatch.Dispose();
-
-                currentBatch = await producer
-                    .CreateBatchAsync(batchOptions, ct)
-                    .ConfigureAwait(false);
-                currentIds = new List<long>();
+                EventData eventData = BuildEventData(row);
 
                 if (!currentBatch.TryAdd(eventData))
                 {
-                    // The message is too large even for an empty batch — it can never be
-                    // published. Dead-letter it directly (not via sweep) so it is removed
-                    // from dbo.Outbox immediately and does not burn future retry cycles.
-                    await DeadLetterSingleRowAsync(row,
-                        $"Message SequenceNumber={row.SequenceNumber} exceeds EventHub max batch size ({_options.EventHubMaxBatchBytes} bytes)",
-                        ct).ConfigureAwait(false);
-                    continue;
+                    if (currentBatch.Count > 0)
+                    {
+                        result.Add((currentBatch, currentIds));
+                        currentBatch = null;
+                    }
+                    else
+                    {
+                        currentBatch.Dispose();
+                        currentBatch = null;
+                    }
+
+                    currentBatch = await producer
+                        .CreateBatchAsync(batchOptions, ct)
+                        .ConfigureAwait(false);
+                    currentIds = new List<long>();
+
+                    if (!currentBatch.TryAdd(eventData))
+                    {
+                        await DeadLetterSingleRowAsync(row,
+                            $"Message SequenceNumber={row.SequenceNumber} exceeds EventHub max batch size ({_options.EventHubMaxBatchBytes} bytes)",
+                            ct).ConfigureAwait(false);
+                        continue;
+                    }
                 }
+
+                currentIds.Add(row.SequenceNumber);
             }
 
-            currentIds.Add(row.SequenceNumber);
+            if (currentBatch is not null && currentBatch.Count > 0)
+            {
+                result.Add((currentBatch, currentIds));
+                currentBatch = null;
+            }
         }
-
-        if (currentBatch.Count > 0)
-            result.Add((currentBatch, currentIds));
-        else
-            currentBatch.Dispose();
+        finally
+        {
+            currentBatch?.Dispose();
+        }
 
         return result;
     }
