@@ -74,6 +74,8 @@
 - **Poison message dead-lettering** — a `RetryCount` column and a `dbo.OutboxDeadLetter` table isolate persistently failing messages.
 - **TVP-based batch delete** — `dbo.SequenceNumberList` (a Table-Valued Parameter type) replaces `OPENJSON` for efficient, statistics-friendly batch deletes.
 - **Adaptive polling** — publishers back off exponentially on empty polls and reset on the first non-empty poll. This eliminates SQL Server load during idle periods without sacrificing low latency during bursts.
+- **Circuit breaker** — per-topic circuit breaker pauses publishing when EventHub is unavailable, preventing retry count burnout and unnecessary dead-lettering during outages.
+- **Orphan sweep** — a background loop claims unowned partitions (e.g., after a publisher crash) up to the publisher's fair share, preventing backlog buildup.
 
 ---
 
@@ -144,7 +146,7 @@ A publisher that owns partition P processes only rows whose `PartitionKey` hashe
 
 ### Orphan sweep
 
-Rows in the outbox whose `PartitionKey` maps to an unowned partition accumulate as orphans. A dedicated sweep query (runs every `@OrphanSweepIntervalSeconds`) claims orphan partitions and picks up their rows. This prevents backlog buildup during partial outages.
+Rows in the outbox whose `PartitionKey` maps to an unowned partition accumulate as orphans. A dedicated orphan sweep loop (runs every `@OrphanSweepIntervalSeconds`, default 60s) identifies partitions with `OwnerProducerId IS NULL` and claims them up to the publisher's fair share using `UPDATE TOP ... WITH (UPDLOCK)`. After claiming, the publisher refreshes its local partition list and begins processing the orphaned rows on its next poll cycle. This prevents backlog buildup during partial outages.
 
 ---
 
@@ -202,16 +204,15 @@ This wastes publisher cycles and can block progress on rows with higher sequence
 
 Each time the recovery path re-leases a row (not the primary path — fresh rows start at 0), the `RetryCount` is incremented.
 
-When `RetryCount >= @MaxRetryCount` (default: 5), the publisher:
-
-1. Inserts the row into `dbo.OutboxDeadLetter` (same columns plus `DeadLetteredAtUtc` and `LastError`).
-2. Deletes the row from `dbo.Outbox`.
+When `RetryCount >= @MaxRetryCount` (default: 5), the dead-letter sweep atomically deletes the row from `dbo.Outbox` and inserts it into `dbo.OutboxDeadLetter` using a single `DELETE ... OUTPUT INTO` statement. This guarantees the exact rows removed from the outbox are the same rows inserted into the dead-letter table, preventing data loss from concurrent operations.
 
 The dead-letter table is monitored separately and requires manual intervention (inspect, fix, replay, or discard).
 
 ### Dead-letter sweep
 
 A background sweep (runs every `@DeadLetterSweepIntervalSeconds`, default 60s) moves any rows that have exceeded `@MaxRetryCount` without being claimed by the publisher's own dead-letter path. This is a safety net for publishers that crash mid-sweep.
+
+The sweep uses `DELETE ... OUTPUT INTO` with `ROWLOCK, READPAST` hints to ensure atomicity and avoid blocking concurrent publishers. This replaces the earlier INSERT + DELETE pattern, which could operate on different row sets under concurrency.
 
 ### Retry count semantics
 
@@ -505,9 +506,9 @@ During an EventHub outage:
 - Leases expire; recovery path increments `RetryCount`.
 - After `@MaxRetryCount` retries, rows are dead-lettered.
 
-**Mitigation**: Set `@LeaseDurationSeconds` longer than the expected EventHub outage grace period. Consider pausing polling and surfacing the outage via health check rather than burning retry counts.
+**Mitigation**: A per-topic circuit breaker is implemented in `OutboxPublisher`. After `@CircuitBreakerFailureThreshold` consecutive send failures (default: 3), the circuit opens and the publisher skips batches for that topic for `@CircuitBreakerOpenDurationSeconds` (default: 30s). While the circuit is open, rows are not leased for that topic, so retry counts are not burned. After the open duration elapses, the circuit enters half-open state and allows one probe send. On success, the circuit closes and normal publishing resumes. On failure, the circuit re-opens.
 
-**Recommended**: Add an `OutboxPublisher.CircuitBreaker` that pauses publishing (but not leasing) when EventHub is unavailable, and resumes automatically when the circuit closes.
+This prevents dead-lettering during transient EventHub outages while preserving at-least-once delivery semantics.
 
 ### Publisher over-scaling (too many publishers relative to partitions)
 
@@ -603,3 +604,5 @@ Because of at-least-once delivery, **all event consumers must be idempotent**. T
 | `@DeadLetterSweepIntervalSeconds` | 60 | Safety-net dead-letter sweep interval. |
 | `@EventHubSendTimeoutSeconds` | 15 | Timeout for a single EventHub `SendAsync` call. |
 | `@EventHubMaxBatchBytes` | 1,048,576 | EventHub max batch size (1 MB). Publisher splits batches to stay under this limit. |
+| `@CircuitBreakerFailureThreshold` | 3 | Consecutive send failures before the circuit opens for a topic. |
+| `@CircuitBreakerOpenDurationSeconds` | 30 | Seconds to keep the circuit open before attempting a half-open probe. |
