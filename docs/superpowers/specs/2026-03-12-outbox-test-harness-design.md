@@ -9,6 +9,7 @@ A self-contained Dockerized test environment for the EventHub outbox pattern, ad
 ```
 test/
 ├── docker-compose.yml
+├── .env                            # SA_PASSWORD and shared config
 ├── init-db/
 │   └── init.sql                    # Outbox schema + seed OutboxPartitions
 ├── EventProducer/
@@ -34,8 +35,8 @@ test/
 | Service | Image | Purpose |
 |---------|-------|---------|
 | `sqlserver` | `mcr.microsoft.com/azure-sql-edge:latest` | ARM-compatible SQL Server, port 1433 |
-| `redpanda` | `redpandadata/redpanda:latest` | Kafka-compatible broker, port 9092 |
-| `sqlserver-init` | `mcr.microsoft.com/mssql-tools:latest` | Runs `init.sql` then exits |
+| `redpanda` | `redpandadata/redpanda:v24.2.7` | Kafka-compatible broker, port 9092 |
+| `sqlserver-init` | `mcr.microsoft.com/azure-sql-edge:latest` | Runs `init.sql` via `/opt/mssql-tools/bin/sqlcmd` then exits |
 | `event-producer` | Built from `EventProducer/Dockerfile` | Writes synthetic events to outbox |
 | `outbox-publisher` | Built from `OutboxPublisher/Dockerfile` | Leases and publishes to Redpanda |
 
@@ -43,11 +44,12 @@ test/
 
 - All services on a single bridge network (`outbox-net`), resolving by service name.
 - Platform: `linux/arm64` on all services.
-- SQL Edge healthcheck: `sqlcmd -S localhost -U sa -P <pwd> -Q "SELECT 1"`.
+- SQL Edge healthcheck: `/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P $SA_PASSWORD -Q "SELECT 1"`.
 - Redpanda healthcheck: `curl -f http://localhost:9644/v1/status/ready`.
-- `sqlserver-init` runs after `sqlserver` is healthy, executes `init.sql`, then exits.
-- App services depend on `sqlserver-init` (completed) and `redpanda` (healthy).
+- `sqlserver-init` reuses the `azure-sql-edge` image (ARM-compatible, includes `sqlcmd`). Runs after `sqlserver` is healthy via `depends_on: sqlserver: condition: service_healthy`. Executes `init.sql` then exits.
+- App services depend on `sqlserver-init` (`condition: service_completed_successfully`) and `redpanda` (`condition: service_healthy`).
 - App services use `restart: on-failure`.
+- Password is injected via `SA_PASSWORD` environment variable from `.env` file (not hardcoded in config).
 
 ### Dockerfiles
 
@@ -59,8 +61,8 @@ Multi-stage builds:
 
 Minimal types to avoid duplication between the two apps:
 
-- **`OutboxRow`** — Record matching the outbox table columns: `SequenceNumber`, `TopicName`, `PartitionKey`, `EventType`, `Headers`, `Payload`, `CreatedAtUtc`, `LeasedUntilUtc`, `LeaseOwner`, `RetryCount`.
-- **`DbHelpers`** — Static helper for creating `SqlConnection` with basic transient retry. Contains the `INSERT INTO dbo.Outbox` helper used by EventProducer.
+- **`OutboxRow`** — Record matching the columns returned by the lease query: `SequenceNumber`, `TopicName`, `PartitionKey`, `EventType`, `Headers`, `Payload`, `RetryCount`. Does not include `LeasedUntilUtc` or `LeaseOwner` since the publisher does not need them after acquiring the lease (matches the existing C# implementation).
+- **`DbHelpers`** — Static helper for creating `SqlConnection` with basic transient retry. Contains `InsertOutboxRowAsync(SqlConnection, string topicName, string partitionKey, string eventType, string? headers, string payload)` used by EventProducer.
 
 No abstractions or interfaces — plain data types and static methods.
 
@@ -81,9 +83,10 @@ Simple console app that inserts synthetic events into the outbox table on a conf
 
 ### Configuration
 
+Connection string uses `SA_PASSWORD` from environment variable:
+
 ```json
 {
-  "ConnectionString": "Server=sqlserver;Database=OutboxTest;User Id=sa;Password=<pwd>;TrustServerCertificate=true",
   "TopicName": "orders",
   "BatchSize": 5,
   "IntervalSeconds": 2,
@@ -108,17 +111,17 @@ New publisher class built on `Confluent.Kafka`, preserving the same outbox lease
 - Uses `IProducer<string, string>` from `Confluent.Kafka` instead of `EventHubProducerClient`.
 - `PartitionKey` maps to the Kafka message key (Redpanda handles partition routing).
 - `TopicName` maps directly to a Kafka topic.
-- No manual batch size management — messages produced individually with `ProduceAsync`, grouped by partition key for ordering.
-- `Headers` JSON is mapped to Kafka message headers.
-- `EventType` added as a header (`event-type`).
+- Messages are produced individually with `ProduceAsync`, grouped by partition key for ordering. All `ProduceAsync` calls for a `(TopicName, PartitionKey)` group are awaited and tracked. If any produce call fails, the entire group is not deleted from the outbox — preserving the all-or-nothing ordering invariant from the EventHub version. No Kafka transactions are needed; the invariant is maintained at the SQL delete layer, not the Kafka produce layer (same approach as EventHub).
+- `Headers` JSON is deserialized and mapped to Kafka message headers. Header values are UTF-8 encoded as `byte[]` via `Encoding.UTF8.GetBytes` (Kafka headers are `byte[]`, not strings). `EventType` is added as an `event-type` header alongside deserialized headers.
 - Circuit breaker logic retained — opens on consecutive produce failures per topic.
 - Dead-letter and lease SQL logic is identical, reused from existing implementation.
 
 ### Configuration
 
+Connection string uses `SA_PASSWORD` from environment variable:
+
 ```json
 {
-  "ConnectionString": "Server=sqlserver;Database=OutboxTest;User Id=sa;Password=<pwd>;TrustServerCertificate=true",
   "Kafka": {
     "BootstrapServers": "redpanda:9092"
   },
@@ -139,8 +142,12 @@ Reuses the existing outbox schema from `EventHubOutbox.sql`:
 - `dbo.Outbox` — Primary event buffer
 - `dbo.OutboxDeadLetter` — Poison message isolation
 - `dbo.OutboxProducers` — Heartbeat registry
-- `dbo.OutboxPartitions` — Partition affinity map (seeded with default partition count)
+- `dbo.OutboxPartitions` — Partition affinity map (publisher work-distribution buckets)
 - `dbo.SequenceNumberList` — TVP for batch deletes
 - All indexes from the existing schema
 
-The `init.sql` script creates the database, runs the schema, and seeds `OutboxPartitions` with an initial partition count (e.g., 8 partitions).
+The `init.sql` script creates the database, runs the schema, and seeds `OutboxPartitions` with 8 buckets. This count controls how work is distributed across publisher instances and is independent of Redpanda's topic partition count (which the broker manages separately).
+
+## Verification
+
+End-to-end verification is done by observing console logs from both apps and optionally consuming from Redpanda using `rpk topic consume orders` from the Redpanda container. A dedicated consumer component is out of scope for this test harness.
