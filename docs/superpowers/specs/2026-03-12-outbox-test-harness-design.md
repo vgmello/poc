@@ -12,6 +12,10 @@ test/
 ├── .env                            # SA_PASSWORD and shared config
 ├── init-db/
 │   └── init.sql                    # Outbox schema + seed OutboxPartitions
+├── DbInit/
+│   ├── DbInit.csproj
+│   ├── Program.cs
+│   └── Dockerfile
 ├── EventProducer/
 │   ├── EventProducer.csproj
 │   ├── Program.cs
@@ -20,6 +24,7 @@ test/
 ├── OutboxPublisher/
 │   ├── OutboxPublisher.csproj
 │   ├── Program.cs
+│   ├── KafkaOutboxPublisher.cs
 │   ├── Dockerfile
 │   └── appsettings.json
 └── Shared/
@@ -36,7 +41,7 @@ test/
 |---------|-------|---------|
 | `sqlserver` | `mcr.microsoft.com/azure-sql-edge:latest` | ARM-compatible SQL Server, port 1433 |
 | `redpanda` | `redpandadata/redpanda:v24.2.7` | Kafka-compatible broker, port 9092 |
-| `sqlserver-init` | `mcr.microsoft.com/azure-sql-edge:latest` | Runs `init.sql` via `/opt/mssql-tools/bin/sqlcmd` then exits |
+| `sqlserver-init` | Built from `DbInit/Dockerfile` | .NET console app that runs `init.sql` batches via `SqlConnection`, then exits |
 | `event-producer` | Built from `EventProducer/Dockerfile` | Writes synthetic events to outbox |
 | `outbox-publisher` | Built from `OutboxPublisher/Dockerfile` | Leases and publishes to Redpanda |
 
@@ -44,9 +49,9 @@ test/
 
 - All services on a single bridge network (`outbox-net`), resolving by service name.
 - Platform: `linux/arm64` on all services.
-- SQL Edge healthcheck: `/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P $SA_PASSWORD -Q "SELECT 1"`.
+- SQL Edge healthcheck: Python TCP socket check (`python3 -c "import socket; s=socket.create_connection(('localhost',1433), timeout=2); s.close()"`). Note: Azure SQL Edge ARM64 does not include `sqlcmd`.
 - Redpanda healthcheck: `curl -f http://localhost:9644/v1/status/ready`.
-- `sqlserver-init` reuses the `azure-sql-edge` image (ARM-compatible, includes `sqlcmd`). Runs after `sqlserver` is healthy via `depends_on: sqlserver: condition: service_healthy`. Executes `init.sql` then exits.
+- `sqlserver-init` is a .NET 10 console app (`DbInit`) that reads `init.sql`, splits on `GO` batch separators via regex, and executes each batch via `SqlConnection`. The first batch (CREATE DATABASE) runs against `master`; remaining batches run against `OutboxTest`. Runs after `sqlserver` is healthy via `depends_on: sqlserver: condition: service_healthy`, then exits.
 - App services depend on `sqlserver-init` (`condition: service_completed_successfully`) and `redpanda` (`condition: service_healthy`).
 - App services use `restart: on-failure`.
 - Password is injected via `SA_PASSWORD` environment variable from `.env` file (not hardcoded in config).
