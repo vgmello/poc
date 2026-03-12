@@ -470,23 +470,7 @@ COMMIT TRANSACTION;
 */
 
 -- ---------------------------------------------------------------------------
--- 6c. Get owned partitions — called before each poll cycle to refresh the
---     publisher's local partition set.
---
--- Parameters:
---   @ProducerId  NVARCHAR(128)
--- ---------------------------------------------------------------------------
-/*
-DECLARE @ProducerId NVARCHAR(128) = N'publisher-01';
-
-SELECT PartitionId
-FROM   dbo.OutboxPartitions
-WHERE  OwnerProducerId = @ProducerId
-  AND  (GraceExpiresUtc IS NULL OR GraceExpiresUtc < SYSUTCDATETIME());
-*/
-
--- ---------------------------------------------------------------------------
--- 6d. Orphan sweep — pick up rows belonging to unowned partitions.
+-- 6c. Orphan sweep — pick up rows belonging to unowned partitions.
 --     Runs every @OrphanSweepIntervalSeconds (default 60s).
 --     Any publisher can claim an unowned partition and process its rows.
 -- ---------------------------------------------------------------------------

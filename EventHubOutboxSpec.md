@@ -148,7 +148,7 @@ A publisher that owns partition P processes only rows whose `PartitionKey` hashe
 
 ### Orphan sweep
 
-Rows in the outbox whose `PartitionKey` maps to an unowned partition accumulate as orphans. A dedicated orphan sweep loop (runs every `@OrphanSweepIntervalSeconds`, default 60s) identifies partitions with `OwnerProducerId IS NULL` and claims them up to the publisher's fair share using `UPDATE TOP ... WITH (UPDLOCK)`. After claiming, the publisher refreshes its local partition list and begins processing the orphaned rows on its next poll cycle. This prevents backlog buildup during partial outages.
+Rows in the outbox whose `PartitionKey` maps to an unowned partition accumulate as orphans. A dedicated orphan sweep loop (runs every `@OrphanSweepIntervalSeconds`, default 60s) identifies partitions with `OwnerProducerId IS NULL` and claims them up to the publisher's fair share using `UPDATE TOP ... WITH (UPDLOCK)`. The publisher begins processing the orphaned rows on its next poll cycle (the lease query joins `dbo.OutboxPartitions` server-side, so no local cache is needed). This prevents backlog buildup during partial outages.
 
 ---
 
@@ -416,7 +416,6 @@ All queries are parameterized. See `EventHubOutbox.sql` for complete, runnable S
 | `HeartbeatProducer` | Every `@HeartbeatIntervalSeconds` | Refresh `LastHeartbeatUtc`; clear `GraceExpiresUtc` on owned partitions |
 | `UnregisterProducer` | On graceful shutdown | Delete producer record, release partitions (via `SqlTransaction`) |
 | `Rebalance` | After registration; after rebalance trigger | Atomic claim + release in a single transaction: claim unowned/stale partitions up to fair share, then release excess |
-| `GetOwnedPartitions` | After rebalance/orphan sweep | Retrieve current owned partition set |
 | `OrphanSweep` | Every `@OrphanSweepIntervalSeconds` | Claim unowned partitions up to fair share |
 
 ---

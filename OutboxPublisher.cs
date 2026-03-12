@@ -58,10 +58,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
     private Task _rebalanceLoop = Task.CompletedTask;
     private Task _orphanSweepLoop = Task.CompletedTask;
 
-    // Current owned partition IDs. Refreshed after each rebalance.
-    private IReadOnlyList<int> _ownedPartitions = Array.Empty<int>();
     private int _totalPartitionCount = 0;
-    private readonly SemaphoreSlim _partitionLock = new(1, 1);
 
     // Adaptive backoff state for the publish loop.
     private volatile int _consecutiveEmptyPolls = 0;
@@ -184,7 +181,6 @@ public sealed class OutboxPublisher : IAsyncDisposable
 
         _cts.Dispose();
         _producerClientLock.Dispose();
-        _partitionLock.Dispose();
     }
 
     // -------------------------------------------------------------------------
@@ -365,32 +361,6 @@ END;";
         cmd.Parameters.AddWithValue("@HeartbeatTimeoutSeconds", _options.HeartbeatTimeoutSeconds);
 
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
-        // Refresh local partition list after claiming orphans.
-        const string getOwnedSql = @"
-SELECT PartitionId
-FROM   dbo.OutboxPartitions
-WHERE  OwnerProducerId = @OwnerId
-  AND  (GraceExpiresUtc IS NULL OR GraceExpiresUtc < SYSUTCDATETIME());";
-
-        var owned = new List<int>();
-        await using var cmd2 = new SqlCommand(getOwnedSql, conn);
-        cmd2.CommandTimeout = _options.SqlCommandTimeoutSeconds;
-        cmd2.Parameters.AddWithValue("@OwnerId", _producerId);
-
-        await using var reader = await cmd2.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        while (await reader.ReadAsync(ct).ConfigureAwait(false))
-            owned.Add(reader.GetInt32(0));
-
-        await _partitionLock.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            _ownedPartitions = owned;
-        }
-        finally
-        {
-            _partitionLock.Release();
-        }
     }
 
     // -------------------------------------------------------------------------
@@ -821,44 +791,15 @@ END;
 
 COMMIT TRANSACTION;";
 
-        const string getOwnedSql = @"
-SELECT PartitionId
-FROM   dbo.OutboxPartitions
-WHERE  OwnerProducerId = @ProducerId
-  AND  (GraceExpiresUtc IS NULL OR GraceExpiresUtc < SYSUTCDATETIME());";
-
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        await using (var cmd = new SqlCommand(rebalanceSql, conn))
-        {
-            cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
-            cmd.Parameters.AddWithValue("@ProducerId", _producerId);
-            cmd.Parameters.AddWithValue("@HeartbeatTimeoutSeconds", _options.HeartbeatTimeoutSeconds);
-            cmd.Parameters.AddWithValue("@PartitionGracePeriodSeconds", _options.PartitionGracePeriodSeconds);
-            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
-
-        var owned = new List<int>();
-        await using (var cmd = new SqlCommand(getOwnedSql, conn))
-        {
-            cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
-            cmd.Parameters.AddWithValue("@ProducerId", _producerId);
-
-            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-            while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                owned.Add(reader.GetInt32(0));
-        }
-
-        await _partitionLock.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            _ownedPartitions = owned;
-        }
-        finally
-        {
-            _partitionLock.Release();
-        }
+        await using var cmd = new SqlCommand(rebalanceSql, conn);
+        cmd.CommandTimeout = _options.SqlCommandTimeoutSeconds;
+        cmd.Parameters.AddWithValue("@ProducerId", _producerId);
+        cmd.Parameters.AddWithValue("@HeartbeatTimeoutSeconds", _options.HeartbeatTimeoutSeconds);
+        cmd.Parameters.AddWithValue("@PartitionGracePeriodSeconds", _options.PartitionGracePeriodSeconds);
+        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     // -------------------------------------------------------------------------
@@ -1018,6 +959,13 @@ WHERE  OwnerProducerId = @ProducerId
                 result.Add((currentBatch, currentIds));
                 currentBatch = null;
             }
+        }
+        catch
+        {
+            foreach (var (batch, _) in result)
+                batch.Dispose();
+            result.Clear();
+            throw;
         }
         finally
         {
