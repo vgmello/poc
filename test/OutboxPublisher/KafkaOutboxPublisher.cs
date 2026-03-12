@@ -354,6 +354,11 @@ WITH Batch AS
 (
     SELECT TOP (@BatchSize)
         o.SequenceNumber,
+        o.TopicName,
+        o.PartitionKey,
+        o.EventType,
+        o.Headers,
+        o.Payload,
         o.LeasedUntilUtc,
         o.LeaseOwner,
         o.RetryCount

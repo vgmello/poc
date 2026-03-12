@@ -8,7 +8,7 @@ services:
     ports:
       - "1433:1433"
     healthcheck:
-      test: /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$${SA_PASSWORD}" -Q "SELECT 1" -b
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('localhost',1433), timeout=2); s.close()\""]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -16,15 +16,17 @@ services:
       - outbox-net
 
   sqlserver-init:
-    image: mcr.microsoft.com/azure-sql-edge:latest
+    build:
+      context: .
+      dockerfile: DbInit/Dockerfile
     platform: linux/arm64
+    environment:
+      ConnectionStrings__OutboxDb: "Server=sqlserver;Database=OutboxTest;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true"
     depends_on:
       sqlserver:
         condition: service_healthy
     volumes:
       - ./init-db/init.sql:/init.sql:ro
-    entrypoint: /opt/mssql-tools/bin/sqlcmd
-    command: -S sqlserver -U sa -P "${SA_PASSWORD}" -i /init.sql
     networks:
       - outbox-net
 
