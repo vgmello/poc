@@ -34,6 +34,7 @@ while (!cts.Token.IsCancellationRequested)
     {
         await using var conn = await DbHelpers.OpenConnectionAsync(connectionString, cts.Token);
 
+        var batchTimestamp = DateTime.UtcNow;
         for (int i = 0; i < batchSize; i++)
         {
             var partitionKey = $"customer-{random.Next(1, partitionKeyCount + 1)}";
@@ -46,7 +47,8 @@ while (!cts.Token.IsCancellationRequested)
             });
 
             await DbHelpers.InsertOutboxRowAsync(
-                conn, topicName, partitionKey, eventType, null, payload, cts.Token);
+                conn, topicName, partitionKey, eventType, null, payload,
+                batchTimestamp, (short)i, cts.Token);
         }
 
         Console.WriteLine($"[EventProducer] Inserted {batchSize} events at {DateTime.UtcNow:HH:mm:ss.fff}");

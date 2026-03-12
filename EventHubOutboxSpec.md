@@ -32,7 +32,7 @@
 | Post-publish cleanup | Published records are deleted from the outbox. The table remains a transient buffer, not a log. |
 | Multi-topic support | Each record targets a specific EventHub topic. |
 | Header propagation | Custom metadata (correlation IDs, content type, trace context) flows to EventHub `Properties`. |
-| Partition ordering | Events sharing the same `PartitionKey` should arrive at EventHub in insertion order. This requires explicit partition affinity (see §4). |
+| Partition ordering | Events sharing the same `PartitionKey` should arrive at EventHub in application-controlled causal order (`EventDateTimeUtc, EventOrdinal`). This requires explicit partition affinity (see §4). |
 | Poison message isolation | Persistently failing messages must be isolated and dead-lettered after a configurable retry threshold. |
 | Dynamic scaling | Publisher instances can join or leave without manual reconfiguration. Partition ownership rebalances automatically. |
 
@@ -83,7 +83,7 @@
 
 ### What the design guarantees
 
-- **Within a partition**: rows assigned to the same EventHub partition and processed by the same publisher instance are sent in `SequenceNumber` (insertion) order within a single EventHub batch.
+- **Within a partition**: rows assigned to the same EventHub partition and processed by the same publisher instance are sent in `EventDateTimeUtc, EventOrdinal` (application-controlled causal) order within a single EventHub batch. This decouples publish ordering from database insertion order, which is critical when using ORMs (e.g., Entity Framework) that do not guarantee INSERT order within a single `SaveChanges()` call.
 - **Across partitions**: no global ordering guarantee. Different partitions are independent.
 
 ### What the design does NOT guarantee without partition affinity
@@ -101,10 +101,16 @@ This breaks per-key ordering. **Partition affinity is required if ordered delive
 When partition affinity is active (see §4):
 
 - A given EventHub partition number is owned by at most one publisher at any time.
-- A **unified poll query** leases both fresh (unleased) and expired-lease rows in a single pass, ordered by `SequenceNumber`. This guarantees that older expired rows from a crashed publisher are always processed before newer rows, preserving per-PartitionKey ordering even during crash recovery.
+- A **unified poll query** leases both fresh (unleased) and expired-lease rows in a single pass, ordered by `EventDateTimeUtc, EventOrdinal`. This guarantees that events are published in the causal order determined by the application, regardless of the order in which the database assigned `SequenceNumber` (IDENTITY) values. Expired rows from a crashed publisher are naturally interleaved by their application timestamp, preserving per-PartitionKey ordering even during crash recovery.
 - `RetryCount` is conditionally incremented only for rows that were previously leased (recovery rows). Fresh rows keep `RetryCount = 0`.
 - EventHub sub-batches within a PartitionKey group use **all-or-nothing** semantics: if any sub-batch fails, none of the group's rows are deleted. This prevents partial-send gaps that would allow newer rows to be processed before the failed rows, at the cost of potential duplicates (acceptable under at-least-once delivery).
 - During rebalance (ownership transfer), a grace period ensures the outgoing publisher completes or expires any in-flight leases before the incoming publisher starts polling that partition.
+
+### Why not `SequenceNumber` for ordering?
+
+`SequenceNumber` is a `BIGINT IDENTITY(1,1)` column whose value is assigned at INSERT time by SQL Server. When using an ORM like Entity Framework, a single `SaveChanges()` call may insert multiple outbox rows in non-deterministic order. Two events for the same partition key — where Event A should causally precede Event B — could receive swapped sequence numbers (B gets a lower number than A). Ordering by `SequenceNumber` would then publish them out of order.
+
+`EventDateTimeUtc` and `EventOrdinal` are set by the application, which knows the correct causal order. `EventDateTimeUtc` provides the primary ordering dimension, and `EventOrdinal` breaks ties within the same timestamp (e.g., multiple events in a single `SaveChanges()` batch).
 
 ### Ordering contract without partition affinity
 
@@ -159,8 +165,8 @@ Rows in the outbox whose `PartitionKey` maps to an unowned partition accumulate 
 | Crash point | State after crash | Recovery |
 |---|---|---|
 | Before lease UPDATE | Row never leased. `LeasedUntilUtc IS NULL`. | Normal poll picks it up immediately. |
-| After lease UPDATE, before EventHub send | Row leased, not sent. | Lease expires → unified poll (same partition owner) re-leases on next cycle. No data loss. Ordering preserved because expired rows have lower SequenceNumbers and the unified poll orders by SequenceNumber. |
-| After EventHub send, before DELETE | Row leased, already sent. | Lease expires → unified poll re-leases → re-sent (duplicate). At-least-once, as designed. Ordering preserved because the unified poll processes expired rows before newer rows. |
+| After lease UPDATE, before EventHub send | Row leased, not sent. | Lease expires → unified poll (same partition owner) re-leases on next cycle. No data loss. Ordering preserved because the unified poll orders by `EventDateTimeUtc, EventOrdinal`, so expired rows with earlier application timestamps are always processed first. |
+| After EventHub send, before DELETE | Row leased, already sent. | Lease expires → unified poll re-leases → re-sent (duplicate). At-least-once, as designed. Ordering preserved because the unified poll processes rows in application-controlled causal order. |
 | After DELETE | Clean. Nothing to recover. | — |
 | After partition claim, before processing any rows | Partition marked owned, no rows leased. | Next publisher sees expired heartbeat, starts grace period, reclaims partition. |
 
@@ -306,7 +312,7 @@ loop:
 
 ### Unified poll (replaces separate recovery path)
 
-The publisher uses a single unified poll that picks up both fresh and expired-lease rows, ordered by `SequenceNumber`. There is no separate recovery loop. Expired rows (from crashes or timeouts) naturally surface in the same adaptive poll — since they have lower `SequenceNumber` values, they are always processed before newer rows, preserving per-PartitionKey ordering.
+The publisher uses a single unified poll that picks up both fresh and expired-lease rows, ordered by `EventDateTimeUtc, EventOrdinal`. There is no separate recovery loop. Expired rows (from crashes or timeouts) naturally surface in the same adaptive poll — since they have earlier application timestamps, they are always processed before newer rows, preserving per-PartitionKey ordering.
 
 ---
 
@@ -316,13 +322,15 @@ The publisher uses a single unified poll that picks up both fresh and expired-le
 
 | Column | Type | Nullable | Default | Purpose |
 |---|---|---|---|---|
-| `SequenceNumber` | `BIGINT IDENTITY(1,1)` | NOT NULL | — | Clustered PK. Append-only. Natural FIFO order. |
+| `SequenceNumber` | `BIGINT IDENTITY(1,1)` | NOT NULL | — | Clustered PK. Append-only. Used for row identity (delete, release, dead-letter). Not used for publish ordering — see `EventDateTimeUtc`/`EventOrdinal`. |
 | `TopicName` | `NVARCHAR(256)` | NOT NULL | — | Target EventHub topic. |
 | `PartitionKey` | `NVARCHAR(256)` | NOT NULL | — | EventHub partition key. Determines partition affinity bucket. |
 | `EventType` | `NVARCHAR(256)` | NOT NULL | — | Discriminator for consumers. |
 | `Headers` | `NVARCHAR(4000)` | NULL | — | JSON key-value blob → EventHub `Properties`. |
 | `Payload` | `NVARCHAR(4000)` | NOT NULL | — | Event body. Intentionally capped at 4000 chars (~8 KB) to enable covering index INCLUDEs; `NVARCHAR(MAX)` cannot be included in nonclustered indexes, forcing key lookups on every poll. Producers must validate payload size before inserting. |
 | `CreatedAtUtc` | `DATETIME2(3)` | NOT NULL | `SYSUTCDATETIME()` | Insert timestamp. Audit/diagnostic. |
+| `EventDateTimeUtc` | `DATETIME2(3)` | NOT NULL | — | Application-controlled event timestamp. Determines publish ordering. Set by the producer, not the database. |
+| `EventOrdinal` | `SMALLINT` | NOT NULL | `0` | Tie-breaker within the same `EventDateTimeUtc`. The application sets 0, 1, 2… for events in the same `SaveChanges()` batch. |
 | `LeasedUntilUtc` | `DATETIME2(3)` | NULL | — | NULL = fresh. Past = expired. Future = active lease. |
 | `LeaseOwner` | `NVARCHAR(128)` | NULL | — | ProducerId holding the current lease. |
 | `RetryCount` | `INT` | NOT NULL | `0` | Times re-leased after lease expiry (conditionally incremented by unified poll). Drives dead-letter threshold. |
@@ -333,6 +341,8 @@ Same columns as `dbo.Outbox` (without `LeasedUntilUtc` / `LeaseOwner`) plus:
 
 | Column | Type | Purpose |
 |---|---|---|
+| `EventDateTimeUtc` | `DATETIME2(3)` | Preserved from the original outbox row. |
+| `EventOrdinal` | `SMALLINT` | Preserved from the original outbox row. |
 | `DeadLetteredAtUtc` | `DATETIME2(3)` | When the row was moved to dead-letter. |
 | `LastError` | `NVARCHAR(2000)` | Last exception message from the publisher. |
 
@@ -372,23 +382,23 @@ Used for batch deletes with proper cardinality estimates (replaces `OPENJSON` wh
 
 ```sql
 CREATE NONCLUSTERED INDEX IX_Outbox_Unleased
-ON dbo.Outbox (SequenceNumber)
-INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
+ON dbo.Outbox (EventDateTimeUtc, EventOrdinal)
+INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
 WHERE LeasedUntilUtc IS NULL;
 ```
 
-Filtered on `LeasedUntilUtc IS NULL`. Covers all columns needed by the unified poll's fresh-row arm. Keeps the index small at steady state.
+Filtered on `LeasedUntilUtc IS NULL`. Leading on `(EventDateTimeUtc, EventOrdinal)` to match the unified poll's `ORDER BY`. Covers all columns needed by the unified poll's fresh-row arm. Keeps the index small at steady state.
 
 ### `IX_Outbox_LeaseExpiry` — unified poll (expired rows arm)
 
 ```sql
 CREATE NONCLUSTERED INDEX IX_Outbox_LeaseExpiry
-ON dbo.Outbox (LeasedUntilUtc, SequenceNumber)
-INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
+ON dbo.Outbox (LeasedUntilUtc, EventDateTimeUtc, EventOrdinal)
+INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
 WHERE LeasedUntilUtc IS NOT NULL;
 ```
 
-Filtered on `LeasedUntilUtc IS NOT NULL`, leading on `LeasedUntilUtc`. Enables efficient range seek for the unified poll's expired-lease arm. SQL Server can use an index union of `IX_Outbox_Unleased` and `IX_Outbox_LeaseExpiry` to serve the unified poll's `OR` predicate.
+Filtered on `LeasedUntilUtc IS NOT NULL`, leading on `LeasedUntilUtc` for range seek, then `(EventDateTimeUtc, EventOrdinal)` for sort order. SQL Server can use an index union of `IX_Outbox_Unleased` and `IX_Outbox_LeaseExpiry` to serve the unified poll's `OR` predicate.
 
 ### Write amplification per message lifecycle
 
@@ -408,7 +418,7 @@ All queries are parameterized. See `EventHubOutbox.sql` for complete, runnable S
 
 | Query | Trigger | Purpose |
 |---|---|---|
-| `LeaseBatch` | Unified poll (adaptive interval) | Lease both fresh and expired-lease rows in SequenceNumber order; conditionally increment `RetryCount` for recovery rows |
+| `LeaseBatch` | Unified poll (adaptive interval) | Lease both fresh and expired-lease rows in `EventDateTimeUtc, EventOrdinal` order; conditionally increment `RetryCount` for recovery rows |
 | `DeletePublishedTVP` | After successful EventHub send | Delete by TVP with `LeaseOwner` guard |
 | `ReleaseLeasedRows` | Circuit breaker open | Release leases on skipped rows via TVP; rows return unleased without incrementing `RetryCount` |
 | `DeadLetterSweep` | Background sweep (every 60s) and inline detection | Move rows at `RetryCount >= @MaxRetryCount` to dead-letter |
@@ -519,7 +529,7 @@ If `ActiveProducers > TotalPartitions`, some publishers will own zero partitions
 
 ### `IDENTITY` gap warning
 
-`BIGINT IDENTITY(1,1)` is gap-safe for this use case: the design never relies on contiguous sequence numbers. Gaps from rollbacks are expected and harmless.
+`BIGINT IDENTITY(1,1)` is gap-safe for this use case: the design never relies on contiguous sequence numbers. Gaps from rollbacks are expected and harmless. `SequenceNumber` is used solely for row identity (delete, release, dead-letter), not for publish ordering.
 
 **Operational rule**: Never run `DBCC CHECKIDENT` with a reseed value on `dbo.Outbox` in production. It can cause duplicate key violations if the table still contains rows above the new seed.
 
@@ -567,16 +577,21 @@ If the producer inserts into `dbo.Outbox` outside the business transaction (e.g.
 using var tx = connection.BeginTransaction();
 
 // 1. Business logic
-await connection.ExecuteAsync("UPDATE dbo.Orders SET Status = 'Confirmed' WHERE Id = @Id", 
+await connection.ExecuteAsync("UPDATE dbo.Orders SET Status = 'Confirmed' WHERE Id = @Id",
     new { Id = orderId }, tx);
 
 // 2. Outbox event — same transaction
+//    EventDateTimeUtc and EventOrdinal control publish ordering (not SequenceNumber).
+//    Set EventOrdinal to 0, 1, 2… for multiple events in the same transaction.
 await connection.ExecuteAsync(@"
-    INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Headers, Payload)
-    VALUES (@TopicName, @PartitionKey, @EventType, @Headers, @Payload)",
-    new { TopicName = "orders", PartitionKey = orderId.ToString(), 
-          EventType = "OrderConfirmed", Headers = (string?)null, 
-          Payload = JsonSerializer.Serialize(orderEvent) }, tx);
+    INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Headers, Payload,
+                            EventDateTimeUtc, EventOrdinal)
+    VALUES (@TopicName, @PartitionKey, @EventType, @Headers, @Payload,
+            @EventDateTimeUtc, @EventOrdinal)",
+    new { TopicName = "orders", PartitionKey = orderId.ToString(),
+          EventType = "OrderConfirmed", Headers = (string?)null,
+          Payload = JsonSerializer.Serialize(orderEvent),
+          EventDateTimeUtc = DateTime.UtcNow, EventOrdinal = (short)0 }, tx);
 
 tx.Commit();
 ```

@@ -30,11 +30,13 @@ public static class DbHelpers
         string eventType,
         string? headers,
         string payload,
+        DateTime eventDateTimeUtc,
+        short eventOrdinal,
         CancellationToken ct)
     {
         const string sql = @"
-INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Headers, Payload)
-VALUES (@TopicName, @PartitionKey, @EventType, @Headers, @Payload);";
+INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Headers, Payload, EventDateTimeUtc, EventOrdinal)
+VALUES (@TopicName, @PartitionKey, @EventType, @Headers, @Payload, @EventDateTimeUtc, @EventOrdinal);";
 
         await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@TopicName", topicName);
@@ -43,6 +45,8 @@ VALUES (@TopicName, @PartitionKey, @EventType, @Headers, @Payload);";
         cmd.Parameters.Add("@Headers", SqlDbType.NVarChar, 4000).Value =
             (object?)headers ?? DBNull.Value;
         cmd.Parameters.AddWithValue("@Payload", payload);
+        cmd.Parameters.AddWithValue("@EventDateTimeUtc", eventDateTimeUtc);
+        cmd.Parameters.AddWithValue("@EventOrdinal", eventOrdinal);
 
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }

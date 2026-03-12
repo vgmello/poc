@@ -20,9 +20,9 @@ using Azure.Messaging.EventHubs.Producer;
 ///   - Heartbeat: keeps dbo.OutboxProducers up-to-date so peers detect crashes;
 ///     clears GraceExpiresUtc on owned partitions if the producer recovers.
 ///   - Unified poll: a single query leases both fresh and expired-lease rows
-///     in SequenceNumber order, guaranteeing per-PartitionKey ordering even
-///     during crash recovery. RetryCount is conditionally incremented only
-///     for previously-leased (recovered) rows.
+///     in EventDateTimeUtc/EventOrdinal order, guaranteeing per-PartitionKey
+///     causal ordering even during crash recovery. RetryCount is conditionally
+///     incremented only for previously-leased (recovered) rows.
 ///   - Dead-letter sweep: rows exceeding MaxRetryCount are moved to
 ///     dbo.OutboxDeadLetter, isolating poison messages.
 ///   - Adaptive polling: exponential backoff on empty polls; instant reset on
@@ -393,9 +393,10 @@ END;";
 
     /// <summary>
     /// Combined lease query: picks up both fresh (unleased) and expired-lease rows
-    /// in a single pass, ordered by SequenceNumber. This guarantees that older
-    /// expired rows are always processed before newer rows for the same partition,
-    /// preserving per-PartitionKey ordering even during crash recovery.
+    /// in a single pass, ordered by EventDateTimeUtc, EventOrdinal. This guarantees
+    /// that events are published in application-controlled causal order, regardless
+    /// of the database IDENTITY insertion order. Preserves per-PartitionKey ordering
+    /// even during crash recovery.
     ///
     /// RetryCount is only incremented for rows that were previously leased (recovery).
     /// Fresh rows (LeasedUntilUtc IS NULL) keep RetryCount = 0.
@@ -412,6 +413,8 @@ WITH Batch AS
         o.EventType,
         o.Headers,
         o.Payload,
+        o.EventDateTimeUtc,
+        o.EventOrdinal,
         o.LeasedUntilUtc,
         o.LeaseOwner,
         o.RetryCount
@@ -422,7 +425,7 @@ WITH Batch AS
         AND (ABS(CHECKSUM(o.PartitionKey)) % @TotalPartitions) = op.PartitionId
     WHERE (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
       AND o.RetryCount < @MaxRetryCount
-    ORDER BY o.SequenceNumber
+    ORDER BY o.EventDateTimeUtc, o.EventOrdinal
 )
 UPDATE Batch
 SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
@@ -439,6 +442,8 @@ OUTPUT inserted.SequenceNumber,
        inserted.EventType,
        inserted.Headers,
        inserted.Payload,
+       inserted.EventDateTimeUtc,
+       inserted.EventOrdinal,
        inserted.RetryCount;";
 
         return await ExecuteLeaseQueryAsync(sql, ct).ConfigureAwait(false);
@@ -479,7 +484,9 @@ OUTPUT inserted.SequenceNumber,
                         EventType: reader.GetString(3),
                         Headers: reader.IsDBNull(4) ? null : reader.GetString(4),
                         Payload: reader.GetString(5),
-                        RetryCount: reader.GetInt32(6)));
+                        EventDateTimeUtc: reader.GetDateTime(6),
+                        EventOrdinal: (short)reader.GetInt16(7),
+                        RetryCount: reader.GetInt32(8)));
                 }
 
                 return rows;
@@ -584,9 +591,13 @@ WHERE  o.LeaseOwner = @PublisherId;";
 DELETE o
 OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
        deleted.EventType, deleted.Headers, deleted.Payload,
-       deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
+       deleted.CreatedAtUtc, deleted.RetryCount,
+       deleted.EventDateTimeUtc, deleted.EventOrdinal,
+       SYSUTCDATETIME(), @LastError
 INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
-     Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
+     Headers, Payload, CreatedAtUtc, RetryCount,
+     EventDateTimeUtc, EventOrdinal,
+     DeadLetteredAtUtc, LastError)
 FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
 WHERE o.RetryCount >= @MaxRetryCount
   AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME());";
@@ -614,9 +625,13 @@ WHERE o.RetryCount >= @MaxRetryCount
 DELETE o
 OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
        deleted.EventType, deleted.Headers, deleted.Payload,
-       deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
+       deleted.CreatedAtUtc, deleted.RetryCount,
+       deleted.EventDateTimeUtc, deleted.EventOrdinal,
+       SYSUTCDATETIME(), @LastError
 INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
-     Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
+     Headers, Payload, CreatedAtUtc, RetryCount,
+     EventDateTimeUtc, EventOrdinal,
+     DeadLetteredAtUtc, LastError)
 FROM dbo.Outbox o
 WHERE o.SequenceNumber = @SequenceNumber
   AND o.LeaseOwner = @PublisherId;";
@@ -1233,4 +1248,6 @@ internal sealed record OutboxRow(
     string EventType,
     string? Headers,
     string Payload,
+    DateTime EventDateTimeUtc,
+    short EventOrdinal,
     int RetryCount = 0);

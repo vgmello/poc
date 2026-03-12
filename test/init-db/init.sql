@@ -16,6 +16,8 @@ BEGIN
         Headers         NVARCHAR(4000)        NULL,
         Payload         NVARCHAR(4000)        NOT NULL,
         CreatedAtUtc    DATETIME2(3)          NOT NULL  DEFAULT SYSUTCDATETIME(),
+        EventDateTimeUtc DATETIME2(3)         NOT NULL,
+        EventOrdinal    SMALLINT              NOT NULL  DEFAULT 0,
         LeasedUntilUtc  DATETIME2(3)          NULL,
         LeaseOwner      NVARCHAR(128)         NULL,
         RetryCount      INT                   NOT NULL  DEFAULT 0,
@@ -37,6 +39,8 @@ BEGIN
         Payload          NVARCHAR(4000)        NOT NULL,
         CreatedAtUtc     DATETIME2(3)          NOT NULL,
         RetryCount       INT                   NOT NULL,
+        EventDateTimeUtc  DATETIME2(3)         NOT NULL,
+        EventOrdinal      SMALLINT            NOT NULL  DEFAULT 0,
         DeadLetteredAtUtc DATETIME2(3)         NOT NULL  DEFAULT SYSUTCDATETIME(),
         LastError        NVARCHAR(2000)        NULL,
         CONSTRAINT PK_OutboxDeadLetter PRIMARY KEY CLUSTERED (DeadLetterSeq)
@@ -79,15 +83,15 @@ GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Outbox_Unleased')
     CREATE NONCLUSTERED INDEX IX_Outbox_Unleased
-    ON dbo.Outbox (SequenceNumber)
-    INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
+    ON dbo.Outbox (EventDateTimeUtc, EventOrdinal)
+    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
     WHERE LeasedUntilUtc IS NULL;
 GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Outbox_LeaseExpiry')
     CREATE NONCLUSTERED INDEX IX_Outbox_LeaseExpiry
-    ON dbo.Outbox (LeasedUntilUtc, SequenceNumber)
-    INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
+    ON dbo.Outbox (LeasedUntilUtc, EventDateTimeUtc, EventOrdinal)
+    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
     WHERE LeasedUntilUtc IS NOT NULL;
 GO
 

@@ -29,6 +29,8 @@ CREATE TABLE dbo.Outbox
     Headers         NVARCHAR(4000)        NULL,
     Payload         NVARCHAR(4000)        NOT NULL,
     CreatedAtUtc    DATETIME2(3)          NOT NULL  DEFAULT SYSUTCDATETIME(),
+    EventDateTimeUtc DATETIME2(3)         NOT NULL,
+    EventOrdinal    SMALLINT              NOT NULL  DEFAULT 0,
     LeasedUntilUtc  DATETIME2(3)          NULL,
     LeaseOwner      NVARCHAR(128)         NULL,
     RetryCount      INT                   NOT NULL  DEFAULT 0,
@@ -51,6 +53,8 @@ CREATE TABLE dbo.OutboxDeadLetter
     Payload          NVARCHAR(4000)        NOT NULL,
     CreatedAtUtc     DATETIME2(3)          NOT NULL,
     RetryCount       INT                   NOT NULL,
+    EventDateTimeUtc  DATETIME2(3)         NOT NULL,
+    EventOrdinal      SMALLINT            NOT NULL  DEFAULT 0,
     DeadLetteredAtUtc DATETIME2(3)         NOT NULL  DEFAULT SYSUTCDATETIME(),
     LastError        NVARCHAR(2000)        NULL,
 
@@ -106,16 +110,17 @@ GO
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
--- Unified poll (fresh rows arm): "give me unleased rows in sequence order"
--- Filtered on LeasedUntilUtc IS NULL so the index only contains fresh rows
--- and stays small at steady state. INCLUDE covers all columns needed by the
--- publisher so no key lookups are required. SQL Server can use an index
--- union of this index and IX_Outbox_LeaseExpiry to serve the unified poll's
--- (LeasedUntilUtc IS NULL OR LeasedUntilUtc < NOW) predicate.
+-- Unified poll (fresh rows arm): "give me unleased rows in causal order"
+-- Leading on (EventDateTimeUtc, EventOrdinal) to match the unified poll's
+-- ORDER BY. Filtered on LeasedUntilUtc IS NULL so the index only contains
+-- fresh rows and stays small at steady state. INCLUDE covers all columns
+-- needed by the publisher so no key lookups are required. SQL Server can
+-- use an index union of this index and IX_Outbox_LeaseExpiry to serve the
+-- unified poll's (LeasedUntilUtc IS NULL OR LeasedUntilUtc < NOW) predicate.
 -- ---------------------------------------------------------------------------
 CREATE NONCLUSTERED INDEX IX_Outbox_Unleased
-ON dbo.Outbox (SequenceNumber)
-INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
+ON dbo.Outbox (EventDateTimeUtc, EventOrdinal)
+INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
 WHERE LeasedUntilUtc IS NULL;
 GO
 
@@ -125,8 +130,8 @@ GO
 -- LeasedUntilUtc < SYSUTCDATETIME() without scanning active leases.
 -- ---------------------------------------------------------------------------
 CREATE NONCLUSTERED INDEX IX_Outbox_LeaseExpiry
-ON dbo.Outbox (LeasedUntilUtc, SequenceNumber)
-INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
+ON dbo.Outbox (LeasedUntilUtc, EventDateTimeUtc, EventOrdinal)
+INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
 WHERE LeasedUntilUtc IS NOT NULL;
 GO
 
@@ -138,10 +143,12 @@ GO
 -- 4a. Unified poll — lease both fresh and expired-lease rows in one pass.
 --
 -- This single query replaces the former separate primary (unleased) and
--- recovery (expired-lease) polls. By using ORDER BY SequenceNumber across
--- both row sets, it guarantees that older expired rows are always processed
--- before newer unleased rows for the same partition, preserving per-
--- PartitionKey ordering even during crash recovery.
+-- recovery (expired-lease) polls. By using ORDER BY EventDateTimeUtc,
+-- EventOrdinal across both row sets, it guarantees that events are published
+-- in application-controlled causal order, regardless of the database
+-- IDENTITY insertion order. This preserves per-PartitionKey ordering even
+-- during crash recovery and when using ORMs that do not guarantee INSERT
+-- order within a single SaveChanges() call.
 --
 -- RetryCount is conditionally incremented only for rows that were previously
 -- leased (LeasedUntilUtc IS NOT NULL), which identifies them as recovery
@@ -182,7 +189,7 @@ WITH Batch AS
         AND (ABS(CHECKSUM(o.PartitionKey)) % @TotalPartitions) = op.PartitionId
     WHERE (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
       AND o.RetryCount < @MaxRetryCount
-    ORDER BY o.SequenceNumber
+    ORDER BY o.EventDateTimeUtc, o.EventOrdinal
 )
 UPDATE Batch
 SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
@@ -196,6 +203,8 @@ OUTPUT inserted.SequenceNumber,
        inserted.EventType,
        inserted.Headers,
        inserted.Payload,
+       inserted.EventDateTimeUtc,
+       inserted.EventOrdinal,
        inserted.RetryCount;
 */
 
@@ -273,9 +282,13 @@ DECLARE @LastError     NVARCHAR(2000) = NULL;
 DELETE o
 OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
        deleted.EventType, deleted.Headers, deleted.Payload,
-       deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
+       deleted.CreatedAtUtc, deleted.RetryCount,
+       deleted.EventDateTimeUtc, deleted.EventOrdinal,
+       SYSUTCDATETIME(), @LastError
 INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
-     Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
+     Headers, Payload, CreatedAtUtc, RetryCount,
+     EventDateTimeUtc, EventOrdinal,
+     DeadLetteredAtUtc, LastError)
 FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
 WHERE o.RetryCount >= @MaxRetryCount
   AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME());
@@ -674,10 +687,10 @@ BEGIN TRANSACTION;
 
     INSERT INTO dbo.Outbox
         (TopicName, PartitionKey, EventType, Headers, Payload, CreatedAtUtc,
-         LeasedUntilUtc, LeaseOwner, RetryCount)
+         EventDateTimeUtc, EventOrdinal, LeasedUntilUtc, LeaseOwner, RetryCount)
     SELECT
         TopicName, PartitionKey, EventType, Headers, Payload, CreatedAtUtc,
-        NULL, NULL, 0   -- reset retry count for clean replay
+        EventDateTimeUtc, EventOrdinal, NULL, NULL, 0   -- reset retry count for clean replay
     FROM dbo.OutboxDeadLetter dl
     INNER JOIN @ReplayIds r ON dl.SequenceNumber = r.SequenceNumber;
 

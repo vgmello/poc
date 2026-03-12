@@ -7,4 +7,6 @@ public sealed record OutboxRow(
     string EventType,
     string? Headers,
     string Payload,
+    DateTime EventDateTimeUtc,
+    short EventOrdinal,
     int RetryCount = 0);
