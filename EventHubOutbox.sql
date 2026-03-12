@@ -6,7 +6,7 @@
 --              dbo.OutboxPartitions
 --   2. Table-Valued Parameter type: dbo.SequenceNumberList
 --   3. Indexes
---   4. Publisher queries: primary poll, recovery poll, delete, dead-letter
+--   4. Publisher queries: unified poll, delete, release, dead-letter
 --   5. Producer registration and heartbeat
 --   6. Partition registration and rebalance
 --   7. Monitoring queries
@@ -106,10 +106,12 @@ GO
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
--- Primary poll: "give me unleased rows in sequence order"
+-- Unified poll (fresh rows arm): "give me unleased rows in sequence order"
 -- Filtered on LeasedUntilUtc IS NULL so the index only contains fresh rows
 -- and stays small at steady state. INCLUDE covers all columns needed by the
--- publisher so no key lookups are required.
+-- publisher so no key lookups are required. SQL Server can use an index
+-- union of this index and IX_Outbox_LeaseExpiry to serve the unified poll's
+-- (LeasedUntilUtc IS NULL OR LeasedUntilUtc < NOW) predicate.
 -- ---------------------------------------------------------------------------
 CREATE NONCLUSTERED INDEX IX_Outbox_Unleased
 ON dbo.Outbox (SequenceNumber)
@@ -118,7 +120,7 @@ WHERE LeasedUntilUtc IS NULL;
 GO
 
 -- ---------------------------------------------------------------------------
--- Recovery poll: "give me rows whose lease has expired"
+-- Unified poll (expired rows arm): "give me rows whose lease has expired"
 -- Leading column LeasedUntilUtc allows an efficient range seek for
 -- LeasedUntilUtc < SYSUTCDATETIME() without scanning active leases.
 -- ---------------------------------------------------------------------------
@@ -133,12 +135,26 @@ GO
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
--- 4a. Primary poll — lease a batch of fresh (unleased) rows.
+-- 4a. Unified poll — lease both fresh and expired-lease rows in one pass.
+--
+-- This single query replaces the former separate primary (unleased) and
+-- recovery (expired-lease) polls. By using ORDER BY SequenceNumber across
+-- both row sets, it guarantees that older expired rows are always processed
+-- before newer unleased rows for the same partition, preserving per-
+-- PartitionKey ordering even during crash recovery.
+--
+-- RetryCount is conditionally incremented only for rows that were previously
+-- leased (LeasedUntilUtc IS NOT NULL), which identifies them as recovery
+-- rows. Fresh rows (LeasedUntilUtc IS NULL) keep RetryCount = 0.
 --
 -- Parameters:
 --   @BatchSize             INT            — rows to lease per call
 --   @LeaseDurationSeconds  INT            — seconds until lease expires
 --   @PublisherId           NVARCHAR(128)  — identity of this publisher instance
+--   @TotalPartitions       INT            — total number of EventHub partitions
+--   @MaxRetryCount         INT            — rows at or above this count are NOT
+--                                          re-leased; they are dead-lettered
+--                                          inline or by the sweep (4d)
 --
 -- Notes:
 --   ROWLOCK   — prevent lock escalation so READPAST works correctly
@@ -149,104 +165,10 @@ GO
 DECLARE @BatchSize            INT           = 100;
 DECLARE @LeaseDurationSeconds INT           = 45;
 DECLARE @PublisherId          NVARCHAR(128) = N'publisher-01';
-
-WITH Batch AS
-(
-    SELECT TOP (@BatchSize)
-        SequenceNumber,
-        LeasedUntilUtc,
-        LeaseOwner
-    FROM dbo.Outbox WITH (ROWLOCK, READPAST)
-    WHERE LeasedUntilUtc IS NULL
-    ORDER BY SequenceNumber
-)
-UPDATE Batch
-SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
-       LeaseOwner     = @PublisherId
-OUTPUT inserted.SequenceNumber,
-       inserted.TopicName,
-       inserted.PartitionKey,
-       inserted.EventType,
-       inserted.Headers,
-       inserted.Payload;
-*/
-
--- ---------------------------------------------------------------------------
--- 4b. Primary poll with partition affinity — lease fresh rows for owned partitions.
---
--- The publisher passes its owned PartitionKey hash values as a TVP or uses an
--- IN clause generated from the owned partition set. Here shown as an IN clause
--- for clarity; in application code substitute with a join to the TVP.
---
--- Parameters:
---   @BatchSize             INT            — rows to lease per call
---   @LeaseDurationSeconds  INT            — seconds until lease expires
---   @PublisherId           NVARCHAR(128)  — identity of this publisher instance
---   @OwnedPartitionKeys    TVP            — set of PartitionKey values owned by this publisher
--- ---------------------------------------------------------------------------
-/*
-DECLARE @BatchSize            INT           = 100;
-DECLARE @LeaseDurationSeconds INT           = 45;
-DECLARE @PublisherId          NVARCHAR(128) = N'publisher-01';
-DECLARE @TotalPartitions      INT           = 8;   -- pass from application; avoids per-row subquery
-
--- Partition affinity join pattern:
--- The publisher joins Outbox rows to its owned-partition set so it only
--- processes rows belonging to its assigned EventHub partition range.
--- @TotalPartitions is passed as a parameter to avoid a per-row subquery
--- (SELECT COUNT(*) FROM dbo.OutboxPartitions) that would re-execute for every row.
--- The grace period condition includes GraceExpiresUtc < SYSUTCDATETIME() so the
--- publisher can also process partitions whose grace window has already elapsed.
-WITH Batch AS
-(
-    SELECT TOP (@BatchSize)
-        o.SequenceNumber,
-        o.LeasedUntilUtc,
-        o.LeaseOwner
-    FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
-    INNER JOIN dbo.OutboxPartitions op
-        ON  op.OwnerProducerId = @PublisherId
-        AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
-        AND (ABS(CHECKSUM(o.PartitionKey)) % @TotalPartitions) = op.PartitionId
-    WHERE o.LeasedUntilUtc IS NULL
-    ORDER BY o.SequenceNumber
-)
-UPDATE Batch
-SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
-       LeaseOwner     = @PublisherId
-OUTPUT inserted.SequenceNumber,
-       inserted.TopicName,
-       inserted.PartitionKey,
-       inserted.EventType,
-       inserted.Headers,
-       inserted.Payload;
-*/
-
--- ---------------------------------------------------------------------------
--- 4c. Recovery poll — lease expired rows and increment RetryCount.
---
--- Uses the same partition affinity join as the primary poll (4b) so that
--- each publisher only recovers expired rows for its own partitions. Without
--- this, a different publisher could re-send rows for a partition it doesn't
--- own, interleaving with the owner's primary sends and breaking ordering.
---
--- Parameters:
---   @BatchSize             INT            — rows to lease per call
---   @LeaseDurationSeconds  INT            — seconds until lease expires
---   @PublisherId           NVARCHAR(128)  — identity of this publisher instance
---   @TotalPartitions       INT            — total number of EventHub partitions
---   @MaxRetryCount         INT            — rows at or above this count are NOT
---                                          re-leased here; they are dead-lettered
---                                          by the dead-letter sweep (4e) instead
--- ---------------------------------------------------------------------------
-/*
-DECLARE @BatchSize            INT           = 100;
-DECLARE @LeaseDurationSeconds INT           = 45;
-DECLARE @PublisherId          NVARCHAR(128) = N'publisher-01';
 DECLARE @TotalPartitions      INT           = 8;
 DECLARE @MaxRetryCount        INT           = 5;
 
-WITH Expired AS
+WITH Batch AS
 (
     SELECT TOP (@BatchSize)
         o.SequenceNumber,
@@ -258,15 +180,16 @@ WITH Expired AS
         ON  op.OwnerProducerId = @PublisherId
         AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
         AND (ABS(CHECKSUM(o.PartitionKey)) % @TotalPartitions) = op.PartitionId
-    WHERE o.LeasedUntilUtc IS NOT NULL
-      AND o.LeasedUntilUtc < SYSUTCDATETIME()
-      AND o.RetryCount < @MaxRetryCount       -- exclude poison messages
+    WHERE (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
+      AND o.RetryCount < @MaxRetryCount
     ORDER BY o.SequenceNumber
 )
-UPDATE Expired
+UPDATE Batch
 SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
        LeaseOwner     = @PublisherId,
-       RetryCount     = RetryCount + 1        -- track recovery attempts
+       RetryCount     = CASE WHEN LeasedUntilUtc IS NOT NULL
+                             THEN RetryCount + 1
+                             ELSE RetryCount END
 OUTPUT inserted.SequenceNumber,
        inserted.TopicName,
        inserted.PartitionKey,
@@ -277,7 +200,7 @@ OUTPUT inserted.SequenceNumber,
 */
 
 -- ---------------------------------------------------------------------------
--- 4d. Delete after successful EventHub send — TVP version.
+-- 4b. Delete after successful EventHub send — TVP version.
 --
 -- Uses dbo.SequenceNumberList TVP instead of OPENJSON for correct cardinality
 -- estimates and better query plan stability.
@@ -302,9 +225,9 @@ WHERE  o.LeaseOwner = @PublisherId;
 */
 
 -- ---------------------------------------------------------------------------
--- 4e. Release leased rows — return rows to the unleased pool without
+-- 4c. Release leased rows — return rows to the unleased pool without
 --     incrementing RetryCount. Used when the circuit breaker is open:
---     rows were already leased by the primary poll but cannot be sent.
+--     rows were already leased by the unified poll but cannot be sent.
 --
 -- Parameters:
 --   @Ids          dbo.SequenceNumberList  — TVP of SequenceNumbers to release
@@ -325,7 +248,7 @@ WHERE  o.LeaseOwner = @PublisherId;
 */
 
 -- ---------------------------------------------------------------------------
--- 4f. Dead-letter sweep — move poison messages to dbo.OutboxDeadLetter.
+-- 4d. Dead-letter sweep — move poison messages to dbo.OutboxDeadLetter.
 --
 -- Uses DELETE...OUTPUT INTO instead of separate INSERT + DELETE so that the
 -- set of rows removed from dbo.Outbox is guaranteed to be exactly the set
@@ -346,19 +269,16 @@ WHERE  o.LeaseOwner = @PublisherId;
 DECLARE @MaxRetryCount INT           = 5;
 DECLARE @LastError     NVARCHAR(2000) = NULL;
 
-BEGIN TRANSACTION;
-
-    DELETE o
-    OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
-           deleted.EventType, deleted.Headers, deleted.Payload,
-           deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
-    INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
-         Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
-    FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
-    WHERE o.RetryCount >= @MaxRetryCount
-      AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME());
-
-COMMIT TRANSACTION;
+-- DELETE...OUTPUT INTO is a single atomic statement; no explicit transaction needed.
+DELETE o
+OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
+       deleted.EventType, deleted.Headers, deleted.Payload,
+       deleted.CreatedAtUtc, deleted.RetryCount, SYSUTCDATETIME(), @LastError
+INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
+     Headers, Payload, CreatedAtUtc, RetryCount, DeadLetteredAtUtc, LastError)
+FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
+WHERE o.RetryCount >= @MaxRetryCount
+  AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME());
 */
 
 -- =============================================================================

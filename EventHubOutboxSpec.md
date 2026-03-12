@@ -101,9 +101,9 @@ This breaks per-key ordering. **Partition affinity is required if ordered delive
 When partition affinity is active (see §4):
 
 - A given EventHub partition number is owned by at most one publisher at any time.
-- **Both the primary poll and the recovery poll** use the same partition affinity join, so a publisher only leases and recovers rows for its own partitions. This prevents a different publisher from re-sending rows for a partition it doesn't own, which would interleave with the owner's primary sends.
-- The publisher processes all rows for its assigned partitions in `SequenceNumber` order.
-- Ordering within a partition is preserved end-to-end.
+- A **unified poll query** leases both fresh (unleased) and expired-lease rows in a single pass, ordered by `SequenceNumber`. This guarantees that older expired rows from a crashed publisher are always processed before newer rows, preserving per-PartitionKey ordering even during crash recovery.
+- `RetryCount` is conditionally incremented only for rows that were previously leased (recovery rows). Fresh rows keep `RetryCount = 0`.
+- EventHub sub-batches within a PartitionKey group use **all-or-nothing** semantics: if any sub-batch fails, none of the group's rows are deleted. This prevents partial-send gaps that would allow newer rows to be processed before the failed rows, at the cost of potential duplicates (acceptable under at-least-once delivery).
 - During rebalance (ownership transfer), a grace period ensures the outgoing publisher completes or expires any in-flight leases before the incoming publisher starts polling that partition.
 
 ### Ordering contract without partition affinity
@@ -142,8 +142,9 @@ A publisher that owns partition P processes only rows whose `PartitionKey` hashe
 
 1. **Stale detection** — Identify partitions whose owner has not heartbeated within `@HeartbeatTimeoutSeconds`.
 2. **Grace period** — Set `GraceExpiresUtc = SYSUTCDATETIME() + @PartitionGracePeriodSeconds` on the stale partition. This prevents the new owner from starting before in-flight leases held by the old owner can expire.
-3. **Claim** — After the grace period elapses, any publisher can claim the partition via an optimistic CAS update (`UPDATE ... WHERE OwnerProducerId = @OldOwner OR GraceExpiresUtc < SYSUTCDATETIME()`).
-4. **Fair-share** — Each publisher claims `CEILING(TotalPartitions / ActiveProducers)` partitions. Publishers with more than their fair share release excess partitions (mark them as stealable by setting `OwnerProducerId = NULL`).
+3. **Grace recovery** — If the stale producer recovers and resumes heartbeating, its heartbeat clears `GraceExpiresUtc` on its owned partitions, preventing other publishers from stealing partitions that are actively being served.
+4. **Claim** — After the grace period elapses, any publisher can claim the partition via an optimistic CAS update (`UPDATE ... WHERE OwnerProducerId = @OldOwner OR GraceExpiresUtc < SYSUTCDATETIME()`).
+5. **Fair-share** — Each publisher claims `CEILING(TotalPartitions / ActiveProducers)` partitions. Publishers with more than their fair share release excess partitions (mark them as stealable by setting `OwnerProducerId = NULL`).
 
 ### Orphan sweep
 
@@ -158,8 +159,8 @@ Rows in the outbox whose `PartitionKey` maps to an unowned partition accumulate 
 | Crash point | State after crash | Recovery |
 |---|---|---|
 | Before lease UPDATE | Row never leased. `LeasedUntilUtc IS NULL`. | Normal poll picks it up immediately. |
-| After lease UPDATE, before EventHub send | Row leased, not sent. | Lease expires → recovery path (same partition owner) re-leases. No data loss. |
-| After EventHub send, before DELETE | Row leased, already sent. | Lease expires → recovery path (same partition owner) re-leases → re-sent (duplicate). At-least-once, as designed. Ordering preserved because only the partition owner recovers the row. |
+| After lease UPDATE, before EventHub send | Row leased, not sent. | Lease expires → unified poll (same partition owner) re-leases on next cycle. No data loss. Ordering preserved because expired rows have lower SequenceNumbers and the unified poll orders by SequenceNumber. |
+| After EventHub send, before DELETE | Row leased, already sent. | Lease expires → unified poll re-leases → re-sent (duplicate). At-least-once, as designed. Ordering preserved because the unified poll processes expired rows before newer rows. |
 | After DELETE | Clean. Nothing to recover. | — |
 | After partition claim, before processing any rows | Partition marked owned, no rows leased. | Next publisher sees expired heartbeat, starts grace period, reclaims partition. |
 
@@ -194,7 +195,7 @@ A message that consistently fails to publish (malformed payload, EventHub reject
 1. Be leased.
 2. Fail to publish.
 3. Lease expires.
-4. Recovery path re-leases it.
+4. Unified poll re-leases it (incrementing `RetryCount`).
 5. Fail again. Repeat indefinitely.
 
 This wastes publisher cycles and can block progress on rows with higher sequence numbers that share the same lease batch.
@@ -203,7 +204,7 @@ This wastes publisher cycles and can block progress on rows with higher sequence
 
 `dbo.Outbox` has a `RetryCount INT NOT NULL DEFAULT 0` column.
 
-Each time the recovery path re-leases a row (not the primary path — fresh rows start at 0), the `RetryCount` is incremented.
+The unified poll conditionally increments `RetryCount` only for rows that were previously leased (`LeasedUntilUtc IS NOT NULL`). Fresh rows (`LeasedUntilUtc IS NULL`) keep `RetryCount = 0`. Rows released by the circuit breaker also have `LeasedUntilUtc = NULL`, so they correctly avoid the increment.
 
 When `RetryCount >= @MaxRetryCount` (default: 5), the dead-letter sweep atomically deletes the row from `dbo.Outbox` and inserts it into `dbo.OutboxDeadLetter` using a single `DELETE ... OUTPUT INTO` statement. This guarantees the exact rows removed from the outbox are the same rows inserted into the dead-letter table, preventing data loss from concurrent operations.
 
@@ -211,15 +212,15 @@ The dead-letter table is monitored separately and requires manual intervention (
 
 ### Dead-letter sweep
 
-A background sweep (runs every `@DeadLetterSweepIntervalSeconds`, default 60s) moves any rows that have exceeded `@MaxRetryCount` without being claimed by the publisher's own dead-letter path. This is a safety net for publishers that crash mid-sweep.
+The publisher detects poison messages inline: the unified poll's conditional `RetryCount` increment may push a row to `@MaxRetryCount`, and the publisher immediately dead-letters it before attempting to publish. A background sweep (runs every `@DeadLetterSweepIntervalSeconds`, default 60s) acts as a safety net for rows that slip through (e.g., publisher crashes after the SQL increment but before the inline dead-letter).
 
 The sweep uses `DELETE ... OUTPUT INTO` with `ROWLOCK, READPAST` hints to ensure atomicity and avoid blocking concurrent publishers. This replaces the earlier INSERT + DELETE pattern, which could operate on different row sets under concurrency.
 
 ### Retry count semantics
 
-- `RetryCount = 0` — Row has never been re-leased via the recovery path. May have been attempted by the primary path (success → deleted, failure → lease expires → recovery path increments to 1).
-- `RetryCount = N` — Row has been picked up N times by the recovery path without successful publication.
-- Primary path does not increment `RetryCount`. Only the recovery path increments it, because primary-path failures are expected (crash before send) and don't indicate a poison message.
+- `RetryCount = 0` — Row has never been re-leased after a lease expiry. It may have been leased and published successfully, or it may be a fresh row that was never leased.
+- `RetryCount = N` — Row has been re-leased N times after lease expiry without successful publication. The unified poll's `CASE WHEN LeasedUntilUtc IS NOT NULL` ensures only expired-lease rows are incremented.
+- Rows released by the circuit breaker (via `ReleaseLeasedRows`) have `LeasedUntilUtc` reset to `NULL`, so they are treated as fresh rows and do not increment `RetryCount`. This prevents dead-lettering during transient EventHub outages.
 
 ---
 
@@ -303,9 +304,9 @@ loop:
 - During idle periods, poll interval grows to 5 seconds, reducing SQL Server query overhead by ~50×.
 - No configuration change needed when load changes. Self-tuning.
 
-### Recovery path polling
+### Unified poll (replaces separate recovery path)
 
-The recovery path (expired leases) uses a separate, fixed interval (default: 30s). Adaptive backoff is not appropriate here because the absence of expired leases is normal and expected.
+The publisher uses a single unified poll that picks up both fresh and expired-lease rows, ordered by `SequenceNumber`. There is no separate recovery loop. Expired rows (from crashes or timeouts) naturally surface in the same adaptive poll — since they have lower `SequenceNumber` values, they are always processed before newer rows, preserving per-PartitionKey ordering.
 
 ---
 
@@ -324,7 +325,7 @@ The recovery path (expired leases) uses a separate, fixed interval (default: 30s
 | `CreatedAtUtc` | `DATETIME2(3)` | NOT NULL | `SYSUTCDATETIME()` | Insert timestamp. Audit/diagnostic. |
 | `LeasedUntilUtc` | `DATETIME2(3)` | NULL | — | NULL = fresh. Past = expired. Future = active lease. |
 | `LeaseOwner` | `NVARCHAR(128)` | NULL | — | ProducerId holding the current lease. |
-| `RetryCount` | `INT` | NOT NULL | `0` | Times re-leased via recovery path. Drives dead-letter threshold. |
+| `RetryCount` | `INT` | NOT NULL | `0` | Times re-leased after lease expiry (conditionally incremented by unified poll). Drives dead-letter threshold. |
 
 ### `dbo.OutboxDeadLetter`
 
@@ -367,7 +368,7 @@ Used for batch deletes with proper cardinality estimates (replaces `OPENJSON` wh
 
 ## 10. Index Design
 
-### `IX_Outbox_Unleased` — primary poll path
+### `IX_Outbox_Unleased` — unified poll (fresh rows arm)
 
 ```sql
 CREATE NONCLUSTERED INDEX IX_Outbox_Unleased
@@ -376,9 +377,9 @@ INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, Creat
 WHERE LeasedUntilUtc IS NULL;
 ```
 
-Filtered on `LeasedUntilUtc IS NULL`. Covers all columns needed by the primary poll. Keeps the index small at steady state.
+Filtered on `LeasedUntilUtc IS NULL`. Covers all columns needed by the unified poll's fresh-row arm. Keeps the index small at steady state.
 
-### `IX_Outbox_LeaseExpiry` — recovery path
+### `IX_Outbox_LeaseExpiry` — unified poll (expired rows arm)
 
 ```sql
 CREATE NONCLUSTERED INDEX IX_Outbox_LeaseExpiry
@@ -387,7 +388,7 @@ INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, Creat
 WHERE LeasedUntilUtc IS NOT NULL;
 ```
 
-Filtered on `LeasedUntilUtc IS NOT NULL`, leading on `LeasedUntilUtc`. Enables efficient range seek for expired leases.
+Filtered on `LeasedUntilUtc IS NOT NULL`, leading on `LeasedUntilUtc`. Enables efficient range seek for the unified poll's expired-lease arm. SQL Server can use an index union of `IX_Outbox_Unleased` and `IX_Outbox_LeaseExpiry` to serve the unified poll's `OR` predicate.
 
 ### Write amplification per message lifecycle
 
@@ -407,17 +408,16 @@ All queries are parameterized. See `EventHubOutbox.sql` for complete, runnable S
 
 | Query | Trigger | Purpose |
 |---|---|---|
-| `LeaseUnleasedBatch` | Primary poll (adaptive interval) | Acquire a batch of fresh rows |
-| `LeaseExpiredBatch` | Recovery poll (fixed 30s) | Acquire a batch of expired-lease rows for owned partitions; increment `RetryCount` |
+| `LeaseBatch` | Unified poll (adaptive interval) | Lease both fresh and expired-lease rows in SequenceNumber order; conditionally increment `RetryCount` for recovery rows |
 | `DeletePublishedTVP` | After successful EventHub send | Delete by TVP with `LeaseOwner` guard |
 | `ReleaseLeasedRows` | Circuit breaker open | Release leases on skipped rows via TVP; rows return unleased without incrementing `RetryCount` |
-| `DeadLetterExceeded` | During recovery poll | Move rows at `RetryCount >= @MaxRetryCount` to dead-letter |
+| `DeadLetterSweep` | Background sweep (every 60s) and inline detection | Move rows at `RetryCount >= @MaxRetryCount` to dead-letter |
 | `RegisterProducer` | On startup | Upsert producer heartbeat record |
-| `HeartbeatProducer` | Every `@HeartbeatIntervalSeconds` | Refresh `LastHeartbeatUtc` |
-| `UnregisterProducer` | On graceful shutdown | Delete producer record, release partitions |
+| `HeartbeatProducer` | Every `@HeartbeatIntervalSeconds` | Refresh `LastHeartbeatUtc`; clear `GraceExpiresUtc` on owned partitions |
+| `UnregisterProducer` | On graceful shutdown | Delete producer record, release partitions (via `SqlTransaction`) |
 | `Rebalance` | After registration; after rebalance trigger | Atomic claim + release in a single transaction: claim unowned/stale partitions up to fair share, then release excess |
-| `GetOwnedPartitions` | Before each poll cycle | Retrieve current owned partition set |
-| `OrphanSweep` | Every `@OrphanSweepIntervalSeconds` | Move orphan partition rows into accessible lease pool |
+| `GetOwnedPartitions` | After rebalance/orphan sweep | Retrieve current owned partition set |
+| `OrphanSweep` | Every `@OrphanSweepIntervalSeconds` | Claim unowned partitions up to fair share |
 
 ---
 
@@ -432,7 +432,8 @@ SELECT
     SUM(CASE WHEN LeasedUntilUtc >= SYSUTCDATETIME() THEN 1 ELSE 0 END) AS ActivelyLeased,
     SUM(CASE WHEN LeasedUntilUtc < SYSUTCDATETIME() THEN 1 ELSE 0 END)  AS ExpiredLeases,
     MIN(CreatedAtUtc)                                                    AS OldestMessage,
-    DATEDIFF_BIG(MILLISECOND, MIN(CreatedAtUtc), SYSUTCDATETIME())       AS MaxLatencyMs
+    DATEDIFF_BIG(MILLISECOND, MIN(CreatedAtUtc), SYSUTCDATETIME())       AS MaxLatencyMs,
+    MAX(RetryCount)                                                      AS MaxRetryCount
 FROM dbo.Outbox;
 ```
 
@@ -503,9 +504,9 @@ WHERE CreatedAtUtc < DATEADD(MINUTE, -5, SYSUTCDATETIME());
 
 During an EventHub outage:
 
-- Primary poll returns rows, lease updates succeed, EventHub sends fail.
-- Leases expire; recovery path increments `RetryCount`.
-- After `@MaxRetryCount` retries, rows are dead-lettered.
+- Unified poll returns rows, lease updates succeed, EventHub sends fail.
+- Leases expire; on next poll cycle the unified query re-leases and conditionally increments `RetryCount`.
+- After `@MaxRetryCount` retries, rows are dead-lettered inline or by the background sweep.
 
 **Mitigation**: A per-topic circuit breaker is implemented in `OutboxPublisher`. After `@CircuitBreakerFailureThreshold` consecutive send failures (default: 3), the circuit opens and the publisher skips batches for that topic for `@CircuitBreakerOpenDurationSeconds` (default: 30s). When a batch is skipped because the circuit is open, the publisher **releases the leases** on the affected rows (resets `LeasedUntilUtc` and `LeaseOwner` to NULL) so they return to the unleased pool without incrementing `RetryCount`. After the open duration elapses, the circuit enters half-open state and allows one probe send. On success, the circuit closes and normal publishing resumes. On failure, the circuit re-opens.
 
@@ -605,7 +606,6 @@ Because of at-least-once delivery, **all event consumers must be idempotent**. T
 | `@MaxRetryCount` | 5 | Dead-letter threshold. Lower = faster isolation; higher = more resilience to transient failures. |
 | `@MinPollIntervalMs` | 100 | Minimum adaptive poll interval. |
 | `@MaxPollIntervalMs` | 5000 | Maximum adaptive poll interval (idle backoff ceiling). |
-| `@RecoveryPollIntervalSeconds` | 30 | Fixed interval for the recovery path. |
 | `@HeartbeatIntervalSeconds` | 10 | Producer heartbeat frequency. |
 | `@HeartbeatTimeoutSeconds` | 30 | After this without a heartbeat, the producer is considered dead. |
 | `@PartitionGracePeriodSeconds` | 60 | Grace window for partition handover. Must exceed `@LeaseDurationSeconds`. |

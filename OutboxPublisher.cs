@@ -17,8 +17,12 @@ using Azure.Messaging.EventHubs.Producer;
 ///     ensuring per-partition-key ordering (see §4 of EventHubOutboxSpec.md).
 ///   - Dynamic rebalance: fair-share partition assignment adjusts automatically
 ///     as instances join or leave.
-///   - Heartbeat: keeps dbo.OutboxProducers up-to-date so peers detect crashes.
-///   - Recovery: expired-lease rows are re-leased with an incremented RetryCount.
+///   - Heartbeat: keeps dbo.OutboxProducers up-to-date so peers detect crashes;
+///     clears GraceExpiresUtc on owned partitions if the producer recovers.
+///   - Unified poll: a single query leases both fresh and expired-lease rows
+///     in SequenceNumber order, guaranteeing per-PartitionKey ordering even
+///     during crash recovery. RetryCount is conditionally incremented only
+///     for previously-leased (recovered) rows.
 ///   - Dead-letter sweep: rows exceeding MaxRetryCount are moved to
 ///     dbo.OutboxDeadLetter, isolating poison messages.
 ///   - Adaptive polling: exponential backoff on empty polls; instant reset on
@@ -49,7 +53,6 @@ public sealed class OutboxPublisher : IAsyncDisposable
 
     private CancellationTokenSource _cts = new();
     private Task _publishLoop = Task.CompletedTask;
-    private Task _recoveryLoop = Task.CompletedTask;
     private Task _heartbeatLoop = Task.CompletedTask;
     private Task _deadLetterSweepLoop = Task.CompletedTask;
     private Task _rebalanceLoop = Task.CompletedTask;
@@ -60,7 +63,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
     private int _totalPartitionCount = 0;
     private readonly SemaphoreSlim _partitionLock = new(1, 1);
 
-    // Adaptive backoff state for the primary poll loop.
+    // Adaptive backoff state for the publish loop.
     private volatile int _consecutiveEmptyPolls = 0;
     private volatile int _currentPollIntervalMs;
 
@@ -126,7 +129,6 @@ public sealed class OutboxPublisher : IAsyncDisposable
         _heartbeatLoop = HeartbeatLoopAsync(_cts.Token);
         _rebalanceLoop = RebalanceLoopAsync(_cts.Token);
         _publishLoop = PublishLoopAsync(_cts.Token);
-        _recoveryLoop = RecoveryLoopAsync(_cts.Token);
         _deadLetterSweepLoop = DeadLetterSweepLoopAsync(_cts.Token);
         _orphanSweepLoop = OrphanSweepLoopAsync(_cts.Token);
     }
@@ -143,7 +145,6 @@ public sealed class OutboxPublisher : IAsyncDisposable
         {
             await Task.WhenAll(
                 _publishLoop,
-                _recoveryLoop,
                 _heartbeatLoop,
                 _deadLetterSweepLoop,
                 _rebalanceLoop,
@@ -187,7 +188,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
     }
 
     // -------------------------------------------------------------------------
-    // Primary publish loop (adaptive polling)
+    // Publish loop (unified poll with adaptive backoff)
     // -------------------------------------------------------------------------
 
     private async Task PublishLoopAsync(CancellationToken ct)
@@ -196,7 +197,7 @@ public sealed class OutboxPublisher : IAsyncDisposable
         {
             try
             {
-                IReadOnlyList<OutboxRow> batch = await LeaseUnleasedBatchAsync(ct).ConfigureAwait(false);
+                IReadOnlyList<OutboxRow> batch = await LeaseBatchAsync(ct).ConfigureAwait(false);
 
                 if (batch.Count == 0)
                 {
@@ -214,39 +215,9 @@ public sealed class OutboxPublisher : IAsyncDisposable
                 _consecutiveEmptyPolls = 0;
                 _currentPollIntervalMs = _options.MinPollIntervalMs;
 
-                await PublishBatchAsync(batch, ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                // Log and continue — individual batch failures must not crash the loop.
-                OnError("PublishLoop", ex);
-                await DelayAsync(_options.MinPollIntervalMs, ct).ConfigureAwait(false);
-            }
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Recovery loop (fixed interval)
-    // -------------------------------------------------------------------------
-
-    private async Task RecoveryLoopAsync(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                await DelayAsync(_options.RecoveryPollIntervalMs, ct).ConfigureAwait(false);
-
-                IReadOnlyList<OutboxRow> batch = await LeaseExpiredBatchAsync(ct).ConfigureAwait(false);
-                if (batch.Count == 0)
-                    continue;
-
-                // Inline dead-letter: rows that have exhausted retries should be
-                // moved immediately rather than waiting for the background sweep.
+                // Inline dead-letter: rows whose RetryCount reached MaxRetryCount
+                // after the conditional increment in the lease query. Dead-letter
+                // them immediately rather than attempting a publish that will fail.
                 var poison = batch.Where(r => r.RetryCount >= _options.MaxRetryCount).ToList();
                 foreach (var row in poison)
                 {
@@ -274,7 +245,9 @@ public sealed class OutboxPublisher : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                OnError("RecoveryLoop", ex);
+                // Log and continue — individual batch failures must not crash the loop.
+                OnError("PublishLoop", ex);
+                await DelayAsync(_options.MinPollIntervalMs, ct).ConfigureAwait(false);
             }
         }
     }
@@ -448,51 +421,19 @@ WHERE  OwnerProducerId = @OwnerId
     // SQL operations
     // -------------------------------------------------------------------------
 
-    private async Task<IReadOnlyList<OutboxRow>> LeaseUnleasedBatchAsync(CancellationToken ct)
+    /// <summary>
+    /// Combined lease query: picks up both fresh (unleased) and expired-lease rows
+    /// in a single pass, ordered by SequenceNumber. This guarantees that older
+    /// expired rows are always processed before newer rows for the same partition,
+    /// preserving per-PartitionKey ordering even during crash recovery.
+    ///
+    /// RetryCount is only incremented for rows that were previously leased (recovery).
+    /// Fresh rows (LeasedUntilUtc IS NULL) keep RetryCount = 0.
+    /// </summary>
+    private async Task<IReadOnlyList<OutboxRow>> LeaseBatchAsync(CancellationToken ct)
     {
-        // Partition affinity join: routes rows to their EventHub partition bucket using
-        // ABS(CHECKSUM(PartitionKey)) % TotalPartitions. This is a non-SARGable expression
-        // (cannot seek on IX_Outbox_Partition) because it is computed per-row. The trade-off
-        // is intentional: the primary filter is LeasedUntilUtc IS NULL (served by
-        // IX_Outbox_Unleased) and the partition join is a secondary reduction over the small
-        // unleased set. For very high partition counts or strict latency budgets, store a
-        // pre-computed PartitionBucket INT column on dbo.Outbox to enable seeks.
         const string sql = @"
 WITH Batch AS
-(
-    SELECT TOP (@BatchSize)
-        o.SequenceNumber,
-        o.LeasedUntilUtc,
-        o.LeaseOwner
-    FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
-    INNER JOIN dbo.OutboxPartitions op
-        ON  op.OwnerProducerId = @PublisherId
-        AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
-        AND (ABS(CHECKSUM(o.PartitionKey)) % @TotalPartitions) = op.PartitionId
-    WHERE o.LeasedUntilUtc IS NULL
-    ORDER BY o.SequenceNumber
-)
-UPDATE Batch
-SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
-       LeaseOwner     = @PublisherId
-OUTPUT inserted.SequenceNumber,
-       inserted.TopicName,
-       inserted.PartitionKey,
-       inserted.EventType,
-       inserted.Headers,
-       inserted.Payload;";
-
-        return await ExecuteLeaseQueryAsync(sql, incrementRetry: false, ct).ConfigureAwait(false);
-    }
-
-    private async Task<IReadOnlyList<OutboxRow>> LeaseExpiredBatchAsync(CancellationToken ct)
-    {
-        // Partition affinity join mirrors the primary poll so that each publisher
-        // only recovers expired rows for its own partitions. Without this, a
-        // different publisher could re-send rows for a partition it doesn't own,
-        // interleaving with the owner's primary sends and breaking ordering.
-        const string sql = @"
-WITH Expired AS
 (
     SELECT TOP (@BatchSize)
         o.SequenceNumber,
@@ -504,15 +445,19 @@ WITH Expired AS
         ON  op.OwnerProducerId = @PublisherId
         AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
         AND (ABS(CHECKSUM(o.PartitionKey)) % @TotalPartitions) = op.PartitionId
-    WHERE o.LeasedUntilUtc IS NOT NULL
-      AND o.LeasedUntilUtc < SYSUTCDATETIME()
+    WHERE (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
       AND o.RetryCount < @MaxRetryCount
     ORDER BY o.SequenceNumber
 )
-UPDATE Expired
+UPDATE Batch
 SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
        LeaseOwner     = @PublisherId,
-       RetryCount     = RetryCount + 1
+       -- Only increment RetryCount for rows that were previously leased (expired).
+       -- Rows released by the circuit breaker have LeasedUntilUtc = NULL, so they
+       -- are treated as fresh and do not burn retry counts.
+       RetryCount     = CASE WHEN LeasedUntilUtc IS NOT NULL
+                             THEN RetryCount + 1
+                             ELSE RetryCount END
 OUTPUT inserted.SequenceNumber,
        inserted.TopicName,
        inserted.PartitionKey,
@@ -521,11 +466,11 @@ OUTPUT inserted.SequenceNumber,
        inserted.Payload,
        inserted.RetryCount;";
 
-        return await ExecuteLeaseQueryAsync(sql, incrementRetry: true, ct).ConfigureAwait(false);
+        return await ExecuteLeaseQueryAsync(sql, ct).ConfigureAwait(false);
     }
 
     private async Task<IReadOnlyList<OutboxRow>> ExecuteLeaseQueryAsync(
-        string sql, bool incrementRetry, CancellationToken ct)
+        string sql, CancellationToken ct)
     {
         // _totalPartitionCount is set once in StartAsync before any loops start,
         // so no lock is needed for reads.
@@ -550,7 +495,6 @@ OUTPUT inserted.SequenceNumber,
 
                 var rows = new List<OutboxRow>();
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                bool hasRetryCount = reader.FieldCount > 6;
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
                     rows.Add(new OutboxRow(
@@ -560,7 +504,7 @@ OUTPUT inserted.SequenceNumber,
                         EventType: reader.GetString(3),
                         Headers: reader.IsDBNull(4) ? null : reader.GetString(4),
                         Payload: reader.GetString(5),
-                        RetryCount: hasRetryCount ? reader.GetInt32(6) : 0));
+                        RetryCount: reader.GetInt32(6)));
                 }
 
                 return rows;
@@ -942,7 +886,7 @@ WHERE  OwnerProducerId = @ProducerId
             {
                 // Release the lease so rows return to the unleased pool without
                 // burning RetryCount. Without this, leased rows would expire,
-                // the recovery path would increment RetryCount, and messages
+                // the unified poll would increment RetryCount, and messages
                 // could be dead-lettered during a transient EventHub outage.
                 OnError($"Circuit open for topic '{topicName}', releasing leased rows", null);
                 await ReleaseLeasedRowsAsync(group.Select(r => r.SequenceNumber), ct)
@@ -958,6 +902,13 @@ WHERE  OwnerProducerId = @ProducerId
                 var batches = await BuildEventHubBatchesAsync(producer, partitionKey, group, ct)
                     .ConfigureAwait(false);
 
+                // All-or-nothing per group: only mark the group as published if
+                // every sub-batch succeeds. A partial success would delete the
+                // sent rows while the unsent rows wait for lease expiry, allowing
+                // newer rows to be processed first and breaking ordering.
+                var groupIds = new List<long>();
+                bool allSucceeded = true;
+
                 foreach ((EventDataBatch eventBatch, List<long> batchSequenceNumbers) in batches)
                 {
                     await using (eventBatch)
@@ -968,7 +919,7 @@ WHERE  OwnerProducerId = @ProducerId
                         try
                         {
                             await producer.SendAsync(eventBatch, sendCts.Token).ConfigureAwait(false);
-                            published.AddRange(batchSequenceNumbers);
+                            groupIds.AddRange(batchSequenceNumbers);
                             RecordSendSuccess(topicName);
                         }
                         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
@@ -976,9 +927,14 @@ WHERE  OwnerProducerId = @ProducerId
                             _lastPublishError = $"[{topicName}/{partitionKey}] EventHub send timeout";
                             OnError($"EventHub send timeout for topic '{topicName}' key '{partitionKey}'", null);
                             RecordSendFailure(topicName);
+                            allSucceeded = false;
+                            break; // Don't attempt remaining sub-batches
                         }
                     }
                 }
+
+                if (allSucceeded)
+                    published.AddRange(groupIds);
             }
             catch (Exception ex)
             {
@@ -1150,9 +1106,6 @@ WHERE  OwnerProducerId = @ProducerId
                 if (DateTime.UtcNow < openUntil)
                     return true;
                 // Half-open: allow one probe attempt.
-                // NOTE: both the primary PublishLoop and RecoveryLoop may
-                // concurrently see the circuit as closed and send for the
-                // same topic, so the "single probe" guarantee is approximate.
                 _topicCircuitOpenUntil.Remove(topicName);
             }
             return false;
@@ -1250,8 +1203,8 @@ public sealed class OutboxPublisherOptions
     public int LeaseDurationSeconds { get; set; } = 45;
 
     /// <summary>
-    /// After this many recovery-path re-leases without success, the row is
-    /// moved to dbo.OutboxDeadLetter. Default: 5.
+    /// After this many re-leases (from expired leases) without success, the row
+    /// is moved to dbo.OutboxDeadLetter. Default: 5.
     /// </summary>
     public int MaxRetryCount { get; set; } = 5;
 
@@ -1260,9 +1213,6 @@ public sealed class OutboxPublisherOptions
 
     /// <summary>Maximum adaptive poll interval (idle backoff ceiling) in milliseconds. Default: 5000.</summary>
     public int MaxPollIntervalMs { get; set; } = 5000;
-
-    /// <summary>Fixed interval for the recovery (expired-lease) poll in milliseconds. Default: 30 000.</summary>
-    public int RecoveryPollIntervalMs { get; set; } = 30_000;
 
     /// <summary>Heartbeat renewal interval in milliseconds. Default: 10 000.</summary>
     public int HeartbeatIntervalMs { get; set; } = 10_000;
