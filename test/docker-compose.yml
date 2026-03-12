@@ -1,0 +1,86 @@
+services:
+  sqlserver:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    platform: linux/arm64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${SA_PASSWORD}"
+    ports:
+      - "1433:1433"
+    healthcheck:
+      test: /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$${SA_PASSWORD}" -Q "SELECT 1" -b
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - outbox-net
+
+  sqlserver-init:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    platform: linux/arm64
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    volumes:
+      - ./init-db/init.sql:/init.sql:ro
+    entrypoint: /opt/mssql-tools/bin/sqlcmd
+    command: -S sqlserver -U sa -P "${SA_PASSWORD}" -i /init.sql
+    networks:
+      - outbox-net
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    platform: linux/arm64
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    healthcheck:
+      test: curl -f http://localhost:9644/v1/status/ready
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - outbox-net
+
+  event-producer:
+    build:
+      context: .
+      dockerfile: EventProducer/Dockerfile
+    platform: linux/arm64
+    environment:
+      ConnectionStrings__OutboxDb: "Server=sqlserver;Database=OutboxTest;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true"
+    depends_on:
+      sqlserver-init:
+        condition: service_completed_successfully
+    restart: on-failure
+    networks:
+      - outbox-net
+
+  outbox-publisher:
+    build:
+      context: .
+      dockerfile: OutboxPublisher/Dockerfile
+    platform: linux/arm64
+    environment:
+      ConnectionStrings__OutboxDb: "Server=sqlserver;Database=OutboxTest;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true"
+      Kafka__BootstrapServers: "redpanda:9092"
+    depends_on:
+      sqlserver-init:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - outbox-net
+
+networks:
+  outbox-net:
+    driver: bridge
