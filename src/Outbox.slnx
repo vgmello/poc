@@ -1,4 +1,8 @@
 <Solution>
   <Project Path="../tests/Outbox.Core.Tests/Outbox.Core.Tests.csproj" />
   <Project Path="Outbox.Core/Outbox.Core.csproj" />
+  <Project Path="Outbox.EventHub/Outbox.EventHub.csproj" />
+  <Project Path="Outbox.Kafka/Outbox.Kafka.csproj" />
+  <Project Path="Outbox.PostgreSQL/Outbox.PostgreSQL.csproj" />
+  <Project Path="Outbox.SqlServer/Outbox.SqlServer.csproj" />
 </Solution>
