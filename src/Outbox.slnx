@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="../tests/Outbox.Core.Tests/Outbox.Core.Tests.csproj" />
+  <Project Path="Outbox.Core/Outbox.Core.csproj" />
+</Solution>
