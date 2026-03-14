@@ -285,6 +285,8 @@ public interface IOutboxBuilder
 }
 ```
 
+`IOutboxEventHandler` is registered as a singleton (since `OutboxPublisher` is a singleton `BackgroundService`). Implementations must be thread-safe and must not depend on scoped services.
+
 ### Entry Point
 
 ```csharp
@@ -367,7 +369,7 @@ public static class EventHubOutboxBuilderExtensions
 }
 ```
 
-All transport extensions use `TryAddSingleton` for `IOutboxTransport`, allowing user overrides.
+All transport extensions use `TryAddSingleton` for `IOutboxTransport`, allowing user overrides. When a custom client factory overload is used, the corresponding options properties (e.g., `ConnectionString`, `EventHubName`) are ignored — the factory owns client construction.
 
 ### Full Registration Example
 
