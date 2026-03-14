@@ -99,7 +99,8 @@ public interface IOutboxEventHandler
     Task OnMessageDeadLetteredAsync(OutboxMessage message, CancellationToken ct) =>
         Task.CompletedTask;
 
-    Task OnPublishFailedAsync(OutboxMessage message, Exception exception, CancellationToken ct) =>
+    Task OnPublishFailedAsync(
+        IReadOnlyList<OutboxMessage> messages, Exception exception, CancellationToken ct) =>
         Task.CompletedTask;
 
     Task OnCircuitBreakerStateChangedAsync(
@@ -280,7 +281,7 @@ public interface IOutboxBuilder
     IOutboxBuilder ConfigurePublisher(Action<OutboxPublisherOptions> configure);
     IOutboxBuilder ConfigureEvents<THandler>()
         where THandler : class, IOutboxEventHandler;
-    IOutboxBuilder ConfigureEvents(Action<IOutboxEventHandler> configure);
+    IOutboxBuilder ConfigureEvents(Func<IServiceProvider, IOutboxEventHandler> factory);
 }
 ```
 
@@ -541,7 +542,7 @@ Any `IOutboxStore` implementation must guarantee:
 - `RebalanceAsync` respects fair-share calculation and grace periods
 - Ordering is always `(EventDateTimeUtc, EventOrdinal)`
 - Store implementations are registered as singletons. They must not cache or hold `DbConnection` instances. Each method must obtain a connection from the factory, use it, and dispose it within the method scope
-- Transient SQL errors (deadlocks, timeouts, connectivity) must be retried internally by the store, up to `TransientRetryMaxAttempts` with exponential backoff
+- Transient SQL errors (deadlocks, timeouts, connectivity) must be retried internally by the store, up to `TransientRetryMaxAttempts` with exponential backoff using `TransientRetryBackoffMs` as the base delay (e.g., 200ms, 400ms, 800ms for attempts 1-3)
 
 ### 7. Transport Implementation Contract
 
