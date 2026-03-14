@@ -44,12 +44,16 @@ Database installation/migrations are **not** handled by the library. Each databa
 public interface IOutboxTransport : IAsyncDisposable
 {
     Task SendAsync(
+        string topicName,
+        string partitionKey,
         IReadOnlyList<OutboxMessage> messages,
         CancellationToken cancellationToken);
 }
 ```
 
-Messages arrive pre-grouped by `(TopicName, PartitionKey)` by the publisher engine. The transport sends them. On any failure, it throws — the publisher handles retry/release logic.
+The publisher engine groups messages by `(TopicName, PartitionKey)` and calls `SendAsync` once per group with the topic and partition key as explicit parameters. The transport sends them. On any failure, it throws — the publisher handles retry/release logic.
+
+Transport implementations are registered as singletons. The DI container handles disposal on shutdown. Implementations that need per-topic client management (e.g., EventHub's `EventHubProducerClient` per topic) handle this internally.
 
 ### IOutboxStore
 
@@ -70,7 +74,7 @@ public interface IOutboxStore
         string producerId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct);
 
     Task DeadLetterAsync(
-        IReadOnlyList<long> sequenceNumbers, CancellationToken ct);
+        IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct);
 
     // Partition management
     Task HeartbeatAsync(string producerId, CancellationToken ct);
@@ -93,6 +97,9 @@ public interface IOutboxEventHandler
         Task.CompletedTask;
 
     Task OnMessageDeadLetteredAsync(OutboxMessage message, CancellationToken ct) =>
+        Task.CompletedTask;
+
+    Task OnPublishFailedAsync(OutboxMessage message, Exception exception, CancellationToken ct) =>
         Task.CompletedTask;
 
     Task OnCircuitBreakerStateChangedAsync(
@@ -139,9 +146,10 @@ public sealed record OutboxMessage(
     string EventType,
     string? Headers,
     string Payload,
-    DateTime EventDateTimeUtc,
+    DateTimeOffset EventDateTimeUtc,
     short EventOrdinal,
-    int RetryCount);
+    int RetryCount,
+    DateTimeOffset CreatedAtUtc);
 
 public sealed record DeadLetteredMessage(
     long SequenceNumber,
@@ -150,10 +158,12 @@ public sealed record DeadLetteredMessage(
     string EventType,
     string? Headers,
     string Payload,
-    DateTime EventDateTimeUtc,
+    DateTimeOffset EventDateTimeUtc,
     short EventOrdinal,
     int RetryCount,
-    DateTime DeadLetteredAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset DeadLetteredAtUtc,
+    string? LastError);
 ```
 
 ## Options & Configuration
@@ -193,10 +203,11 @@ public sealed class KafkaTransportOptions
     public int RetryBackoffMs { get; set; } = 500;
     public int LingerMs { get; set; } = 5;
     public int MessageTimeoutMs { get; set; } = 15_000;
+    public int SendTimeoutSeconds { get; set; } = 15;
 }
 ```
 
-Bound from `Outbox:Kafka`.
+Bound from `Outbox:Kafka`. The `SendTimeoutSeconds` is used for per-message send timeout and factors into lease duration validation (`LeaseDurationSeconds >= SendTimeoutSeconds * 2 + buffer`).
 
 ### EventHubTransportOptions
 
@@ -206,6 +217,7 @@ public sealed class EventHubTransportOptions
     public string ConnectionString { get; set; } = string.Empty;
     public string EventHubName { get; set; } = string.Empty;
     public int MaxBatchSizeBytes { get; set; } = 1_048_576; // 1MB
+    public int SendTimeoutSeconds { get; set; } = 15;
 }
 ```
 
@@ -218,12 +230,16 @@ public sealed class SqlServerStoreOptions
 {
     public int CommandTimeoutSeconds { get; set; } = 30;
     public string SchemaName { get; set; } = "dbo";
+    public int TransientRetryMaxAttempts { get; set; } = 3;
+    public int TransientRetryBackoffMs { get; set; } = 200;
 }
 
 public sealed class PostgreSqlStoreOptions
 {
     public int CommandTimeoutSeconds { get; set; } = 30;
     public string SchemaName { get; set; } = "public";
+    public int TransientRetryMaxAttempts { get; set; } = 3;
+    public int TransientRetryBackoffMs { get; set; } = 200;
 }
 ```
 
@@ -264,7 +280,7 @@ public interface IOutboxBuilder
     IOutboxBuilder ConfigurePublisher(Action<OutboxPublisherOptions> configure);
     IOutboxBuilder ConfigureEvents<THandler>()
         where THandler : class, IOutboxEventHandler;
-    IOutboxBuilder ConfigureEvents(Action<OutboxEventHandlerOptions> configure);
+    IOutboxBuilder ConfigureEvents(Action<IOutboxEventHandler> configure);
 }
 ```
 
@@ -517,14 +533,19 @@ These are non-negotiable. Every `IOutboxStore` and `IOutboxTransport` implementa
 
 Any `IOutboxStore` implementation must guarantee:
 - `LeaseBatchAsync` uses row-level locking with skip-locked semantics
+- `LeaseBatchAsync` joins against the partition table server-side to filter rows to owned partitions using `ABS(hash(PartitionKey)) % TotalPartitions`. The `TotalPartitions` value is not passed as a parameter — the store owns this data and derives it from the `OutboxPartitions` table
+- `LeaseBatchAsync` conditionally increments `RetryCount` only for rows where `LeasedUntilUtc IS NOT NULL` (recovery rows), not for fresh rows
 - `DeletePublishedAsync` includes a `LeaseOwner` guard
-- `DeadLetterAsync` is atomic (single transaction)
+- `DeadLetterAsync` is atomic (single transaction) and writes `LastError` to the dead letter table
+- `ReleaseLeaseAsync` must set `LeasedUntilUtc = NULL` and `LeaseOwner = NULL`, not merely expire the lease. This prevents the conditional `RetryCount` increment on the next lease cycle (critical for circuit breaker correctness)
 - `RebalanceAsync` respects fair-share calculation and grace periods
 - Ordering is always `(EventDateTimeUtc, EventOrdinal)`
+- Store implementations are registered as singletons. They must not cache or hold `DbConnection` instances. Each method must obtain a connection from the factory, use it, and dispose it within the method scope
+- Transient SQL errors (deadlocks, timeouts, connectivity) must be retried internally by the store, up to `TransientRetryMaxAttempts` with exponential backoff
 
 ### 7. Transport Implementation Contract
 
 Any `IOutboxTransport` implementation must guarantee:
 - `SendAsync` throws on any failure — the publisher handles retry/release
-- Messages are sent with their `PartitionKey` for broker partition affinity
+- The `topicName` and `partitionKey` parameters are used for broker routing — the transport must ensure partition affinity
 - Headers from `OutboxMessage.Headers` (JSON) are deserialized and forwarded to the broker's native header mechanism
