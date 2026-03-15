@@ -30,6 +30,8 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
         CancellationToken cancellationToken)
     {
         var deliveryErrors = new List<Exception>();
+        var pending = messages.Count;
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         foreach (var msg in messages)
         {
@@ -37,7 +39,7 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
             {
                 Key = partitionKey,
                 Value = msg.Payload,
-                Headers = ParseHeaders(msg.Headers),
+                Headers = ParseHeaders(msg.Headers, msg.EventType),
             };
 
             _producer.Produce(topicName, kafkaMessage, report =>
@@ -50,18 +52,24 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
                             report.Error, report));
                     }
                 }
+
+                if (Interlocked.Decrement(ref pending) == 0)
+                    tcs.TrySetResult();
             });
         }
 
-        // Flush all queued messages as a single batch.
-        // This blocks until all delivery reports have been received.
-        int remaining = _producer.Flush(TimeSpan.FromMilliseconds(_sendTimeoutMs));
+        // Flush queued messages with cancellation support.
+        // Poll in short intervals so we can respect the cancellation token.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(TimeSpan.FromMilliseconds(_sendTimeoutMs));
 
-        if (remaining > 0)
+        while (!tcs.Task.IsCompleted)
         {
-            throw new TimeoutException(
-                $"Kafka flush timed out with {remaining} message(s) still in queue for topic '{topicName}'");
+            cts.Token.ThrowIfCancellationRequested();
+            _producer.Flush(TimeSpan.FromMilliseconds(100));
         }
+
+        await tcs.Task.ConfigureAwait(false); // propagate any exceptions
 
         if (deliveryErrors.Count > 0)
         {
@@ -73,25 +81,37 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
 
     public ValueTask DisposeAsync()
     {
-        _producer.Flush(TimeSpan.FromSeconds(10));
-        _producer.Dispose();
+        // Don't dispose the producer — it's owned by the DI container.
+        // Just flush any remaining messages with a short timeout.
+        try { _producer.Flush(TimeSpan.FromSeconds(5)); }
+        catch { /* best effort during shutdown */ }
         return ValueTask.CompletedTask;
     }
 
-    private static Headers? ParseHeaders(string? headersJson)
+    private static Headers ParseHeaders(string? headersJson, string eventType)
     {
-        if (string.IsNullOrEmpty(headersJson))
-            return null;
-
-        var dict = JsonSerializer.Deserialize<Dictionary<string, string>>(headersJson);
-        if (dict is null || dict.Count == 0)
-            return null;
-
         var headers = new Headers();
-        foreach (var kvp in dict)
+
+        // Always propagate EventType (consistent with EventHub transport)
+        headers.Add("EventType", System.Text.Encoding.UTF8.GetBytes(eventType));
+
+        if (!string.IsNullOrEmpty(headersJson))
         {
-            headers.Add(kvp.Key, System.Text.Encoding.UTF8.GetBytes(kvp.Value));
+            try
+            {
+                var dict = JsonSerializer.Deserialize<Dictionary<string, string>>(headersJson);
+                if (dict is not null)
+                {
+                    foreach (var kvp in dict)
+                        headers.Add(kvp.Key, System.Text.Encoding.UTF8.GetBytes(kvp.Value));
+                }
+            }
+            catch (JsonException)
+            {
+                // Skip corrupted headers — don't crash the entire batch.
+            }
         }
+
         return headers;
     }
 }

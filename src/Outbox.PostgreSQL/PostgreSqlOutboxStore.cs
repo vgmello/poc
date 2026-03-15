@@ -96,7 +96,7 @@ WITH batch AS (
     INNER JOIN {_schema}.outbox_partitions op
         ON  op.owner_producer_id = @publisher_id
         AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < clock_timestamp())
-        AND (ABS(hashtext(o.partition_key)) % @total_partitions) = op.partition_id
+        AND ((hashtext(o.partition_key) & 2147483647) % @total_partitions) = op.partition_id
     WHERE (o.leased_until_utc IS NULL OR o.leased_until_utc < clock_timestamp())
       AND o.retry_count < @max_retry_count
     ORDER BY o.event_datetime_utc, o.event_ordinal
@@ -203,12 +203,13 @@ WHERE  sequence_number = ANY(@ids)
     }
 
     public async Task DeadLetterAsync(
-        IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
+        string producerId, IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
     {
         var sql = $@"
 WITH dead AS (
     DELETE FROM {_schema}.outbox
     WHERE  sequence_number = ANY(@ids)
+      AND  lease_owner = @publisher_id
     RETURNING sequence_number, topic_name, partition_key, event_type,
               headers, payload, created_at_utc, retry_count,
               event_datetime_utc, event_ordinal
@@ -225,6 +226,7 @@ FROM dead;";
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
             await using var cmd = _db.CreateCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@publisher_id", producerId);
             cmd.Parameters.Add(new NpgsqlParameter("@ids", NpgsqlDbType.Array | NpgsqlDbType.Bigint)
             {
                 Value = sequenceNumbers.ToArray()
@@ -314,11 +316,12 @@ WHERE  owner_producer_id = @producer_id;";
 
     public async Task RebalanceAsync(string producerId, CancellationToken ct)
     {
-        await using var conn = await _db.OpenConnectionAsync(ct).ConfigureAwait(false);
-        await using var tx = await ((NpgsqlConnection)conn).BeginTransactionAsync(ct).ConfigureAwait(false);
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
+        {
+            await using var tx = await ((NpgsqlConnection)conn).BeginTransactionAsync(token).ConfigureAwait(false);
 
-        // Step 1: Mark stale producers' partitions as entering grace period
-        var markStaleSql = $@"
+            // Step 1: Mark stale producers' partitions as entering grace period
+            var markStaleSql = $@"
 UPDATE {_schema}.outbox_partitions
 SET    grace_expires_utc = clock_timestamp() + make_interval(secs => @partition_grace_period_seconds)
 WHERE  owner_producer_id <> @producer_id
@@ -330,16 +333,16 @@ WHERE  owner_producer_id <> @producer_id
            WHERE  last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
        );";
 
-        await using (var cmd = _db.CreateCommand(markStaleSql, conn))
-        {
-            cmd.Parameters.AddWithValue("@producer_id", producerId);
-            cmd.Parameters.AddWithValue("@heartbeat_timeout_seconds", (double)_publisherOptions.HeartbeatTimeoutSeconds);
-            cmd.Parameters.AddWithValue("@partition_grace_period_seconds", (double)_publisherOptions.PartitionGracePeriodSeconds);
-            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
+            await using (var cmd = _db.CreateCommand(markStaleSql, conn))
+            {
+                cmd.Parameters.AddWithValue("@producer_id", producerId);
+                cmd.Parameters.AddWithValue("@heartbeat_timeout_seconds", (double)_publisherOptions.HeartbeatTimeoutSeconds);
+                cmd.Parameters.AddWithValue("@partition_grace_period_seconds", (double)_publisherOptions.PartitionGracePeriodSeconds);
+                await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            }
 
-        // Step 2: Calculate fair share and claim unowned/grace-expired partitions
-        var claimSql = $@"
+            // Step 2: Calculate fair share and claim unowned/grace-expired partitions
+            var claimSql = $@"
 WITH counts AS (
     SELECT
         (SELECT COUNT(*) FROM {_schema}.outbox_partitions) AS total_partitions,
@@ -370,15 +373,15 @@ SET    owner_producer_id = @producer_id,
 FROM   to_claim
 WHERE  {_schema}.outbox_partitions.partition_id = to_claim.partition_id;";
 
-        await using (var cmd = _db.CreateCommand(claimSql, conn))
-        {
-            cmd.Parameters.AddWithValue("@producer_id", producerId);
-            cmd.Parameters.AddWithValue("@heartbeat_timeout_seconds", (double)_publisherOptions.HeartbeatTimeoutSeconds);
-            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
+            await using (var cmd = _db.CreateCommand(claimSql, conn))
+            {
+                cmd.Parameters.AddWithValue("@producer_id", producerId);
+                cmd.Parameters.AddWithValue("@heartbeat_timeout_seconds", (double)_publisherOptions.HeartbeatTimeoutSeconds);
+                await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            }
 
-        // Step 3: Release excess above fair share
-        var releaseSql = $@"
+            // Step 3: Release excess above fair share
+            var releaseSql = $@"
 WITH counts AS (
     SELECT
         (SELECT COUNT(*) FROM {_schema}.outbox_partitions) AS total_partitions,
@@ -409,14 +412,15 @@ SET    owner_producer_id = NULL,
 FROM   to_release
 WHERE  {_schema}.outbox_partitions.partition_id = to_release.partition_id;";
 
-        await using (var cmd = _db.CreateCommand(releaseSql, conn))
-        {
-            cmd.Parameters.AddWithValue("@producer_id", producerId);
-            cmd.Parameters.AddWithValue("@heartbeat_timeout_seconds", (double)_publisherOptions.HeartbeatTimeoutSeconds);
-            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
+            await using (var cmd = _db.CreateCommand(releaseSql, conn))
+            {
+                cmd.Parameters.AddWithValue("@producer_id", producerId);
+                cmd.Parameters.AddWithValue("@heartbeat_timeout_seconds", (double)_publisherOptions.HeartbeatTimeoutSeconds);
+                await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            }
 
-        await tx.CommitAsync(ct).ConfigureAwait(false);
+            await tx.CommitAsync(token).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
     }
 
     public async Task ClaimOrphanPartitionsAsync(string producerId, CancellationToken ct)

@@ -54,6 +54,16 @@ public sealed class OutboxHealthCheck : IHealthCheck
                 data: data));
         }
 
+        // Unhealthy: publish loop running but no heartbeat has ever succeeded (DB unreachable from startup)
+        if (_state.LastHeartbeatUtc == DateTimeOffset.MinValue &&
+            _state.PublishLoopStartedAtUtc != DateTimeOffset.MinValue &&
+            now - _state.PublishLoopStartedAtUtc > heartbeatStalenessThreshold)
+        {
+            return Task.FromResult(HealthCheckResult.Unhealthy(
+                "Outbox publisher has never completed a heartbeat since startup.",
+                data: data));
+        }
+
         // Unhealthy: no polls at all for an extended period (3x max poll interval)
         var pollStalenessThreshold = TimeSpan.FromMilliseconds(opts.MaxPollIntervalMs * 3);
         if (_state.LastPollUtc != DateTimeOffset.MinValue &&
@@ -61,6 +71,16 @@ public sealed class OutboxHealthCheck : IHealthCheck
         {
             return Task.FromResult(HealthCheckResult.Unhealthy(
                 $"Outbox publish loop has not polled recently. Last poll: {_state.LastPollUtc:O}.",
+                data: data));
+        }
+
+        // Unhealthy: publish loop running but no poll has ever succeeded
+        if (_state.LastPollUtc == DateTimeOffset.MinValue &&
+            _state.PublishLoopStartedAtUtc != DateTimeOffset.MinValue &&
+            now - _state.PublishLoopStartedAtUtc > pollStalenessThreshold)
+        {
+            return Task.FromResult(HealthCheckResult.Unhealthy(
+                "Outbox publisher has never completed a poll since startup.",
                 data: data));
         }
 

@@ -196,6 +196,7 @@ public class OutboxPublisherServiceTests : IDisposable
         await service.StopAsync(CancellationToken.None);
 
         await _store.Received().DeadLetterAsync(
+            Arg.Any<string>(),
             Arg.Is<IReadOnlyList<long>>(s => s.Contains(1L)),
             Arg.Any<string?>(),
             Arg.Any<CancellationToken>());

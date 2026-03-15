@@ -128,7 +128,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
                 INNER JOIN {schema}.OutboxPartitions op
                     ON  op.OwnerProducerId = @PublisherId
                     AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
-                    AND (ABS(CHECKSUM(o.PartitionKey)) % @TotalPartitions) = op.PartitionId
+                    AND (ABS(CAST(CHECKSUM(o.PartitionKey) AS BIGINT)) % @TotalPartitions) = op.PartitionId
                 WHERE (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
                   AND o.RetryCount < @MaxRetryCount
                 ORDER BY o.EventDateTimeUtc, o.EventOrdinal
@@ -251,13 +251,13 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     }
 
     public async Task DeadLetterAsync(
-        IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
+        string producerId, IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
     {
         if (sequenceNumbers.Count == 0) return;
         var schema = _options.SchemaName;
 
         // Dead-letter specific sequence numbers (by ID list), not by RetryCount threshold.
-        // Use DELETE...OUTPUT INTO for atomicity.
+        // Use DELETE...OUTPUT INTO for atomicity. LeaseOwner guard prevents zombie publisher race.
         var sql = $"""
             DELETE o
             OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
@@ -270,7 +270,8 @@ public sealed class SqlServerOutboxStore : IOutboxStore
                  EventDateTimeUtc, EventOrdinal,
                  DeadLetteredAtUtc, LastError)
             FROM {schema}.Outbox o
-            INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
+            INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
+            WHERE o.LeaseOwner = @PublisherId;
             """;
 
         await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
@@ -278,6 +279,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             await using var cmd = (SqlCommand)conn.CreateCommand();
             cmd.CommandText = sql;
             cmd.CommandTimeout = _options.CommandTimeoutSeconds;
+            cmd.Parameters.AddWithValue("@PublisherId", producerId);
             cmd.Parameters.Add("@LastError", SqlDbType.NVarChar, 2000).Value =
                 (object?)lastError ?? DBNull.Value;
             SqlServerDbHelper.AddSequenceNumberTvp(cmd, "@Ids", sequenceNumbers, schema);
@@ -415,12 +417,18 @@ public sealed class SqlServerOutboxStore : IOutboxStore
                            WHERE  LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
                        );
 
-                UPDATE TOP (@ToAcquire) {schema}.OutboxPartitions WITH (UPDLOCK)
+                UPDATE op
                 SET    OwnerProducerId = @ProducerId,
                        OwnedSinceUtc   = SYSUTCDATETIME(),
                        GraceExpiresUtc = NULL
-                WHERE  (OwnerProducerId IS NULL
-                        OR GraceExpiresUtc < SYSUTCDATETIME());
+                FROM   {schema}.OutboxPartitions op WITH (UPDLOCK)
+                WHERE  op.PartitionId IN (
+                           SELECT TOP (@ToAcquire) PartitionId
+                           FROM   {schema}.OutboxPartitions WITH (UPDLOCK)
+                           WHERE  (OwnerProducerId IS NULL
+                                   OR GraceExpiresUtc < SYSUTCDATETIME())
+                           ORDER BY PartitionId
+                       );
             END;
 
             SELECT @CurrentlyOwned = COUNT(*)
@@ -431,11 +439,17 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             BEGIN
                 DECLARE @ToRelease INT = @CurrentlyOwned - @FairShare;
 
-                UPDATE TOP (@ToRelease) {schema}.OutboxPartitions
+                UPDATE op
                 SET    OwnerProducerId = NULL,
                        OwnedSinceUtc  = NULL,
                        GraceExpiresUtc = NULL
-                WHERE  OwnerProducerId = @ProducerId;
+                FROM   {schema}.OutboxPartitions op
+                WHERE  op.PartitionId IN (
+                           SELECT TOP (@ToRelease) PartitionId
+                           FROM   {schema}.OutboxPartitions
+                           WHERE  OwnerProducerId = @ProducerId
+                           ORDER BY PartitionId DESC
+                       );
             END;
             """;
 
@@ -481,11 +495,17 @@ public sealed class SqlServerOutboxStore : IOutboxStore
 
             IF @ToAcquire > 0
             BEGIN
-                UPDATE TOP (@ToAcquire) {schema}.OutboxPartitions WITH (UPDLOCK)
+                UPDATE op
                 SET    OwnerProducerId = @ProducerId,
                        OwnedSinceUtc   = SYSUTCDATETIME(),
                        GraceExpiresUtc = NULL
-                WHERE  OwnerProducerId IS NULL;
+                FROM   {schema}.OutboxPartitions op WITH (UPDLOCK)
+                WHERE  op.PartitionId IN (
+                           SELECT TOP (@ToAcquire) PartitionId
+                           FROM   {schema}.OutboxPartitions WITH (UPDLOCK)
+                           WHERE  OwnerProducerId IS NULL
+                           ORDER BY PartitionId
+                       );
             END;
             """;
 

@@ -19,7 +19,7 @@ public interface IOutboxStore
         bool incrementRetry, CancellationToken ct);
 
     Task DeadLetterAsync(
-        IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct);
+        string producerId, IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct);
 
     Task HeartbeatAsync(string producerId, CancellationToken ct);
     Task<int> GetTotalPartitionsAsync(CancellationToken ct);

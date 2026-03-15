@@ -43,11 +43,6 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
                 "EventHub transport only supports a single EventHub per transport instance.");
         }
 
-        using var timeoutCts = CancellationTokenSource
-            .CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(TimeSpan.FromSeconds(_sendTimeoutSeconds));
-        var ct = timeoutCts.Token;
-
         var batchOptions = new CreateBatchOptions
         {
             PartitionKey = partitionKey,
@@ -57,27 +52,19 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
 
         try
         {
+            using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            sendCts.CancelAfter(TimeSpan.FromSeconds(_sendTimeoutSeconds));
+            var ct = sendCts.Token;
+
             batch = await _client.CreateBatchAsync(batchOptions, ct);
 
             foreach (var msg in messages)
             {
-                var eventData = new EventData(msg.Payload);
-
-                if (!string.IsNullOrEmpty(msg.Headers))
-                {
-                    var headers = JsonSerializer.Deserialize<Dictionary<string, string>>(msg.Headers);
-                    if (headers is not null)
-                    {
-                        foreach (var kvp in headers)
-                            eventData.Properties[kvp.Key] = kvp.Value;
-                    }
-                }
-
-                eventData.Properties["EventType"] = msg.EventType;
+                var eventData = CreateEventData(msg);
 
                 if (!batch.TryAdd(eventData))
                 {
-                    // Current batch is full, send it and start a new one
+                    // Current batch is full, send it and start a new one.
                     if (batch.Count > 0)
                     {
                         await _client.SendAsync(batch, ct);
@@ -85,6 +72,8 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
                         batch = null;
                     }
 
+                    // Reset timeout for remaining messages.
+                    sendCts.CancelAfter(TimeSpan.FromSeconds(_sendTimeoutSeconds));
                     batch = await _client.CreateBatchAsync(batchOptions, ct);
 
                     if (!batch.TryAdd(eventData))
@@ -106,8 +95,34 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        await _client.DisposeAsync();
+        // Don't dispose the EventHubProducerClient — it's owned by the DI container.
+        return ValueTask.CompletedTask;
+    }
+
+    private static EventData CreateEventData(OutboxMessage msg)
+    {
+        var eventData = new EventData(msg.Payload);
+
+        if (!string.IsNullOrEmpty(msg.Headers))
+        {
+            try
+            {
+                var headers = JsonSerializer.Deserialize<Dictionary<string, string>>(msg.Headers);
+                if (headers is not null)
+                {
+                    foreach (var kvp in headers)
+                        eventData.Properties[kvp.Key] = kvp.Value;
+                }
+            }
+            catch (JsonException)
+            {
+                // Skip corrupted headers — don't crash the entire batch.
+            }
+        }
+
+        eventData.Properties["EventType"] = msg.EventType;
+        return eventData;
     }
 }

@@ -11,6 +11,7 @@ public sealed class OutboxHealthState
     private long _lastPollTicks;
     private volatile bool _isPublishLoopRunning;
     private volatile int _consecutiveLoopRestarts;
+    private long _publishLoopStartedAtTicks;
 
     // Circuit breaker state: topic name → true if open
     private readonly object _circuitLock = new();
@@ -20,6 +21,7 @@ public sealed class OutboxHealthState
     public DateTimeOffset LastSuccessfulPublishUtc => TicksToDateTimeOffset(Volatile.Read(ref _lastSuccessfulPublishTicks));
     public DateTimeOffset LastPollUtc => TicksToDateTimeOffset(Volatile.Read(ref _lastPollTicks));
     public bool IsPublishLoopRunning => _isPublishLoopRunning;
+    public DateTimeOffset PublishLoopStartedAtUtc => TicksToDateTimeOffset(Volatile.Read(ref _publishLoopStartedAtTicks));
     public int ConsecutiveLoopRestarts => _consecutiveLoopRestarts;
 
     public void RecordHeartbeat() =>
@@ -31,8 +33,12 @@ public sealed class OutboxHealthState
     public void RecordPoll() =>
         Volatile.Write(ref _lastPollTicks, DateTimeOffset.UtcNow.Ticks);
 
-    public void SetPublishLoopRunning(bool running) =>
+    public void SetPublishLoopRunning(bool running)
+    {
         _isPublishLoopRunning = running;
+        if (running)
+            Volatile.Write(ref _publishLoopStartedAtTicks, DateTimeOffset.UtcNow.Ticks);
+    }
 
     public void RecordLoopRestart() =>
         Interlocked.Increment(ref _consecutiveLoopRestarts);

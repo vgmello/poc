@@ -137,6 +137,8 @@ internal sealed class OutboxPublisherService : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Unexpected error in outbox loop orchestration");
+                if (stoppingToken.IsCancellationRequested)
+                    return;
             }
 
             _healthState.SetPublishLoopRunning(false);
@@ -221,6 +223,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                 if (poison.Count > 0)
                 {
                     await _store.DeadLetterAsync(
+                        producerId,
                         poison.Select(m => m.SequenceNumber).ToList(),
                         "Max retry count exceeded",
                         ct);
@@ -248,7 +251,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                     {
                         var topicName = group.Key.TopicName;
                         var partitionKey = group.Key.PartitionKey;
-                        var groupMessages = group.ToList();
+                        var groupMessages = group.OrderBy(m => m.SequenceNumber).ToList();
                         var sequenceNumbers = groupMessages.Select(m => m.SequenceNumber).ToList();
 
                         if (circuitBreaker.IsOpen(topicName))

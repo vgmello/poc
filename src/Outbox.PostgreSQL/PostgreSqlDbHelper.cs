@@ -51,7 +51,7 @@ internal sealed class PostgreSqlDbHelper
             }
             catch (NpgsqlException ex) when (IsTransientNpgsqlError(ex) && attempt < maxAttempts)
             {
-                await Task.Delay(backoffMs * attempt, ct).ConfigureAwait(false);
+                await Task.Delay(backoffMs * (1 << (attempt - 1)), ct).ConfigureAwait(false);
             }
         }
     }
