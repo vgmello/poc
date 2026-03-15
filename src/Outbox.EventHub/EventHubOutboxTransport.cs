@@ -13,6 +13,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
     private readonly EventHubProducerClient _client;
     private readonly ILogger<EventHubOutboxTransport> _logger;
     private readonly int _sendTimeoutSeconds;
+    private readonly int _maxBatchSizeBytes;
     private readonly string _configuredEventHubName;
 
     public EventHubOutboxTransport(
@@ -23,6 +24,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
         _client = client;
         _logger = logger;
         _sendTimeoutSeconds = options.Value.SendTimeoutSeconds;
+        _maxBatchSizeBytes = options.Value.MaxBatchSizeBytes;
         _configuredEventHubName = options.Value.EventHubName;
     }
 
@@ -46,7 +48,11 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(_sendTimeoutSeconds));
         var ct = timeoutCts.Token;
 
-        var batchOptions = new CreateBatchOptions { PartitionKey = partitionKey };
+        var batchOptions = new CreateBatchOptions
+        {
+            PartitionKey = partitionKey,
+            MaximumSizeInBytes = _maxBatchSizeBytes > 0 ? _maxBatchSizeBytes : null
+        };
         EventDataBatch? batch = null;
 
         try

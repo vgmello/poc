@@ -11,6 +11,7 @@ public sealed class PostgreSqlDeadLetterManager : IDeadLetterManager
 {
     private readonly PostgreSqlDbHelper _db;
     private readonly PostgreSqlStoreOptions _options;
+    private readonly string _schema;
 
     public PostgreSqlDeadLetterManager(
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
@@ -18,17 +19,18 @@ public sealed class PostgreSqlDeadLetterManager : IDeadLetterManager
         IOptions<PostgreSqlStoreOptions> options)
     {
         _options = options.Value;
+        _schema = _options.SchemaName;
         _db = new PostgreSqlDbHelper(connectionFactory, serviceProvider, _options);
     }
 
     public async Task<IReadOnlyList<DeadLetteredMessage>> GetAsync(
         int limit, int offset, CancellationToken ct)
     {
-        const string sql = @"
+        var sql = $@"
 SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
        event_datetime_utc, event_ordinal, retry_count, created_at_utc,
        dead_lettered_at_utc, last_error
-FROM   outbox_dead_letter
+FROM   {_schema}.outbox_dead_letter
 ORDER  BY dead_letter_seq
 LIMIT  @limit OFFSET @offset;";
 
@@ -65,14 +67,14 @@ LIMIT  @limit OFFSET @offset;";
 
     public async Task ReplayAsync(IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
     {
-        const string sql = @"
+        var sql = $@"
 WITH replayed AS (
-    DELETE FROM outbox_dead_letter
+    DELETE FROM {_schema}.outbox_dead_letter
     WHERE  sequence_number = ANY(@ids)
     RETURNING sequence_number, topic_name, partition_key, event_type, headers, payload,
               created_at_utc, event_datetime_utc, event_ordinal
 )
-INSERT INTO outbox
+INSERT INTO {_schema}.outbox
     (topic_name, partition_key, event_type, headers, payload,
      created_at_utc, event_datetime_utc, event_ordinal,
      leased_until_utc, lease_owner, retry_count)
@@ -94,8 +96,8 @@ FROM replayed;";
 
     public async Task PurgeAsync(IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
     {
-        const string sql = @"
-DELETE FROM outbox_dead_letter
+        var sql = $@"
+DELETE FROM {_schema}.outbox_dead_letter
 WHERE  sequence_number = ANY(@ids);";
 
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
@@ -111,7 +113,7 @@ WHERE  sequence_number = ANY(@ids);";
 
     public async Task PurgeAllAsync(CancellationToken ct)
     {
-        const string sql = "DELETE FROM outbox_dead_letter;";
+        var sql = $"DELETE FROM {_schema}.outbox_dead_letter;";
 
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {

@@ -55,7 +55,13 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
 
         // Flush all queued messages as a single batch.
         // This blocks until all delivery reports have been received.
-        _producer.Flush(TimeSpan.FromMilliseconds(_sendTimeoutMs));
+        int remaining = _producer.Flush(TimeSpan.FromMilliseconds(_sendTimeoutMs));
+
+        if (remaining > 0)
+        {
+            throw new TimeoutException(
+                $"Kafka flush timed out with {remaining} message(s) still in queue for topic '{topicName}'");
+        }
 
         if (deliveryErrors.Count > 0)
         {

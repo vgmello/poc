@@ -13,6 +13,7 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     private readonly PostgreSqlDbHelper _db;
     private readonly PostgreSqlStoreOptions _options;
     private readonly OutboxPublisherOptions _publisherOptions;
+    private readonly string _schema;
 
     private volatile int _cachedPartitionCount;
     private long _partitionCountRefreshedAtTicks;
@@ -25,6 +26,7 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     {
         _options = options.Value;
         _publisherOptions = publisherOptions.Value;
+        _schema = _options.SchemaName;
         _db = new PostgreSqlDbHelper(connectionFactory, serviceProvider, _options);
     }
 
@@ -37,8 +39,8 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
         string producerId = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
         string hostName = Environment.MachineName;
 
-        const string sql = @"
-INSERT INTO outbox_producers (producer_id, registered_at_utc, last_heartbeat_utc, host_name)
+        var sql = $@"
+INSERT INTO {_schema}.outbox_producers (producer_id, registered_at_utc, last_heartbeat_utc, host_name)
 VALUES (@producer_id, clock_timestamp(), clock_timestamp(), @host_name)
 ON CONFLICT (producer_id) DO UPDATE
 SET last_heartbeat_utc = clock_timestamp(),
@@ -57,14 +59,14 @@ SET last_heartbeat_utc = clock_timestamp(),
 
     public async Task UnregisterProducerAsync(string producerId, CancellationToken ct)
     {
-        const string sql = @"
-UPDATE outbox_partitions
+        var sql = $@"
+UPDATE {_schema}.outbox_partitions
 SET    owner_producer_id = NULL,
        owned_since_utc   = NULL,
        grace_expires_utc = NULL
 WHERE  owner_producer_id = @producer_id;
 
-DELETE FROM outbox_producers
+DELETE FROM {_schema}.outbox_producers
 WHERE  producer_id = @producer_id;";
 
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
@@ -87,11 +89,11 @@ WHERE  producer_id = @producer_id;";
         string producerId, int batchSize, int leaseDurationSeconds,
         int maxRetryCount, CancellationToken ct)
     {
-        const string sql = @"
+        var sql = $@"
 WITH batch AS (
     SELECT o.sequence_number
-    FROM outbox o
-    INNER JOIN outbox_partitions op
+    FROM {_schema}.outbox o
+    INNER JOIN {_schema}.outbox_partitions op
         ON  op.owner_producer_id = @publisher_id
         AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < clock_timestamp())
         AND (ABS(hashtext(o.partition_key)) % @total_partitions) = op.partition_id
@@ -101,7 +103,7 @@ WITH batch AS (
     LIMIT @batch_size
     FOR UPDATE OF o SKIP LOCKED
 )
-UPDATE outbox o
+UPDATE {_schema}.outbox o
 SET    leased_until_utc = clock_timestamp() + make_interval(secs => @lease_duration_seconds),
        lease_owner      = @publisher_id,
        retry_count      = CASE WHEN o.leased_until_utc IS NOT NULL
@@ -152,8 +154,8 @@ RETURNING o.sequence_number, o.topic_name, o.partition_key, o.event_type,
     public async Task DeletePublishedAsync(
         string producerId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
     {
-        const string sql = @"
-DELETE FROM outbox
+        var sql = $@"
+DELETE FROM {_schema}.outbox
 WHERE  sequence_number = ANY(@published_ids)
   AND  lease_owner = @publisher_id;";
 
@@ -172,8 +174,8 @@ WHERE  sequence_number = ANY(@published_ids)
     public async Task ReleaseLeaseAsync(
         string producerId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
     {
-        const string sql = @"
-UPDATE outbox
+        var sql = $@"
+UPDATE {_schema}.outbox
 SET    leased_until_utc = NULL,
        lease_owner      = NULL
 WHERE  sequence_number = ANY(@ids)
@@ -194,15 +196,15 @@ WHERE  sequence_number = ANY(@ids)
     public async Task DeadLetterAsync(
         IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
     {
-        const string sql = @"
+        var sql = $@"
 WITH dead AS (
-    DELETE FROM outbox
+    DELETE FROM {_schema}.outbox
     WHERE  sequence_number = ANY(@ids)
     RETURNING sequence_number, topic_name, partition_key, event_type,
               headers, payload, created_at_utc, retry_count,
               event_datetime_utc, event_ordinal
 )
-INSERT INTO outbox_dead_letter
+INSERT INTO {_schema}.outbox_dead_letter
     (sequence_number, topic_name, partition_key, event_type, headers, payload,
      created_at_utc, retry_count, event_datetime_utc, event_ordinal,
      dead_lettered_at_utc, last_error)
@@ -232,12 +234,12 @@ FROM dead;";
 
     public async Task HeartbeatAsync(string producerId, CancellationToken ct)
     {
-        const string sql = @"
-UPDATE outbox_producers
+        var sql = $@"
+UPDATE {_schema}.outbox_producers
 SET    last_heartbeat_utc = clock_timestamp()
 WHERE  producer_id = @producer_id;
 
-UPDATE outbox_partitions
+UPDATE {_schema}.outbox_partitions
 SET    grace_expires_utc = NULL
 WHERE  owner_producer_id = @producer_id
   AND  grace_expires_utc IS NOT NULL;";
@@ -252,11 +254,11 @@ WHERE  owner_producer_id = @producer_id
 
     private async Task<int> GetCachedPartitionCountAsync(CancellationToken ct)
     {
-        const long refreshIntervalTicks = 60 * TimeSpan.TicksPerSecond; // 60s
-        long now = Environment.TickCount64 * TimeSpan.TicksPerMillisecond;
+        const long refreshIntervalMs = 60_000; // 60s
+        long now = Environment.TickCount64;
         int cached = _cachedPartitionCount;
 
-        if (cached > 0 && (now - Volatile.Read(ref _partitionCountRefreshedAtTicks)) < refreshIntervalTicks)
+        if (cached > 0 && (now - Volatile.Read(ref _partitionCountRefreshedAtTicks)) < refreshIntervalMs)
             return cached;
 
         int fresh = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
@@ -267,7 +269,7 @@ WHERE  owner_producer_id = @producer_id
 
     public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)
     {
-        const string sql = "SELECT COUNT(*) FROM outbox_partitions;";
+        var sql = $"SELECT COUNT(*) FROM {_schema}.outbox_partitions;";
 
         int result = 0;
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
@@ -282,9 +284,9 @@ WHERE  owner_producer_id = @producer_id
 
     public async Task<IReadOnlyList<int>> GetOwnedPartitionsAsync(string producerId, CancellationToken ct)
     {
-        const string sql = @"
+        var sql = $@"
 SELECT partition_id
-FROM   outbox_partitions
+FROM   {_schema}.outbox_partitions
 WHERE  owner_producer_id = @producer_id;";
 
         var partitions = new List<int>();
@@ -307,15 +309,15 @@ WHERE  owner_producer_id = @producer_id;";
         await using var tx = await ((NpgsqlConnection)conn).BeginTransactionAsync(ct).ConfigureAwait(false);
 
         // Step 1: Mark stale producers' partitions as entering grace period
-        const string markStaleSql = @"
-UPDATE outbox_partitions
+        var markStaleSql = $@"
+UPDATE {_schema}.outbox_partitions
 SET    grace_expires_utc = clock_timestamp() + make_interval(secs => @partition_grace_period_seconds)
 WHERE  owner_producer_id <> @producer_id
   AND  owner_producer_id IS NOT NULL
   AND  grace_expires_utc IS NULL
   AND  owner_producer_id NOT IN (
            SELECT producer_id
-           FROM   outbox_producers
+           FROM   {_schema}.outbox_producers
            WHERE  last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
        );";
 
@@ -328,13 +330,13 @@ WHERE  owner_producer_id <> @producer_id
         }
 
         // Step 2: Calculate fair share and claim unowned/grace-expired partitions
-        const string claimSql = @"
+        var claimSql = $@"
 WITH counts AS (
     SELECT
-        (SELECT COUNT(*) FROM outbox_partitions) AS total_partitions,
-        (SELECT COUNT(*) FROM outbox_producers
+        (SELECT COUNT(*) FROM {_schema}.outbox_partitions) AS total_partitions,
+        (SELECT COUNT(*) FROM {_schema}.outbox_producers
          WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
-        (SELECT COUNT(*) FROM outbox_partitions
+        (SELECT COUNT(*) FROM {_schema}.outbox_partitions
          WHERE owner_producer_id = @producer_id) AS currently_owned
 ),
 fair AS (
@@ -345,19 +347,19 @@ fair AS (
 ),
 to_claim AS (
     SELECT op.partition_id
-    FROM outbox_partitions op, fair f
+    FROM {_schema}.outbox_partitions op, fair f
     WHERE (op.owner_producer_id IS NULL OR op.grace_expires_utc < clock_timestamp())
       AND f.fair_share - f.currently_owned > 0
     ORDER BY op.partition_id
     LIMIT GREATEST(0, (SELECT f.fair_share - f.currently_owned FROM fair f))
     FOR UPDATE OF op SKIP LOCKED
 )
-UPDATE outbox_partitions
+UPDATE {_schema}.outbox_partitions
 SET    owner_producer_id = @producer_id,
        owned_since_utc   = clock_timestamp(),
        grace_expires_utc = NULL
 FROM   to_claim
-WHERE  outbox_partitions.partition_id = to_claim.partition_id;";
+WHERE  {_schema}.outbox_partitions.partition_id = to_claim.partition_id;";
 
         await using (var cmd = _db.CreateCommand(claimSql, conn))
         {
@@ -367,13 +369,13 @@ WHERE  outbox_partitions.partition_id = to_claim.partition_id;";
         }
 
         // Step 3: Release excess above fair share
-        const string releaseSql = @"
+        var releaseSql = $@"
 WITH counts AS (
     SELECT
-        (SELECT COUNT(*) FROM outbox_partitions) AS total_partitions,
-        (SELECT COUNT(*) FROM outbox_producers
+        (SELECT COUNT(*) FROM {_schema}.outbox_partitions) AS total_partitions,
+        (SELECT COUNT(*) FROM {_schema}.outbox_producers
          WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
-        (SELECT COUNT(*) FROM outbox_partitions
+        (SELECT COUNT(*) FROM {_schema}.outbox_partitions
          WHERE owner_producer_id = @producer_id) AS currently_owned
 ),
 fair AS (
@@ -384,19 +386,19 @@ fair AS (
 ),
 to_release AS (
     SELECT op.partition_id
-    FROM outbox_partitions op, fair f
+    FROM {_schema}.outbox_partitions op, fair f
     WHERE op.owner_producer_id = @producer_id
       AND f.currently_owned > f.fair_share
     ORDER BY op.partition_id DESC
     LIMIT GREATEST(0, (SELECT f.currently_owned - f.fair_share FROM fair f))
     FOR UPDATE OF op SKIP LOCKED
 )
-UPDATE outbox_partitions
+UPDATE {_schema}.outbox_partitions
 SET    owner_producer_id = NULL,
        owned_since_utc   = NULL,
        grace_expires_utc = NULL
 FROM   to_release
-WHERE  outbox_partitions.partition_id = to_release.partition_id;";
+WHERE  {_schema}.outbox_partitions.partition_id = to_release.partition_id;";
 
         await using (var cmd = _db.CreateCommand(releaseSql, conn))
         {
@@ -410,13 +412,13 @@ WHERE  outbox_partitions.partition_id = to_release.partition_id;";
 
     public async Task ClaimOrphanPartitionsAsync(string producerId, CancellationToken ct)
     {
-        const string sql = @"
+        var sql = $@"
 WITH counts AS (
     SELECT
-        (SELECT COUNT(*) FROM outbox_partitions) AS total_partitions,
-        (SELECT COUNT(*) FROM outbox_producers
+        (SELECT COUNT(*) FROM {_schema}.outbox_partitions) AS total_partitions,
+        (SELECT COUNT(*) FROM {_schema}.outbox_producers
          WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
-        (SELECT COUNT(*) FROM outbox_partitions
+        (SELECT COUNT(*) FROM {_schema}.outbox_partitions
          WHERE owner_producer_id = @producer_id) AS currently_owned
 ),
 fair AS (
@@ -427,19 +429,19 @@ fair AS (
 ),
 to_claim AS (
     SELECT op.partition_id
-    FROM outbox_partitions op, fair f
+    FROM {_schema}.outbox_partitions op, fair f
     WHERE op.owner_producer_id IS NULL
       AND f.fair_share - f.currently_owned > 0
     ORDER BY op.partition_id
     LIMIT GREATEST(0, (SELECT f.fair_share - f.currently_owned FROM fair f))
     FOR UPDATE OF op SKIP LOCKED
 )
-UPDATE outbox_partitions
+UPDATE {_schema}.outbox_partitions
 SET    owner_producer_id = @producer_id,
        owned_since_utc   = clock_timestamp(),
        grace_expires_utc = NULL
 FROM   to_claim
-WHERE  outbox_partitions.partition_id = to_claim.partition_id;";
+WHERE  {_schema}.outbox_partitions.partition_id = to_claim.partition_id;";
 
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
@@ -452,12 +454,12 @@ WHERE  outbox_partitions.partition_id = to_claim.partition_id;";
 
     public async Task SweepDeadLettersAsync(int maxRetryCount, CancellationToken ct)
     {
-        const string sql = @"
+        var sql = $@"
 WITH dead AS (
-    DELETE FROM outbox o
+    DELETE FROM {_schema}.outbox o
     USING (
         SELECT sequence_number
-        FROM outbox
+        FROM {_schema}.outbox
         WHERE retry_count >= @max_retry_count
           AND (leased_until_utc IS NULL OR leased_until_utc < clock_timestamp())
         FOR UPDATE SKIP LOCKED
@@ -467,19 +469,23 @@ WITH dead AS (
               o.headers, o.payload, o.created_at_utc, o.retry_count,
               o.event_datetime_utc, o.event_ordinal
 )
-INSERT INTO outbox_dead_letter
+INSERT INTO {_schema}.outbox_dead_letter
     (sequence_number, topic_name, partition_key, event_type, headers, payload,
      created_at_utc, retry_count, event_datetime_utc, event_ordinal,
      dead_lettered_at_utc, last_error)
 SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
        created_at_utc, retry_count, event_datetime_utc, event_ordinal,
-       clock_timestamp(), NULL
+       clock_timestamp(), @last_error
 FROM dead;";
 
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
             await using var cmd = _db.CreateCommand(sql, conn);
             cmd.Parameters.AddWithValue("@max_retry_count", maxRetryCount);
+            cmd.Parameters.Add(new NpgsqlParameter("@last_error", NpgsqlDbType.Varchar, 2000)
+            {
+                Value = "Max retry count exceeded (background sweep)"
+            });
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
     }

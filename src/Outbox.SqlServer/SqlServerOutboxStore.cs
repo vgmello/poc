@@ -71,8 +71,6 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         var schema = _options.SchemaName;
 
         var sql = $"""
-            BEGIN TRANSACTION;
-
             UPDATE {schema}.OutboxPartitions
             SET    OwnerProducerId = NULL,
                    OwnedSinceUtc  = NULL,
@@ -81,17 +79,18 @@ public sealed class SqlServerOutboxStore : IOutboxStore
 
             DELETE FROM {schema}.OutboxProducers
             WHERE  ProducerId = @ProducerId;
-
-            COMMIT TRANSACTION;
             """;
 
         await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
+            await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancel).ConfigureAwait(false);
             await using var cmd = (SqlCommand)conn.CreateCommand();
+            cmd.Transaction = tx;
             cmd.CommandText = sql;
             cmd.CommandTimeout = _options.CommandTimeoutSeconds;
             cmd.Parameters.AddWithValue("@ProducerId", producerId);
             await cmd.ExecuteNonQueryAsync(cancel).ConfigureAwait(false);
+            await tx.CommitAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
     }
 
@@ -310,11 +309,11 @@ public sealed class SqlServerOutboxStore : IOutboxStore
 
     private async Task<int> GetCachedPartitionCountAsync(CancellationToken ct)
     {
-        const long refreshIntervalTicks = 60 * TimeSpan.TicksPerSecond; // 60s
-        long now = Environment.TickCount64 * TimeSpan.TicksPerMillisecond;
+        const long refreshIntervalMs = 60_000; // 60s
+        long now = Environment.TickCount64;
         int cached = _cachedPartitionCount;
 
-        if (cached > 0 && (now - Volatile.Read(ref _partitionCountRefreshedAtTicks)) < refreshIntervalTicks)
+        if (cached > 0 && (now - Volatile.Read(ref _partitionCountRefreshedAtTicks)) < refreshIntervalMs)
             return cached;
 
         int fresh = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
@@ -520,7 +519,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             cmd.CommandText = sql;
             cmd.CommandTimeout = _options.CommandTimeoutSeconds;
             cmd.Parameters.AddWithValue("@MaxRetryCount", maxRetryCount);
-            cmd.Parameters.Add("@LastError", SqlDbType.NVarChar, 2000).Value = DBNull.Value;
+            cmd.Parameters.Add("@LastError", SqlDbType.NVarChar, 2000).Value = "Max retry count exceeded (background sweep)";
             await cmd.ExecuteNonQueryAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
     }

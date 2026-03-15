@@ -3,7 +3,6 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Outbox.Core.Abstractions;
-using Outbox.Core.Models;
 using Outbox.Core.Observability;
 using Outbox.Core.Options;
 
@@ -36,11 +35,6 @@ internal sealed class OutboxPublisherService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (_store is null)
-            throw new InvalidOperationException("IOutboxStore has not been configured. Call UseStore() on the outbox builder.");
-        if (_transport is null)
-            throw new InvalidOperationException("IOutboxTransport has not been configured. Call UseTransport() on the outbox builder.");
-
         var opts = _options.CurrentValue;
         var circuitBreaker = new TopicCircuitBreaker(
             opts.CircuitBreakerFailureThreshold,

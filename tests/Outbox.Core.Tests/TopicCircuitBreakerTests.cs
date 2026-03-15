@@ -40,8 +40,8 @@ public class TopicCircuitBreakerTests
         var cb = new TopicCircuitBreaker(failureThreshold: 3, openDurationSeconds: 30);
         cb.RecordFailure("orders");
         cb.RecordFailure("orders");
-        var (closed, state) = cb.RecordSuccess("orders");
-        Assert.True(closed);
+        var (stateChanged, state) = cb.RecordSuccess("orders");
+        Assert.False(stateChanged);
         Assert.Equal(CircuitState.Closed, state);
         Assert.False(cb.IsOpen("orders"));
     }
@@ -49,11 +49,11 @@ public class TopicCircuitBreakerTests
     [Fact]
     public void IsOpen_AfterOpenDurationExpires_ReturnsHalfOpen()
     {
-        var cb = new TopicCircuitBreaker(failureThreshold: 1, openDurationSeconds: 0);
+        var cb = new TopicCircuitBreaker(failureThreshold: 1, openDurationSeconds: 1);
         cb.RecordFailure("orders");
         Assert.True(cb.IsOpen("orders"));
 
-        Thread.Sleep(50);
+        Thread.Sleep(1100);
         Assert.False(cb.IsOpen("orders"));
         Assert.Equal(CircuitState.HalfOpen, cb.GetState("orders"));
     }

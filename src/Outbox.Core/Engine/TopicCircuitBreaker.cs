@@ -23,7 +23,7 @@ internal sealed class TopicCircuitBreaker
         lock (entry.Lock)
         {
             if (entry.State == CircuitState.Open &&
-                DateTimeOffset.UtcNow > entry.OpenedAtUtc.AddSeconds(_openDurationSeconds).AddMilliseconds(1))
+                DateTimeOffset.UtcNow >= entry.OpenedAtUtc.AddSeconds(_openDurationSeconds))
             {
                 entry.State = CircuitState.HalfOpen;
                 return false;
@@ -41,7 +41,7 @@ internal sealed class TopicCircuitBreaker
         lock (entry.Lock)
         {
             if (entry.State == CircuitState.Open &&
-                DateTimeOffset.UtcNow > entry.OpenedAtUtc.AddSeconds(_openDurationSeconds).AddMilliseconds(1))
+                DateTimeOffset.UtcNow >= entry.OpenedAtUtc.AddSeconds(_openDurationSeconds))
             {
                 entry.State = CircuitState.HalfOpen;
             }
@@ -78,7 +78,6 @@ internal sealed class TopicCircuitBreaker
         lock (entry.Lock)
         {
             var previousState = entry.State;
-            var previousFailureCount = entry.FailureCount;
             entry.FailureCount = 0;
             entry.State = CircuitState.Closed;
 
