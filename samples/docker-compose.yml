@@ -1,0 +1,185 @@
+name: outbox-samples
+
+networks:
+  outbox-net:
+    driver: bridge
+
+services:
+  # ── Infrastructure ────────────────────────────────────────────────────────
+  azuresqledge:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    ports:
+      - "1433:1433"
+    env_file: .env
+    environment:
+      ACCEPT_EULA: ${ACCEPT_EULA}
+      SA_PASSWORD: ${SA_PASSWORD}
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import socket; s=socket.socket(); s.connect(('localhost',1433)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - outbox-net
+
+  postgres:
+    image: postgres:17
+    ports:
+      - "5432:5432"
+    env_file: .env
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: OutboxSample
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - outbox-net
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+      - --mode dev-container
+      - --smp 1
+    ports:
+      - "19092:19092"
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:9644/v1/node_config"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - outbox-net
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    ports:
+      - "10000:10000"
+      - "10001:10001"
+      - "10002:10002"
+    networks:
+      - outbox-net
+
+  eventhub-emulator:
+    image: mcr.microsoft.com/azure-messaging/eventhubs-emulator:latest
+    ports:
+      - "5672:5672"
+    volumes:
+      - ./eventhub-config/Config.json:/Eventhubs_Emulator/ConfigFiles/Config.json
+    environment:
+      BLOB_SERVER: azurite
+      METADATA_SERVER: azurite
+      ACCEPT_EULA: ${ACCEPT_EULA}
+    depends_on:
+      - azurite
+    networks:
+      outbox-net:
+        aliases:
+          - eventhubs-emulator
+
+  # ── DbInit ────────────────────────────────────────────────────────────────
+  dbinit:
+    build:
+      context: ..
+      dockerfile: samples/DbInit/Dockerfile
+    environment:
+      SQLSERVER_CONN: "Server=azuresqledge,1433;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true;"
+      POSTGRES_CONN: "Host=postgres;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD};Database=OutboxSample;"
+      REDPANDA_BROKERS: "redpanda:9092"
+    env_file: .env
+    depends_on:
+      azuresqledge:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - outbox-net
+
+  # ── Sample Apps ───────────────────────────────────────────────────────────
+  sample-sqlserver-kafka:
+    build:
+      context: ..
+      dockerfile: samples/Sample.SqlServer.Kafka/Dockerfile
+    environment:
+      ConnectionStrings__OutboxDb: "Server=azuresqledge,1433;Database=OutboxSample;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true;"
+      Outbox__Kafka__BootstrapServers: "redpanda:9092"
+    env_file: .env
+    restart: on-failure
+    depends_on:
+      dbinit:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+    networks:
+      - outbox-net
+
+  sample-sqlserver-eventhub:
+    build:
+      context: ..
+      dockerfile: samples/Sample.SqlServer.EventHub/Dockerfile
+    environment:
+      ConnectionStrings__OutboxDb: "Server=azuresqledge,1433;Database=OutboxSample;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true;"
+      ConnectionStrings__EventHub: "Endpoint=sb://eventhubs-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+      Outbox__EventHub__EventHubName: "orders"
+    env_file: .env
+    restart: on-failure
+    depends_on:
+      dbinit:
+        condition: service_completed_successfully
+      eventhub-emulator:
+        condition: service_started
+    networks:
+      - outbox-net
+
+  sample-postgresql-kafka:
+    build:
+      context: ..
+      dockerfile: samples/Sample.PostgreSQL.Kafka/Dockerfile
+    environment:
+      ConnectionStrings__OutboxDb: "Host=postgres;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD};Database=OutboxSample;"
+      Outbox__Kafka__BootstrapServers: "redpanda:9092"
+    env_file: .env
+    restart: on-failure
+    depends_on:
+      dbinit:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+    networks:
+      - outbox-net
+
+  sample-postgresql-eventhub:
+    build:
+      context: ..
+      dockerfile: samples/Sample.PostgreSQL.EventHub/Dockerfile
+    environment:
+      ConnectionStrings__OutboxDb: "Host=postgres;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD};Database=OutboxSample;"
+      ConnectionStrings__EventHub: "Endpoint=sb://eventhubs-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+      Outbox__EventHub__EventHubName: "orders"
+    env_file: .env
+    restart: on-failure
+    depends_on:
+      dbinit:
+        condition: service_completed_successfully
+      eventhub-emulator:
+        condition: service_started
+    networks:
+      - outbox-net
