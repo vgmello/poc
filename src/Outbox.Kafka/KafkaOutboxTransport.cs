@@ -29,6 +29,8 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
         IReadOnlyList<OutboxMessage> messages,
         CancellationToken cancellationToken)
     {
+        var deliveryErrors = new List<Exception>();
+
         foreach (var msg in messages)
         {
             var kafkaMessage = new Message<string, string>
@@ -38,11 +40,28 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
                 Headers = ParseHeaders(msg.Headers),
             };
 
-            using var timeoutCts = CancellationTokenSource
-                .CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(_sendTimeoutMs);
+            _producer.Produce(topicName, kafkaMessage, report =>
+            {
+                if (report.Error is { IsError: true })
+                {
+                    lock (deliveryErrors)
+                    {
+                        deliveryErrors.Add(new ProduceException<string, string>(
+                            report.Error, report));
+                    }
+                }
+            });
+        }
 
-            await _producer.ProduceAsync(topicName, kafkaMessage, timeoutCts.Token);
+        // Flush all queued messages as a single batch.
+        // This blocks until all delivery reports have been received.
+        _producer.Flush(TimeSpan.FromMilliseconds(_sendTimeoutMs));
+
+        if (deliveryErrors.Count > 0)
+        {
+            throw new AggregateException(
+                $"Failed to deliver {deliveryErrors.Count}/{messages.Count} messages to topic '{topicName}'",
+                deliveryErrors);
         }
     }
 

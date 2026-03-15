@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS outbox
     topic_name         VARCHAR(256)   NOT NULL,
     partition_key      VARCHAR(256)   NOT NULL,
     event_type         VARCHAR(256)   NOT NULL,
-    headers            VARCHAR(4000)  NULL,
-    payload            VARCHAR(4000)  NOT NULL,
+    headers            TEXT           NULL,
+    payload            TEXT           NOT NULL,
     created_at_utc     TIMESTAMPTZ(3) NOT NULL DEFAULT (clock_timestamp() AT TIME ZONE 'UTC'),
     event_datetime_utc TIMESTAMPTZ(3) NOT NULL,
     event_ordinal      SMALLINT       NOT NULL DEFAULT 0,
@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS outbox_dead_letter
     topic_name           VARCHAR(256)   NOT NULL,
     partition_key        VARCHAR(256)   NOT NULL,
     event_type           VARCHAR(256)   NOT NULL,
-    headers              VARCHAR(4000)  NULL,
-    payload              VARCHAR(4000)  NOT NULL,
+    headers              TEXT           NULL,
+    payload              TEXT           NOT NULL,
     created_at_utc       TIMESTAMPTZ(3) NOT NULL,
     retry_count          INT            NOT NULL,
     event_datetime_utc   TIMESTAMPTZ(3) NOT NULL,
@@ -82,13 +82,13 @@ CREATE TABLE IF NOT EXISTS outbox_partitions
 -- Unleased rows in causal order (partial index keeps it small at steady state)
 CREATE INDEX IF NOT EXISTS ix_outbox_unleased
 ON outbox (event_datetime_utc, event_ordinal)
-INCLUDE (sequence_number, topic_name, partition_key, event_type, headers, payload, retry_count, created_at_utc)
+INCLUDE (sequence_number, topic_name, partition_key, event_type, retry_count, created_at_utc)
 WHERE leased_until_utc IS NULL;
 
 -- Expired-lease rows (leading column leased_until_utc for efficient range scan)
 CREATE INDEX IF NOT EXISTS ix_outbox_lease_expiry
 ON outbox (leased_until_utc, event_datetime_utc, event_ordinal)
-INCLUDE (sequence_number, topic_name, partition_key, event_type, headers, payload, retry_count, created_at_utc)
+INCLUDE (sequence_number, topic_name, partition_key, event_type, retry_count, created_at_utc)
 WHERE leased_until_utc IS NOT NULL;
 
 -- ---------------------------------------------------------------------------

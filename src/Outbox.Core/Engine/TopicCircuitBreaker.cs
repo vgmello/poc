@@ -82,7 +82,7 @@ internal sealed class TopicCircuitBreaker
             entry.FailureCount = 0;
             entry.State = CircuitState.Closed;
 
-            return (previousState != CircuitState.Closed || previousFailureCount > 0, CircuitState.Closed);
+            return (previousState != CircuitState.Closed, CircuitState.Closed);
         }
     }
 

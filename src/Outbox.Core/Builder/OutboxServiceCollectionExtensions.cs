@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 using Outbox.Core.Abstractions;
 using Outbox.Core.Engine;
 using Outbox.Core.Observability;
@@ -17,6 +18,9 @@ public static class OutboxServiceCollectionExtensions
     {
         services.Configure<OutboxPublisherOptions>(
             configuration.GetSection("Outbox:Publisher"));
+
+        services.AddSingleton<IValidateOptions<OutboxPublisherOptions>,
+            OutboxPublisherOptionsValidator>();
 
         services.AddLogging();
         services.AddMetrics();

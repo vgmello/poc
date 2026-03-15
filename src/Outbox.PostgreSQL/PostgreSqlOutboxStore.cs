@@ -10,10 +10,12 @@ namespace Outbox.PostgreSQL;
 
 public sealed class PostgreSqlOutboxStore : IOutboxStore
 {
-    private readonly Func<IServiceProvider, CancellationToken, Task<DbConnection>> _connectionFactory;
-    private readonly IServiceProvider _serviceProvider;
+    private readonly PostgreSqlDbHelper _db;
     private readonly PostgreSqlStoreOptions _options;
     private readonly OutboxPublisherOptions _publisherOptions;
+
+    private volatile int _cachedPartitionCount;
+    private long _partitionCountRefreshedAtTicks;
 
     public PostgreSqlOutboxStore(
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
@@ -21,10 +23,9 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
         IOptions<PostgreSqlStoreOptions> options,
         IOptions<OutboxPublisherOptions> publisherOptions)
     {
-        _connectionFactory = connectionFactory;
-        _serviceProvider = serviceProvider;
         _options = options.Value;
         _publisherOptions = publisherOptions.Value;
+        _db = new PostgreSqlDbHelper(connectionFactory, serviceProvider, _options);
     }
 
     // -------------------------------------------------------------------------
@@ -38,14 +39,14 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
 
         const string sql = @"
 INSERT INTO outbox_producers (producer_id, registered_at_utc, last_heartbeat_utc, host_name)
-VALUES (@producer_id, NOW(), NOW(), @host_name)
+VALUES (@producer_id, clock_timestamp(), clock_timestamp(), @host_name)
 ON CONFLICT (producer_id) DO UPDATE
-SET last_heartbeat_utc = NOW(),
+SET last_heartbeat_utc = clock_timestamp(),
     host_name          = EXCLUDED.host_name;";
 
-        await ExecuteWithRetryAsync(async (conn, token) =>
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
-            await using var cmd = CreateCommand(sql, conn);
+            await using var cmd = _db.CreateCommand(sql, conn);
             cmd.Parameters.AddWithValue("@producer_id", producerId);
             cmd.Parameters.AddWithValue("@host_name", hostName);
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
@@ -56,29 +57,26 @@ SET last_heartbeat_utc = NOW(),
 
     public async Task UnregisterProducerAsync(string producerId, CancellationToken ct)
     {
-        const string releaseSql = @"
+        const string sql = @"
 UPDATE outbox_partitions
 SET    owner_producer_id = NULL,
        owned_since_utc   = NULL,
        grace_expires_utc = NULL
-WHERE  owner_producer_id = @producer_id;";
+WHERE  owner_producer_id = @producer_id;
 
-        const string deleteSql = @"
 DELETE FROM outbox_producers
 WHERE  producer_id = @producer_id;";
 
-        await using var conn = await OpenConnectionAsync(ct).ConfigureAwait(false);
-        await using var tx = await ((NpgsqlConnection)conn).BeginTransactionAsync(ct).ConfigureAwait(false);
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
+        {
+            await using var tx = await ((NpgsqlConnection)conn).BeginTransactionAsync(token).ConfigureAwait(false);
 
-        await using var releaseCmd = CreateCommand(releaseSql, conn);
-        releaseCmd.Parameters.AddWithValue("@producer_id", producerId);
-        await releaseCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            await using var cmd = _db.CreateCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@producer_id", producerId);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
 
-        await using var deleteCmd = CreateCommand(deleteSql, conn);
-        deleteCmd.Parameters.AddWithValue("@producer_id", producerId);
-        await deleteCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
-        await tx.CommitAsync(ct).ConfigureAwait(false);
+            await tx.CommitAsync(token).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
     }
 
     // -------------------------------------------------------------------------
@@ -95,16 +93,16 @@ WITH batch AS (
     FROM outbox o
     INNER JOIN outbox_partitions op
         ON  op.owner_producer_id = @publisher_id
-        AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < NOW())
+        AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < clock_timestamp())
         AND (ABS(hashtext(o.partition_key)) % @total_partitions) = op.partition_id
-    WHERE (o.leased_until_utc IS NULL OR o.leased_until_utc < NOW())
+    WHERE (o.leased_until_utc IS NULL OR o.leased_until_utc < clock_timestamp())
       AND o.retry_count < @max_retry_count
     ORDER BY o.event_datetime_utc, o.event_ordinal
     LIMIT @batch_size
     FOR UPDATE OF o SKIP LOCKED
 )
 UPDATE outbox o
-SET    leased_until_utc = NOW() + make_interval(secs => @lease_duration_seconds),
+SET    leased_until_utc = clock_timestamp() + make_interval(secs => @lease_duration_seconds),
        lease_owner      = @publisher_id,
        retry_count      = CASE WHEN o.leased_until_utc IS NOT NULL
                                THEN o.retry_count + 1
@@ -115,16 +113,16 @@ RETURNING o.sequence_number, o.topic_name, o.partition_key, o.event_type,
           o.headers, o.payload, o.event_datetime_utc, o.event_ordinal,
           o.retry_count, o.created_at_utc;";
 
-        int totalPartitions = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
+        int totalPartitions = await GetCachedPartitionCountAsync(ct).ConfigureAwait(false);
         if (totalPartitions == 0)
             return Array.Empty<OutboxMessage>();
 
         var rows = new List<OutboxMessage>();
 
-        await ExecuteWithRetryAsync(async (conn, token) =>
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
             rows.Clear();
-            await using var cmd = CreateCommand(sql, conn);
+            await using var cmd = _db.CreateCommand(sql, conn);
             cmd.Parameters.AddWithValue("@batch_size", batchSize);
             cmd.Parameters.AddWithValue("@lease_duration_seconds", (double)leaseDurationSeconds);
             cmd.Parameters.AddWithValue("@publisher_id", producerId);
@@ -159,9 +157,9 @@ DELETE FROM outbox
 WHERE  sequence_number = ANY(@published_ids)
   AND  lease_owner = @publisher_id;";
 
-        await ExecuteWithRetryAsync(async (conn, token) =>
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
-            await using var cmd = CreateCommand(sql, conn);
+            await using var cmd = _db.CreateCommand(sql, conn);
             cmd.Parameters.AddWithValue("@publisher_id", producerId);
             cmd.Parameters.Add(new NpgsqlParameter("@published_ids", NpgsqlDbType.Array | NpgsqlDbType.Bigint)
             {
@@ -181,9 +179,9 @@ SET    leased_until_utc = NULL,
 WHERE  sequence_number = ANY(@ids)
   AND  lease_owner = @publisher_id;";
 
-        await ExecuteWithRetryAsync(async (conn, token) =>
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
-            await using var cmd = CreateCommand(sql, conn);
+            await using var cmd = _db.CreateCommand(sql, conn);
             cmd.Parameters.AddWithValue("@publisher_id", producerId);
             cmd.Parameters.Add(new NpgsqlParameter("@ids", NpgsqlDbType.Array | NpgsqlDbType.Bigint)
             {
@@ -210,12 +208,12 @@ INSERT INTO outbox_dead_letter
      dead_lettered_at_utc, last_error)
 SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
        created_at_utc, retry_count, event_datetime_utc, event_ordinal,
-       NOW(), @last_error
+       clock_timestamp(), @last_error
 FROM dead;";
 
-        await ExecuteWithRetryAsync(async (conn, token) =>
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
-            await using var cmd = CreateCommand(sql, conn);
+            await using var cmd = _db.CreateCommand(sql, conn);
             cmd.Parameters.Add(new NpgsqlParameter("@ids", NpgsqlDbType.Array | NpgsqlDbType.Bigint)
             {
                 Value = sequenceNumbers.ToArray()
@@ -236,7 +234,7 @@ FROM dead;";
     {
         const string sql = @"
 UPDATE outbox_producers
-SET    last_heartbeat_utc = NOW()
+SET    last_heartbeat_utc = clock_timestamp()
 WHERE  producer_id = @producer_id;
 
 UPDATE outbox_partitions
@@ -244,12 +242,27 @@ SET    grace_expires_utc = NULL
 WHERE  owner_producer_id = @producer_id
   AND  grace_expires_utc IS NOT NULL;";
 
-        await ExecuteWithRetryAsync(async (conn, token) =>
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
-            await using var cmd = CreateCommand(sql, conn);
+            await using var cmd = _db.CreateCommand(sql, conn);
             cmd.Parameters.AddWithValue("@producer_id", producerId);
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
+    }
+
+    private async Task<int> GetCachedPartitionCountAsync(CancellationToken ct)
+    {
+        const long refreshIntervalTicks = 60 * TimeSpan.TicksPerSecond; // 60s
+        long now = Environment.TickCount64 * TimeSpan.TicksPerMillisecond;
+        int cached = _cachedPartitionCount;
+
+        if (cached > 0 && (now - Volatile.Read(ref _partitionCountRefreshedAtTicks)) < refreshIntervalTicks)
+            return cached;
+
+        int fresh = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
+        _cachedPartitionCount = fresh;
+        Volatile.Write(ref _partitionCountRefreshedAtTicks, now);
+        return fresh;
     }
 
     public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)
@@ -257,9 +270,9 @@ WHERE  owner_producer_id = @producer_id
         const string sql = "SELECT COUNT(*) FROM outbox_partitions;";
 
         int result = 0;
-        await ExecuteWithRetryAsync(async (conn, token) =>
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
-            await using var cmd = CreateCommand(sql, conn);
+            await using var cmd = _db.CreateCommand(sql, conn);
             var scalar = await cmd.ExecuteScalarAsync(token).ConfigureAwait(false);
             result = Convert.ToInt32(scalar);
         }, ct).ConfigureAwait(false);
@@ -275,10 +288,10 @@ FROM   outbox_partitions
 WHERE  owner_producer_id = @producer_id;";
 
         var partitions = new List<int>();
-        await ExecuteWithRetryAsync(async (conn, token) =>
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
             partitions.Clear();
-            await using var cmd = CreateCommand(sql, conn);
+            await using var cmd = _db.CreateCommand(sql, conn);
             cmd.Parameters.AddWithValue("@producer_id", producerId);
             await using var reader = await cmd.ExecuteReaderAsync(token).ConfigureAwait(false);
             while (await reader.ReadAsync(token).ConfigureAwait(false))
@@ -290,23 +303,23 @@ WHERE  owner_producer_id = @producer_id;";
 
     public async Task RebalanceAsync(string producerId, CancellationToken ct)
     {
-        await using var conn = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var conn = await _db.OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var tx = await ((NpgsqlConnection)conn).BeginTransactionAsync(ct).ConfigureAwait(false);
 
         // Step 1: Mark stale producers' partitions as entering grace period
         const string markStaleSql = @"
 UPDATE outbox_partitions
-SET    grace_expires_utc = NOW() + make_interval(secs => @partition_grace_period_seconds)
+SET    grace_expires_utc = clock_timestamp() + make_interval(secs => @partition_grace_period_seconds)
 WHERE  owner_producer_id <> @producer_id
   AND  owner_producer_id IS NOT NULL
   AND  grace_expires_utc IS NULL
   AND  owner_producer_id NOT IN (
            SELECT producer_id
            FROM   outbox_producers
-           WHERE  last_heartbeat_utc >= NOW() - make_interval(secs => @heartbeat_timeout_seconds)
+           WHERE  last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
        );";
 
-        await using (var cmd = CreateCommand(markStaleSql, conn))
+        await using (var cmd = _db.CreateCommand(markStaleSql, conn))
         {
             cmd.Parameters.AddWithValue("@producer_id", producerId);
             cmd.Parameters.AddWithValue("@heartbeat_timeout_seconds", (double)_publisherOptions.HeartbeatTimeoutSeconds);
@@ -320,7 +333,7 @@ WITH counts AS (
     SELECT
         (SELECT COUNT(*) FROM outbox_partitions) AS total_partitions,
         (SELECT COUNT(*) FROM outbox_producers
-         WHERE last_heartbeat_utc >= NOW() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
+         WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
         (SELECT COUNT(*) FROM outbox_partitions
          WHERE owner_producer_id = @producer_id) AS currently_owned
 ),
@@ -333,7 +346,7 @@ fair AS (
 to_claim AS (
     SELECT op.partition_id
     FROM outbox_partitions op, fair f
-    WHERE (op.owner_producer_id IS NULL OR op.grace_expires_utc < NOW())
+    WHERE (op.owner_producer_id IS NULL OR op.grace_expires_utc < clock_timestamp())
       AND f.fair_share - f.currently_owned > 0
     ORDER BY op.partition_id
     LIMIT GREATEST(0, (SELECT f.fair_share - f.currently_owned FROM fair f))
@@ -341,12 +354,12 @@ to_claim AS (
 )
 UPDATE outbox_partitions
 SET    owner_producer_id = @producer_id,
-       owned_since_utc   = NOW(),
+       owned_since_utc   = clock_timestamp(),
        grace_expires_utc = NULL
 FROM   to_claim
 WHERE  outbox_partitions.partition_id = to_claim.partition_id;";
 
-        await using (var cmd = CreateCommand(claimSql, conn))
+        await using (var cmd = _db.CreateCommand(claimSql, conn))
         {
             cmd.Parameters.AddWithValue("@producer_id", producerId);
             cmd.Parameters.AddWithValue("@heartbeat_timeout_seconds", (double)_publisherOptions.HeartbeatTimeoutSeconds);
@@ -359,7 +372,7 @@ WITH counts AS (
     SELECT
         (SELECT COUNT(*) FROM outbox_partitions) AS total_partitions,
         (SELECT COUNT(*) FROM outbox_producers
-         WHERE last_heartbeat_utc >= NOW() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
+         WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
         (SELECT COUNT(*) FROM outbox_partitions
          WHERE owner_producer_id = @producer_id) AS currently_owned
 ),
@@ -385,7 +398,7 @@ SET    owner_producer_id = NULL,
 FROM   to_release
 WHERE  outbox_partitions.partition_id = to_release.partition_id;";
 
-        await using (var cmd = CreateCommand(releaseSql, conn))
+        await using (var cmd = _db.CreateCommand(releaseSql, conn))
         {
             cmd.Parameters.AddWithValue("@producer_id", producerId);
             cmd.Parameters.AddWithValue("@heartbeat_timeout_seconds", (double)_publisherOptions.HeartbeatTimeoutSeconds);
@@ -402,7 +415,7 @@ WITH counts AS (
     SELECT
         (SELECT COUNT(*) FROM outbox_partitions) AS total_partitions,
         (SELECT COUNT(*) FROM outbox_producers
-         WHERE last_heartbeat_utc >= NOW() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
+         WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
         (SELECT COUNT(*) FROM outbox_partitions
          WHERE owner_producer_id = @producer_id) AS currently_owned
 ),
@@ -423,14 +436,14 @@ to_claim AS (
 )
 UPDATE outbox_partitions
 SET    owner_producer_id = @producer_id,
-       owned_since_utc   = NOW(),
+       owned_since_utc   = clock_timestamp(),
        grace_expires_utc = NULL
 FROM   to_claim
 WHERE  outbox_partitions.partition_id = to_claim.partition_id;";
 
-        await ExecuteWithRetryAsync(async (conn, token) =>
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
-            await using var cmd = CreateCommand(sql, conn);
+            await using var cmd = _db.CreateCommand(sql, conn);
             cmd.Parameters.AddWithValue("@producer_id", producerId);
             cmd.Parameters.AddWithValue("@heartbeat_timeout_seconds", (double)_publisherOptions.HeartbeatTimeoutSeconds);
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
@@ -446,7 +459,7 @@ WITH dead AS (
         SELECT sequence_number
         FROM outbox
         WHERE retry_count >= @max_retry_count
-          AND (leased_until_utc IS NULL OR leased_until_utc < NOW())
+          AND (leased_until_utc IS NULL OR leased_until_utc < clock_timestamp())
         FOR UPDATE SKIP LOCKED
     ) d
     WHERE o.sequence_number = d.sequence_number
@@ -460,79 +473,15 @@ INSERT INTO outbox_dead_letter
      dead_lettered_at_utc, last_error)
 SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
        created_at_utc, retry_count, event_datetime_utc, event_ordinal,
-       NOW(), NULL
+       clock_timestamp(), NULL
 FROM dead;";
 
-        await ExecuteWithRetryAsync(async (conn, token) =>
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
-            await using var cmd = CreateCommand(sql, conn);
+            await using var cmd = _db.CreateCommand(sql, conn);
             cmd.Parameters.AddWithValue("@max_retry_count", maxRetryCount);
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
     }
 
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
-
-    private async Task<DbConnection> OpenConnectionAsync(CancellationToken ct)
-    {
-        var conn = await _connectionFactory(_serviceProvider, ct).ConfigureAwait(false);
-        if (conn.State != System.Data.ConnectionState.Open)
-            await conn.OpenAsync(ct).ConfigureAwait(false);
-        return conn;
-    }
-
-    private NpgsqlCommand CreateCommand(string sql, DbConnection conn)
-    {
-        var cmd = new NpgsqlCommand(sql, (NpgsqlConnection)conn);
-        cmd.CommandTimeout = _options.CommandTimeoutSeconds;
-        return cmd;
-    }
-
-    private async Task ExecuteWithRetryAsync(
-        Func<DbConnection, CancellationToken, Task> action,
-        CancellationToken ct)
-    {
-        int maxAttempts = _options.TransientRetryMaxAttempts;
-        int backoffMs = _options.TransientRetryBackoffMs;
-
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                await using var conn = await OpenConnectionAsync(ct).ConfigureAwait(false);
-                await action(conn, ct).ConfigureAwait(false);
-                return;
-            }
-            catch (NpgsqlException ex) when (IsTransientNpgsqlError(ex) && attempt < maxAttempts)
-            {
-                await Task.Delay(backoffMs * attempt, ct).ConfigureAwait(false);
-            }
-        }
-    }
-
-    private static bool IsTransientNpgsqlError(NpgsqlException ex)
-    {
-        // PostgreSQL SQLSTATE codes for transient errors:
-        // 40001 = serialization_failure
-        // 40P01 = deadlock_detected
-        // 08*   = connection errors
-        // 57P01 = admin_shutdown
-        // 53*   = insufficient_resources (e.g. 53300 = too_many_connections)
-        if (ex.SqlState is not null)
-        {
-            if (ex.SqlState is "40001" or "40P01" or "57P01")
-                return true;
-            if (ex.SqlState.StartsWith("08", StringComparison.Ordinal))
-                return true;
-            if (ex.SqlState.StartsWith("53", StringComparison.Ordinal))
-                return true;
-        }
-
-        if (ex.InnerException is System.IO.IOException or System.Net.Sockets.SocketException)
-            return true;
-
-        return false;
-    }
 }

@@ -13,10 +13,12 @@ namespace Outbox.SqlServer;
 /// </summary>
 public sealed class SqlServerOutboxStore : IOutboxStore
 {
-    private readonly Func<IServiceProvider, CancellationToken, Task<DbConnection>> _connectionFactory;
-    private readonly IServiceProvider _serviceProvider;
+    private readonly SqlServerDbHelper _db;
     private readonly SqlServerStoreOptions _options;
     private readonly OutboxPublisherOptions _publisherOptions;
+
+    private volatile int _cachedPartitionCount;
+    private long _partitionCountRefreshedAtTicks;
 
     public SqlServerOutboxStore(
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
@@ -24,10 +26,9 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         IOptions<SqlServerStoreOptions> options,
         IOptions<OutboxPublisherOptions> publisherOptions)
     {
-        _connectionFactory = connectionFactory;
-        _serviceProvider = serviceProvider;
         _options = options.Value;
         _publisherOptions = publisherOptions.Value;
+        _db = new SqlServerDbHelper(connectionFactory, serviceProvider, _options);
     }
 
     // -------------------------------------------------------------------------
@@ -52,7 +53,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
                 VALUES (source.ProducerId, SYSUTCDATETIME(), SYSUTCDATETIME(), source.HostName);
             """;
 
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             await using var cmd = (SqlCommand)conn.CreateCommand();
             cmd.CommandText = sql;
@@ -69,41 +70,29 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     {
         var schema = _options.SchemaName;
 
-        var releaseSql = $"""
+        var sql = $"""
+            BEGIN TRANSACTION;
+
             UPDATE {schema}.OutboxPartitions
             SET    OwnerProducerId = NULL,
                    OwnedSinceUtc  = NULL,
                    GraceExpiresUtc = NULL
             WHERE  OwnerProducerId = @ProducerId;
-            """;
 
-        var deleteSql = $"""
             DELETE FROM {schema}.OutboxProducers
             WHERE  ProducerId = @ProducerId;
+
+            COMMIT TRANSACTION;
             """;
 
-        await using var conn = await OpenConnectionAsync(ct).ConfigureAwait(false);
-        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
-
-        await using (var releaseCmd = (SqlCommand)conn.CreateCommand())
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
-            releaseCmd.Transaction = tx;
-            releaseCmd.CommandText = releaseSql;
-            releaseCmd.CommandTimeout = _options.CommandTimeoutSeconds;
-            releaseCmd.Parameters.AddWithValue("@ProducerId", producerId);
-            await releaseCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
-
-        await using (var deleteCmd = (SqlCommand)conn.CreateCommand())
-        {
-            deleteCmd.Transaction = tx;
-            deleteCmd.CommandText = deleteSql;
-            deleteCmd.CommandTimeout = _options.CommandTimeoutSeconds;
-            deleteCmd.Parameters.AddWithValue("@ProducerId", producerId);
-            await deleteCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
-
-        await tx.CommitAsync(ct).ConfigureAwait(false);
+            await using var cmd = (SqlCommand)conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.CommandTimeout = _options.CommandTimeoutSeconds;
+            cmd.Parameters.AddWithValue("@ProducerId", producerId);
+            await cmd.ExecuteNonQueryAsync(cancel).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
     }
 
     // -------------------------------------------------------------------------
@@ -116,9 +105,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     {
         var schema = _options.SchemaName;
 
-        // We need the total partition count to compute the partition key hash.
-        // The engine already caches this; here we read it per-call.
-        int totalPartitions = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
+        int totalPartitions = await GetCachedPartitionCountAsync(ct).ConfigureAwait(false);
         if (totalPartitions == 0)
             return Array.Empty<OutboxMessage>();
 
@@ -167,7 +154,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
 
         var rows = new List<OutboxMessage>();
 
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             rows.Clear();
             await using var cmd = (SqlCommand)conn.CreateCommand();
@@ -216,13 +203,13 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             WHERE  o.LeaseOwner = @PublisherId;
             """;
 
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             await using var cmd = (SqlCommand)conn.CreateCommand();
             cmd.CommandText = sql;
             cmd.CommandTimeout = _options.CommandTimeoutSeconds;
             cmd.Parameters.AddWithValue("@PublisherId", producerId);
-            AddSequenceNumberTvp(cmd, "@PublishedIds", sequenceNumbers, schema);
+            SqlServerDbHelper.AddSequenceNumberTvp(cmd, "@PublishedIds", sequenceNumbers, schema);
             await cmd.ExecuteNonQueryAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
     }
@@ -242,13 +229,13 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             WHERE  o.LeaseOwner = @PublisherId;
             """;
 
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             await using var cmd = (SqlCommand)conn.CreateCommand();
             cmd.CommandText = sql;
             cmd.CommandTimeout = _options.CommandTimeoutSeconds;
             cmd.Parameters.AddWithValue("@PublisherId", producerId);
-            AddSequenceNumberTvp(cmd, "@Ids", sequenceNumbers, schema);
+            SqlServerDbHelper.AddSequenceNumberTvp(cmd, "@Ids", sequenceNumbers, schema);
             await cmd.ExecuteNonQueryAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
     }
@@ -276,14 +263,14 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
             """;
 
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             await using var cmd = (SqlCommand)conn.CreateCommand();
             cmd.CommandText = sql;
             cmd.CommandTimeout = _options.CommandTimeoutSeconds;
             cmd.Parameters.Add("@LastError", SqlDbType.NVarChar, 2000).Value =
                 (object?)lastError ?? DBNull.Value;
-            AddSequenceNumberTvp(cmd, "@Ids", sequenceNumbers, schema);
+            SqlServerDbHelper.AddSequenceNumberTvp(cmd, "@Ids", sequenceNumbers, schema);
             await cmd.ExecuteNonQueryAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
     }
@@ -307,7 +294,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
               AND  GraceExpiresUtc IS NOT NULL;
             """;
 
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             await using var cmd = (SqlCommand)conn.CreateCommand();
             cmd.CommandText = sql;
@@ -321,13 +308,28 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     // Partition management
     // -------------------------------------------------------------------------
 
+    private async Task<int> GetCachedPartitionCountAsync(CancellationToken ct)
+    {
+        const long refreshIntervalTicks = 60 * TimeSpan.TicksPerSecond; // 60s
+        long now = Environment.TickCount64 * TimeSpan.TicksPerMillisecond;
+        int cached = _cachedPartitionCount;
+
+        if (cached > 0 && (now - Volatile.Read(ref _partitionCountRefreshedAtTicks)) < refreshIntervalTicks)
+            return cached;
+
+        int fresh = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
+        _cachedPartitionCount = fresh;
+        Volatile.Write(ref _partitionCountRefreshedAtTicks, now);
+        return fresh;
+    }
+
     public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)
     {
         var schema = _options.SchemaName;
         var sql = $"SELECT COUNT(*) FROM {schema}.OutboxPartitions;";
 
         int result = 0;
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             await using var cmd = (SqlCommand)conn.CreateCommand();
             cmd.CommandText = sql;
@@ -349,7 +351,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             """;
 
         var partitions = new List<int>();
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             partitions.Clear();
             await using var cmd = (SqlCommand)conn.CreateCommand();
@@ -369,8 +371,6 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         var schema = _options.SchemaName;
 
         var sql = $"""
-            BEGIN TRANSACTION;
-
             DECLARE @TotalPartitions   INT;
             DECLARE @ActiveProducers   INT;
             DECLARE @FairShare         INT;
@@ -427,19 +427,20 @@ public sealed class SqlServerOutboxStore : IOutboxStore
                        GraceExpiresUtc = NULL
                 WHERE  OwnerProducerId = @ProducerId;
             END;
-
-            COMMIT TRANSACTION;
             """;
 
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
+            await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancel).ConfigureAwait(false);
             await using var cmd = (SqlCommand)conn.CreateCommand();
+            cmd.Transaction = tx;
             cmd.CommandText = sql;
             cmd.CommandTimeout = _options.CommandTimeoutSeconds;
             cmd.Parameters.AddWithValue("@ProducerId", producerId);
             cmd.Parameters.AddWithValue("@HeartbeatTimeoutSeconds", _publisherOptions.HeartbeatTimeoutSeconds);
             cmd.Parameters.AddWithValue("@PartitionGracePeriodSeconds", _publisherOptions.PartitionGracePeriodSeconds);
             await cmd.ExecuteNonQueryAsync(cancel).ConfigureAwait(false);
+            await tx.CommitAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
     }
 
@@ -478,7 +479,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             END;
             """;
 
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             await using var cmd = (SqlCommand)conn.CreateCommand();
             cmd.CommandText = sql;
@@ -513,7 +514,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
               AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME());
             """;
 
-        await ExecuteWithRetryAsync(async (conn, cancel) =>
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             await using var cmd = (SqlCommand)conn.CreateCommand();
             cmd.CommandText = sql;
@@ -524,58 +525,4 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         }, ct).ConfigureAwait(false);
     }
 
-    // -------------------------------------------------------------------------
-    // Infrastructure helpers
-    // -------------------------------------------------------------------------
-
-    private async Task<SqlConnection> OpenConnectionAsync(CancellationToken ct)
-    {
-        var conn = (SqlConnection)await _connectionFactory(_serviceProvider, ct).ConfigureAwait(false);
-        if (conn.State != System.Data.ConnectionState.Open)
-            await conn.OpenAsync(ct).ConfigureAwait(false);
-        return conn;
-    }
-
-    private async Task ExecuteWithRetryAsync(
-        Func<SqlConnection, CancellationToken, Task> operation,
-        CancellationToken ct)
-    {
-        int maxAttempts = _options.TransientRetryMaxAttempts;
-        int backoffMs = _options.TransientRetryBackoffMs;
-
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                await using var conn = await OpenConnectionAsync(ct).ConfigureAwait(false);
-                await operation(conn, ct).ConfigureAwait(false);
-                return;
-            }
-            catch (SqlException ex) when (IsTransientSqlError(ex) && attempt < maxAttempts)
-            {
-                await Task.Delay(backoffMs * attempt, ct).ConfigureAwait(false);
-            }
-        }
-    }
-
-    private static void AddSequenceNumberTvp(
-        SqlCommand cmd, string paramName, IReadOnlyList<long> sequenceNumbers, string schema)
-    {
-        var dt = new DataTable();
-        dt.Columns.Add("SequenceNumber", typeof(long));
-        foreach (var sn in sequenceNumbers)
-            dt.Rows.Add(sn);
-
-        var param = cmd.Parameters.AddWithValue(paramName, dt);
-        param.SqlDbType = SqlDbType.Structured;
-        param.TypeName = $"{schema}.SequenceNumberList";
-    }
-
-    private static bool IsTransientSqlError(SqlException ex)
-        => ex.Number is 1205    // deadlock victim
-            or -2               // timeout
-            or 40613            // Azure SQL database not available
-            or 40197            // Azure SQL service error
-            or 40501            // Azure SQL service busy
-            or 49918 or 49919 or 49920; // Azure SQL transient errors
 }
