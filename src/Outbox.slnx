@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="../tests/Outbox.Core.Tests/Outbox.Core.Tests.csproj" />
+  <Project Path="../tests/Outbox.IntegrationTests/Outbox.IntegrationTests.csproj" />
   <Project Path="Outbox.Core/Outbox.Core.csproj" />
   <Project Path="Outbox.EventHub/Outbox.EventHub.csproj" />
   <Project Path="Outbox.Kafka/Outbox.Kafka.csproj" />

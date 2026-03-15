@@ -1,0 +1,82 @@
+using Confluent.Kafka;
+using Outbox.Core.Abstractions;
+using Outbox.Core.Models;
+
+namespace Outbox.IntegrationTests.Helpers;
+
+/// <summary>
+/// IOutboxTransport decorator that can be toggled to simulate broker failures.
+/// When not failing, delegates to a real Kafka producer.
+/// </summary>
+public sealed class FaultyTransportWrapper : IOutboxTransport
+{
+    private readonly IProducer<string, string> _producer;
+    private volatile bool _failing;
+    private int _callCount;
+    private volatile int _failEveryN; // 0 = disabled; N = fail all except every Nth call
+    private volatile Func<OutboxMessage, bool>? _failPredicate;
+
+    public FaultyTransportWrapper(IProducer<string, string> producer) => _producer = producer;
+
+    /// <summary>Total number of SendAsync calls made.</summary>
+    public int CallCount => Volatile.Read(ref _callCount);
+
+    /// <summary>Set to true to make all sends throw.</summary>
+    public void SetFailing(bool failing) => _failing = failing;
+
+    /// <summary>Fail all calls except every Nth. Set 0 to disable.</summary>
+    public void SetIntermittent(int failEveryN) => _failEveryN = failEveryN;
+
+    /// <summary>Fail sends where any message matches the predicate.</summary>
+    public void SetIntermittentPredicate(Func<OutboxMessage, bool> predicate) =>
+        _failPredicate = predicate;
+
+    public void Reset()
+    {
+        _failing = false;
+        _failEveryN = 0;
+        _failPredicate = null;
+        Interlocked.Exchange(ref _callCount, 0);
+    }
+
+    public async Task SendAsync(
+        string topicName, string partitionKey,
+        IReadOnlyList<OutboxMessage> messages, CancellationToken cancellationToken)
+    {
+        var count = Interlocked.Increment(ref _callCount);
+
+        if (_failing)
+            throw new InvalidOperationException("Simulated broker failure");
+
+        var pred = _failPredicate;
+        if (pred != null && messages.Any(pred))
+            throw new InvalidOperationException("Simulated failure for matching message");
+
+        var n = _failEveryN;
+        if (n > 0 && count % n != 0)
+            throw new InvalidOperationException($"Simulated intermittent failure (call {count}, succeeds every {n})");
+
+        // Real send via Kafka producer
+        foreach (var msg in messages)
+        {
+            await _producer.ProduceAsync(topicName,
+                new Message<string, string>
+                {
+                    Key = partitionKey,
+                    Value = msg.Payload,
+                    Headers = new Headers
+                    {
+                        { "EventType", System.Text.Encoding.UTF8.GetBytes(msg.EventType) }
+                    }
+                },
+                cancellationToken);
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        try { _producer.Flush(TimeSpan.FromSeconds(3)); }
+        catch { /* best effort */ }
+        return ValueTask.CompletedTask;
+    }
+}

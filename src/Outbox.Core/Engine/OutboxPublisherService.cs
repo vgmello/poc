@@ -3,7 +3,6 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Outbox.Core.Abstractions;
-using Outbox.Core.Models;
 using Outbox.Core.Observability;
 using Outbox.Core.Options;
 
@@ -50,7 +49,32 @@ internal sealed class OutboxPublisherService : BackgroundService
             opts.CircuitBreakerFailureThreshold,
             opts.CircuitBreakerOpenDurationSeconds);
 
-        var producerId = await _store.RegisterProducerAsync(stoppingToken);
+        string producerId = null!;
+        for (int attempt = 1; !stoppingToken.IsCancellationRequested; attempt++)
+        {
+            try
+            {
+                producerId = await _store.RegisterProducerAsync(stoppingToken);
+                break;
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                var delay = TimeSpan.FromSeconds(Math.Min(2 * Math.Pow(2, attempt - 1), 60));
+                _logger.LogError(ex,
+                    "Failed to register outbox producer (attempt {Attempt}), retrying in {Delay:F0}s",
+                    attempt, delay.TotalSeconds);
+                try { await Task.Delay(delay, stoppingToken); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            }
+        }
+
+        if (stoppingToken.IsCancellationRequested)
+            return;
+
         _logger.LogInformation("Outbox publisher registered as producer {ProducerId}", producerId);
 
         _instrumentation.RegisterPendingGauge();
@@ -245,6 +269,8 @@ internal sealed class OutboxPublisherService : BackgroundService
                 var unprocessedSequences = new HashSet<long>(
                     healthy.Select(m => m.SequenceNumber));
 
+                var publishedAny = false;
+
                 try
                 {
                     foreach (var group in groups)
@@ -277,9 +303,10 @@ internal sealed class OutboxPublisherService : BackgroundService
                             publishSw.Stop();
                             _instrumentation.PublishDuration.Record(publishSw.Elapsed.TotalMilliseconds);
 
-                            await _store.DeletePublishedAsync(producerId, sequenceNumbers, ct);
+                            // Transport succeeded — record success metrics before attempting delete.
                             _instrumentation.MessagesPublished.Add(groupMessages.Count);
                             _healthState.RecordSuccessfulPublish();
+                            publishedAny = true;
 
                             foreach (var sn in sequenceNumbers)
                                 unprocessedSequences.Remove(sn);
@@ -296,6 +323,30 @@ internal sealed class OutboxPublisherService : BackgroundService
                             {
                                 await _eventHandler.OnMessagePublishedAsync(msg, ct);
                             }
+
+                            // Delete from outbox — separate try since transport already succeeded.
+                            try
+                            {
+                                await _store.DeletePublishedAsync(producerId, sequenceNumbers, ct);
+                            }
+                            catch (Exception deleteEx)
+                            {
+                                _logger.LogWarning(deleteEx,
+                                    "Failed to delete {Count} published messages — they will be re-delivered on next poll",
+                                    sequenceNumbers.Count);
+                                // Release WITHOUT retry increment — transport succeeded.
+                                try
+                                {
+                                    await _store.ReleaseLeaseAsync(producerId, sequenceNumbers,
+                                        incrementRetry: false, CancellationToken.None);
+                                }
+                                catch (Exception releaseEx)
+                                {
+                                    _logger.LogWarning(releaseEx,
+                                        "Failed to release lease for {Count} published messages — leases will expire naturally",
+                                        sequenceNumbers.Count);
+                                }
+                            }
                         }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested)
                         {
@@ -304,10 +355,10 @@ internal sealed class OutboxPublisherService : BackgroundService
                         }
                         catch (Exception ex)
                         {
+                            // Transport failure — increment retry count.
                             _logger.LogError(ex, "Failed to publish {Count} messages to topic {Topic}", groupMessages.Count, topicName);
                             _instrumentation.PublishFailures.Add(1);
 
-                            // BUG-2 fix: Increment retry count on transport failure.
                             // Use CancellationToken.None — this must complete even during shutdown
                             // so the retry count is correctly incremented.
                             try
@@ -327,13 +378,18 @@ internal sealed class OutboxPublisherService : BackgroundService
 
                             var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
 
+                            // Update health state before event handler to avoid skipping on handler exception.
+                            if (stateChanged)
+                            {
+                                _healthState.SetCircuitOpen(topicName);
+                                _instrumentation.CircuitBreakerStateChanges.Add(1);
+                            }
+
                             await _eventHandler.OnPublishFailedAsync(groupMessages, ex, ct);
 
                             if (stateChanged)
                             {
-                                _healthState.SetCircuitOpen(topicName);
                                 await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
-                                _instrumentation.CircuitBreakerStateChanges.Add(1);
                             }
                         }
                     }
@@ -358,6 +414,15 @@ internal sealed class OutboxPublisherService : BackgroundService
                                 unprocessedSequences.Count);
                         }
                     }
+                }
+
+                // If we leased messages but none were actually published (e.g., all circuits
+                // open or all errored), apply adaptive backoff to avoid a hot loop.
+                if (!publishedAny && batch.Count > 0)
+                {
+                    pollIntervalMs = Math.Min(pollIntervalMs * 2, opts.MaxPollIntervalMs);
+                    try { await Task.Delay(pollIntervalMs, ct); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
                 }
 
                 // If cancellation was requested during group processing, exit now.
