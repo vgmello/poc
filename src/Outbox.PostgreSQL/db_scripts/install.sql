@@ -91,6 +91,10 @@ ON outbox (leased_until_utc, event_datetime_utc, event_ordinal)
 INCLUDE (sequence_number, topic_name, partition_key, event_type, retry_count, created_at_utc)
 WHERE leased_until_utc IS NOT NULL;
 
+-- Dead-letter lookup by original sequence number (used by replay and purge)
+CREATE INDEX IF NOT EXISTS ix_outbox_dead_letter_sequence_number
+ON outbox_dead_letter (sequence_number);
+
 -- ---------------------------------------------------------------------------
 -- Seed 32 partitions (idempotent)
 -- ---------------------------------------------------------------------------

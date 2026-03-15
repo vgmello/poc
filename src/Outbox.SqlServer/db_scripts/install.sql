@@ -129,6 +129,14 @@ BEGIN
 END;
 GO
 
+-- Dead-letter lookup by original sequence number (used by replay and purge)
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.OutboxDeadLetter') AND name = N'IX_OutboxDeadLetter_SequenceNumber')
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_OutboxDeadLetter_SequenceNumber
+    ON dbo.OutboxDeadLetter (SequenceNumber);
+END;
+GO
+
 -- =============================================================================
 -- SECTION 4: SEED DEFAULT PARTITIONS (32 partitions)
 -- =============================================================================

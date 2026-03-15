@@ -24,6 +24,6 @@ public sealed class PostgreSqlStoreOptions
         }
     }
 
-    public int TransientRetryMaxAttempts { get; set; } = 3;
-    public int TransientRetryBackoffMs { get; set; } = 200;
+    public int TransientRetryMaxAttempts { get; set; } = 6;
+    public int TransientRetryBackoffMs { get; set; } = 1000;
 }

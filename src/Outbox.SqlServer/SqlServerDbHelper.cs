@@ -45,7 +45,9 @@ internal sealed class SqlServerDbHelper
             }
             catch (SqlException ex) when (IsTransientSqlError(ex) && attempt < maxAttempts)
             {
-                await Task.Delay(backoffMs * (1 << (attempt - 1)), ct).ConfigureAwait(false);
+                var delay = backoffMs * (1 << (attempt - 1));
+                var jitter = Random.Shared.Next(0, delay / 4); // up to 25% jitter
+                await Task.Delay(delay + jitter, ct).ConfigureAwait(false);
             }
         }
     }
