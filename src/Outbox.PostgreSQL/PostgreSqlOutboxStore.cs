@@ -14,6 +14,9 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     private readonly PostgreSqlStoreOptions _options;
     private readonly OutboxPublisherOptions _publisherOptions;
 
+    private volatile int _cachedPartitionCount;
+    private long _partitionCountRefreshedAtTicks;
+
     public PostgreSqlOutboxStore(
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         IServiceProvider serviceProvider,
@@ -110,7 +113,7 @@ RETURNING o.sequence_number, o.topic_name, o.partition_key, o.event_type,
           o.headers, o.payload, o.event_datetime_utc, o.event_ordinal,
           o.retry_count, o.created_at_utc;";
 
-        int totalPartitions = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
+        int totalPartitions = await GetCachedPartitionCountAsync(ct).ConfigureAwait(false);
         if (totalPartitions == 0)
             return Array.Empty<OutboxMessage>();
 
@@ -245,6 +248,21 @@ WHERE  owner_producer_id = @producer_id
             cmd.Parameters.AddWithValue("@producer_id", producerId);
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
+    }
+
+    private async Task<int> GetCachedPartitionCountAsync(CancellationToken ct)
+    {
+        const long refreshIntervalTicks = 60 * TimeSpan.TicksPerSecond; // 60s
+        long now = Environment.TickCount64 * TimeSpan.TicksPerMillisecond;
+        int cached = _cachedPartitionCount;
+
+        if (cached > 0 && (now - Volatile.Read(ref _partitionCountRefreshedAtTicks)) < refreshIntervalTicks)
+            return cached;
+
+        int fresh = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
+        _cachedPartitionCount = fresh;
+        Volatile.Write(ref _partitionCountRefreshedAtTicks, now);
+        return fresh;
     }
 
     public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)

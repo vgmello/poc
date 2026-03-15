@@ -17,6 +17,9 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     private readonly SqlServerStoreOptions _options;
     private readonly OutboxPublisherOptions _publisherOptions;
 
+    private volatile int _cachedPartitionCount;
+    private long _partitionCountRefreshedAtTicks;
+
     public SqlServerOutboxStore(
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         IServiceProvider serviceProvider,
@@ -102,9 +105,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     {
         var schema = _options.SchemaName;
 
-        // We need the total partition count to compute the partition key hash.
-        // The engine already caches this; here we read it per-call.
-        int totalPartitions = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
+        int totalPartitions = await GetCachedPartitionCountAsync(ct).ConfigureAwait(false);
         if (totalPartitions == 0)
             return Array.Empty<OutboxMessage>();
 
@@ -306,6 +307,21 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     // -------------------------------------------------------------------------
     // Partition management
     // -------------------------------------------------------------------------
+
+    private async Task<int> GetCachedPartitionCountAsync(CancellationToken ct)
+    {
+        const long refreshIntervalTicks = 60 * TimeSpan.TicksPerSecond; // 60s
+        long now = Environment.TickCount64 * TimeSpan.TicksPerMillisecond;
+        int cached = _cachedPartitionCount;
+
+        if (cached > 0 && (now - Volatile.Read(ref _partitionCountRefreshedAtTicks)) < refreshIntervalTicks)
+            return cached;
+
+        int fresh = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
+        _cachedPartitionCount = fresh;
+        Volatile.Write(ref _partitionCountRefreshedAtTicks, now);
+        return fresh;
+    }
 
     public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)
     {
