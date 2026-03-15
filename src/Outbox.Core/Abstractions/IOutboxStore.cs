@@ -15,7 +15,8 @@ public interface IOutboxStore
         string producerId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct);
 
     Task ReleaseLeaseAsync(
-        string producerId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct);
+        string producerId, IReadOnlyList<long> sequenceNumbers,
+        bool incrementRetry, CancellationToken ct);
 
     Task DeadLetterAsync(
         IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct);
@@ -27,4 +28,6 @@ public interface IOutboxStore
     Task ClaimOrphanPartitionsAsync(string producerId, CancellationToken ct);
 
     Task SweepDeadLettersAsync(int maxRetryCount, CancellationToken ct);
+
+    Task<long> GetPendingCountAsync(CancellationToken ct);
 }

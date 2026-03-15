@@ -19,6 +19,7 @@ internal sealed class OutboxInstrumentation : IDisposable
     public Histogram<double> PublishDuration { get; }
     public Histogram<double> PollDuration { get; }
     public Histogram<int> BatchSize { get; }
+    public ObservableGauge<long> MessagesPending { get; private set; } = null!;
 
     public OutboxInstrumentation(IMeterFactory meterFactory)
     {
@@ -55,6 +56,23 @@ internal sealed class OutboxInstrumentation : IDisposable
             "outbox.poll.batch_size",
             description: "Number of messages leased per poll");
     }
+
+    private long _pendingCount;
+    private int _pendingGaugeRegistered;
+
+    public void RegisterPendingGauge()
+    {
+        if (Interlocked.CompareExchange(ref _pendingGaugeRegistered, 1, 0) != 0)
+            return;
+
+        MessagesPending = Meter.CreateObservableGauge(
+            "outbox.messages.pending",
+            () => Volatile.Read(ref _pendingCount),
+            description: "Number of messages waiting to be published");
+    }
+
+    public void UpdatePendingCount(long count) =>
+        Volatile.Write(ref _pendingCount, count);
 
     public void Dispose()
     {

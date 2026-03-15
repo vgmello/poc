@@ -25,6 +25,7 @@ public class OutboxBuilderTests
 
         services.AddSingleton(Substitute.For<IOutboxStore>());
         services.AddSingleton(Substitute.For<IOutboxTransport>());
+        services.AddSingleton(Substitute.For<IHostApplicationLifetime>());
 
         var provider = services.BuildServiceProvider();
         var hostedServices = provider.GetServices<IHostedService>();

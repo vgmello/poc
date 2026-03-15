@@ -1,4 +1,5 @@
 using System.Diagnostics.Metrics;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -27,6 +28,8 @@ public class OutboxPublisherServiceTests : IDisposable
     private readonly IOptionsMonitor<OutboxPublisherOptions> _optionsMonitor;
     private readonly ILogger<OutboxPublisherService> _logger;
     private readonly OutboxInstrumentation _instrumentation;
+    private readonly OutboxHealthState _healthState;
+    private readonly IHostApplicationLifetime _appLifetime;
     private readonly OutboxPublisherOptions _options;
 
     public OutboxPublisherServiceTests()
@@ -36,6 +39,8 @@ public class OutboxPublisherServiceTests : IDisposable
         _eventHandler = Substitute.For<IOutboxEventHandler>();
         _logger = NullLogger<OutboxPublisherService>.Instance;
         _instrumentation = new OutboxInstrumentation(new TestMeterFactory());
+        _healthState = new OutboxHealthState();
+        _appLifetime = Substitute.For<IHostApplicationLifetime>();
 
         _options = new OutboxPublisherOptions
         {
@@ -61,7 +66,8 @@ public class OutboxPublisherServiceTests : IDisposable
     }
 
     private OutboxPublisherService CreateService() =>
-        new(_store, _transport, _eventHandler, _optionsMonitor, _logger, _instrumentation);
+        new(_store, _transport, _eventHandler, _optionsMonitor, _logger,
+            _instrumentation, _healthState, _appLifetime);
 
     private static OutboxMessage MakeMessage(
         long seq, string topic = "orders", string key = "key-1", int retryCount = 0) =>
@@ -123,10 +129,13 @@ public class OutboxPublisherServiceTests : IDisposable
             "producer-1",
             Arg.Is<IReadOnlyList<long>>(s => s.Count == 2),
             Arg.Any<CancellationToken>());
+
+        // Health state should record successful publish
+        Assert.NotEqual(DateTimeOffset.MinValue, _healthState.LastSuccessfulPublishUtc);
     }
 
     [Fact]
-    public async Task PublishLoop_OnTransportFailure_ReleasesLease()
+    public async Task PublishLoop_OnTransportFailure_ReleasesLeaseWithRetryIncrement()
     {
         _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
             .Returns("producer-1");
@@ -151,9 +160,11 @@ public class OutboxPublisherServiceTests : IDisposable
         try { await Task.Delay(350, CancellationToken.None); } catch { }
         await service.StopAsync(CancellationToken.None);
 
+        // BUG-2 fix: ReleaseLeaseAsync should be called with incrementRetry: true
         await _store.Received().ReleaseLeaseAsync(
             "producer-1",
             Arg.Is<IReadOnlyList<long>>(s => s.Count == 2),
+            true, // incrementRetry
             Arg.Any<CancellationToken>());
 
         await _store.DidNotReceive().DeletePublishedAsync(
@@ -227,5 +238,29 @@ public class OutboxPublisherServiceTests : IDisposable
             Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<IReadOnlyList<OutboxMessage>>(),
             Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HealthState_ReportsLoopRunning()
+    {
+        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
+            .Returns("producer-1");
+        _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<OutboxMessage>());
+
+        var service = CreateService();
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+
+        Assert.False(_healthState.IsPublishLoopRunning);
+
+        await service.StartAsync(cts.Token);
+        try { await Task.Delay(100, CancellationToken.None); } catch { }
+
+        Assert.True(_healthState.IsPublishLoopRunning);
+
+        try { await Task.Delay(250, CancellationToken.None); } catch { }
+        await service.StopAsync(CancellationToken.None);
+
+        Assert.False(_healthState.IsPublishLoopRunning);
     }
 }

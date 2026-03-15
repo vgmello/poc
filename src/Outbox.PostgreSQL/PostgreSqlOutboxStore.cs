@@ -172,9 +172,18 @@ WHERE  sequence_number = ANY(@published_ids)
     }
 
     public async Task ReleaseLeaseAsync(
-        string producerId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
+        string producerId, IReadOnlyList<long> sequenceNumbers,
+        bool incrementRetry, CancellationToken ct)
     {
-        var sql = $@"
+        var sql = incrementRetry
+            ? $@"
+UPDATE {_schema}.outbox
+SET    leased_until_utc = NULL,
+       lease_owner      = NULL,
+       retry_count      = retry_count + 1
+WHERE  sequence_number = ANY(@ids)
+  AND  lease_owner = @publisher_id;"
+            : $@"
 UPDATE {_schema}.outbox
 SET    leased_until_utc = NULL,
        lease_owner      = NULL
@@ -488,6 +497,23 @@ FROM dead;";
             });
             await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
+    }
+
+    public async Task<long> GetPendingCountAsync(CancellationToken ct)
+    {
+        var sql = $@"
+SELECT COUNT(*) FROM {_schema}.outbox
+WHERE  leased_until_utc IS NULL OR leased_until_utc < clock_timestamp();";
+
+        long result = 0;
+        await _db.ExecuteWithRetryAsync(async (conn, token) =>
+        {
+            await using var cmd = _db.CreateCommand(sql, conn);
+            var scalar = await cmd.ExecuteScalarAsync(token).ConfigureAwait(false);
+            result = Convert.ToInt64(scalar);
+        }, ct).ConfigureAwait(false);
+
+        return result;
     }
 
 }

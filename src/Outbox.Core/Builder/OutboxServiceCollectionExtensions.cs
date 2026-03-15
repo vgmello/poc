@@ -25,7 +25,11 @@ public static class OutboxServiceCollectionExtensions
         services.AddLogging();
         services.AddMetrics();
         services.AddSingleton<OutboxInstrumentation>();
+        services.AddSingleton<OutboxHealthState>();
         services.AddHostedService<OutboxPublisherService>();
+
+        services.AddHealthChecks()
+            .AddCheck<OutboxHealthCheck>("outbox", tags: ["outbox", "ready"]);
 
         var builder = new OutboxBuilder(services, configuration);
         configure(builder);

@@ -214,12 +214,23 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     }
 
     public async Task ReleaseLeaseAsync(
-        string producerId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
+        string producerId, IReadOnlyList<long> sequenceNumbers,
+        bool incrementRetry, CancellationToken ct)
     {
         if (sequenceNumbers.Count == 0) return;
         var schema = _options.SchemaName;
 
-        var sql = $"""
+        var sql = incrementRetry
+            ? $"""
+            UPDATE o
+            SET    o.LeasedUntilUtc = NULL,
+                   o.LeaseOwner     = NULL,
+                   o.RetryCount     = o.RetryCount + 1
+            FROM   {schema}.Outbox o
+            INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
+            WHERE  o.LeaseOwner = @PublisherId;
+            """
+            : $"""
             UPDATE o
             SET    o.LeasedUntilUtc = NULL,
                    o.LeaseOwner     = NULL
@@ -522,6 +533,26 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             cmd.Parameters.Add("@LastError", SqlDbType.NVarChar, 2000).Value = "Max retry count exceeded (background sweep)";
             await cmd.ExecuteNonQueryAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
+    }
+
+    public async Task<long> GetPendingCountAsync(CancellationToken ct)
+    {
+        var schema = _options.SchemaName;
+        var sql = $@"
+            SELECT COUNT_BIG(*) FROM {schema}.Outbox
+            WHERE  LeasedUntilUtc IS NULL OR LeasedUntilUtc < SYSUTCDATETIME();";
+
+        long result = 0;
+        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
+        {
+            await using var cmd = (SqlCommand)conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.CommandTimeout = _options.CommandTimeoutSeconds;
+            var scalar = await cmd.ExecuteScalarAsync(cancel).ConfigureAwait(false);
+            result = Convert.ToInt64(scalar);
+        }, ct).ConfigureAwait(false);
+
+        return result;
     }
 
 }
