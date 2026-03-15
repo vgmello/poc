@@ -13,6 +13,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
     private readonly EventHubProducerClient _client;
     private readonly ILogger<EventHubOutboxTransport> _logger;
     private readonly int _sendTimeoutSeconds;
+    private readonly string _configuredEventHubName;
 
     public EventHubOutboxTransport(
         EventHubProducerClient client,
@@ -22,6 +23,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
         _client = client;
         _logger = logger;
         _sendTimeoutSeconds = options.Value.SendTimeoutSeconds;
+        _configuredEventHubName = options.Value.EventHubName;
     }
 
     public async Task SendAsync(
@@ -30,56 +32,72 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
         IReadOnlyList<OutboxMessage> messages,
         CancellationToken cancellationToken)
     {
+        if (!string.IsNullOrEmpty(topicName) &&
+            !string.IsNullOrEmpty(_configuredEventHubName) &&
+            !string.Equals(topicName, _configuredEventHubName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Message targets EventHub '{topicName}' but transport is configured for '{_configuredEventHubName}'. " +
+                "EventHub transport only supports a single EventHub per transport instance.");
+        }
+
         using var timeoutCts = CancellationTokenSource
             .CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(_sendTimeoutSeconds));
         var ct = timeoutCts.Token;
 
         var batchOptions = new CreateBatchOptions { PartitionKey = partitionKey };
-        var batch = await _client.CreateBatchAsync(batchOptions, ct);
+        EventDataBatch? batch = null;
 
-        foreach (var msg in messages)
+        try
         {
-            var eventData = new EventData(msg.Payload);
+            batch = await _client.CreateBatchAsync(batchOptions, ct);
 
-            if (!string.IsNullOrEmpty(msg.Headers))
+            foreach (var msg in messages)
             {
-                var headers = JsonSerializer.Deserialize<Dictionary<string, string>>(msg.Headers);
-                if (headers is not null)
-                {
-                    foreach (var kvp in headers)
-                        eventData.Properties[kvp.Key] = kvp.Value;
-                }
-            }
+                var eventData = new EventData(msg.Payload);
 
-            eventData.Properties["EventType"] = msg.EventType;
-
-            if (!batch.TryAdd(eventData))
-            {
-                // Current batch is full, send it and start a new one
-                if (batch.Count > 0)
+                if (!string.IsNullOrEmpty(msg.Headers))
                 {
-                    await _client.SendAsync(batch, ct);
-                    batch.Dispose();
+                    var headers = JsonSerializer.Deserialize<Dictionary<string, string>>(msg.Headers);
+                    if (headers is not null)
+                    {
+                        foreach (var kvp in headers)
+                            eventData.Properties[kvp.Key] = kvp.Value;
+                    }
                 }
 
-                batch = await _client.CreateBatchAsync(batchOptions, ct);
+                eventData.Properties["EventType"] = msg.EventType;
 
                 if (!batch.TryAdd(eventData))
                 {
-                    batch.Dispose();
-                    throw new InvalidOperationException(
-                        $"Message {msg.SequenceNumber} is too large for an EventHub batch");
+                    // Current batch is full, send it and start a new one
+                    if (batch.Count > 0)
+                    {
+                        await _client.SendAsync(batch, ct);
+                        batch.Dispose();
+                        batch = null;
+                    }
+
+                    batch = await _client.CreateBatchAsync(batchOptions, ct);
+
+                    if (!batch.TryAdd(eventData))
+                    {
+                        throw new InvalidOperationException(
+                            $"Message {msg.SequenceNumber} is too large for an EventHub batch");
+                    }
                 }
             }
-        }
 
-        if (batch.Count > 0)
+            if (batch is { Count: > 0 })
+            {
+                await _client.SendAsync(batch, ct);
+            }
+        }
+        finally
         {
-            await _client.SendAsync(batch, ct);
+            batch?.Dispose();
         }
-
-        batch.Dispose();
     }
 
     public async ValueTask DisposeAsync()

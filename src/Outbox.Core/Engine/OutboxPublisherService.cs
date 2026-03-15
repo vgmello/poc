@@ -68,13 +68,14 @@ internal sealed class OutboxPublisherService : BackgroundService
     private async Task PublishLoopAsync(
         string producerId, TopicCircuitBreaker circuitBreaker, CancellationToken ct)
     {
-        var pollIntervalMs = _options.CurrentValue.MinPollIntervalMs;
+        var opts = _options.CurrentValue;
+        var pollIntervalMs = opts.MinPollIntervalMs;
 
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                var opts = _options.CurrentValue;
+                opts = _options.CurrentValue;
                 var pollSw = Stopwatch.StartNew();
 
                 var batch = await _store.LeaseBatchAsync(
@@ -191,6 +192,14 @@ internal sealed class OutboxPublisherService : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Unexpected error in publish loop");
+                try
+                {
+                    await Task.Delay(_options.CurrentValue.MaxPollIntervalMs, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    break;
+                }
             }
         }
     }

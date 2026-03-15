@@ -18,8 +18,8 @@ BEGIN
         TopicName        NVARCHAR(256)         NOT NULL,
         PartitionKey     NVARCHAR(256)         NOT NULL,
         EventType        NVARCHAR(256)         NOT NULL,
-        Headers          NVARCHAR(4000)        NULL,
-        Payload          NVARCHAR(4000)        NOT NULL,
+        Headers          NVARCHAR(MAX)         NULL,
+        Payload          NVARCHAR(MAX)         NOT NULL,
         CreatedAtUtc     DATETIME2(3)          NOT NULL  DEFAULT SYSUTCDATETIME(),
         EventDateTimeUtc DATETIME2(3)          NOT NULL,
         EventOrdinal     SMALLINT              NOT NULL  DEFAULT 0,
@@ -44,8 +44,8 @@ BEGIN
         TopicName         NVARCHAR(256)         NOT NULL,
         PartitionKey      NVARCHAR(256)         NOT NULL,
         EventType         NVARCHAR(256)         NOT NULL,
-        Headers           NVARCHAR(4000)        NULL,
-        Payload           NVARCHAR(4000)        NOT NULL,
+        Headers           NVARCHAR(MAX)         NULL,
+        Payload           NVARCHAR(MAX)         NOT NULL,
         CreatedAtUtc      DATETIME2(3)          NOT NULL,
         RetryCount        INT                   NOT NULL,
         EventDateTimeUtc  DATETIME2(3)          NOT NULL,
@@ -114,7 +114,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbo
 BEGIN
     CREATE NONCLUSTERED INDEX IX_Outbox_Unleased
     ON dbo.Outbox (EventDateTimeUtc, EventOrdinal)
-    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
+    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, RetryCount, CreatedAtUtc)
     WHERE LeasedUntilUtc IS NULL;
 END;
 GO
@@ -124,7 +124,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbo
 BEGIN
     CREATE NONCLUSTERED INDEX IX_Outbox_LeaseExpiry
     ON dbo.Outbox (LeasedUntilUtc, EventDateTimeUtc, EventOrdinal)
-    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, RetryCount, CreatedAtUtc)
+    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, RetryCount, CreatedAtUtc)
     WHERE LeasedUntilUtc IS NOT NULL;
 END;
 GO
