@@ -39,7 +39,7 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
             {
                 Key = partitionKey,
                 Value = msg.Payload,
-                Headers = ParseHeaders(msg.Headers, msg.EventType),
+                Headers = ParseHeaders(msg.Headers, msg.EventType, msg.SequenceNumber),
             };
 
             _producer.Produce(topicName, kafkaMessage, report =>
@@ -88,7 +88,7 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
         return ValueTask.CompletedTask;
     }
 
-    private static Headers ParseHeaders(string? headersJson, string eventType)
+    private Headers ParseHeaders(string? headersJson, string eventType, long sequenceNumber)
     {
         var headers = new Headers();
 
@@ -106,9 +106,13 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
                         headers.Add(kvp.Key, System.Text.Encoding.UTF8.GetBytes(kvp.Value));
                 }
             }
-            catch (JsonException)
+            catch (JsonException ex)
             {
-                // Skip corrupted headers — don't crash the entire batch.
+                // Skip corrupted headers — don't crash the entire batch, but log so
+                // operators can trace missing headers back to the source message.
+                _logger.LogWarning(ex,
+                    "Skipping corrupted headers for message {SequenceNumber} — headers will not be propagated",
+                    sequenceNumber);
             }
         }
 

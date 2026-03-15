@@ -45,6 +45,8 @@ internal sealed class OutboxPublisherService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var opts = _options.CurrentValue;
+        LogConfigurationSummary(opts);
+
         var circuitBreaker = new TopicCircuitBreaker(
             opts.CircuitBreakerFailureThreshold,
             opts.CircuitBreakerOpenDurationSeconds);
@@ -540,5 +542,24 @@ internal sealed class OutboxPublisherService : BackgroundService
                 _logger.LogError(ex, "Error in dead letter sweep loop");
             }
         }
+    }
+
+    private void LogConfigurationSummary(OutboxPublisherOptions opts)
+    {
+        _logger.LogInformation(
+            "Outbox publisher starting with configuration: " +
+            "BatchSize={BatchSize}, LeaseDuration={LeaseDuration}s, MaxRetry={MaxRetry}, " +
+            "Poll={MinPoll}-{MaxPoll}ms, Heartbeat={HbInterval}ms/timeout={HbTimeout}s, " +
+            "GracePeriod={Grace}s, CircuitBreaker={CbThreshold}failures/{CbDuration}s",
+            opts.BatchSize,
+            opts.LeaseDurationSeconds,
+            opts.MaxRetryCount,
+            opts.MinPollIntervalMs,
+            opts.MaxPollIntervalMs,
+            opts.HeartbeatIntervalMs,
+            opts.HeartbeatTimeoutSeconds,
+            opts.PartitionGracePeriodSeconds,
+            opts.CircuitBreakerFailureThreshold,
+            opts.CircuitBreakerOpenDurationSeconds);
     }
 }

@@ -116,9 +116,13 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
                         eventData.Properties[kvp.Key] = kvp.Value;
                 }
             }
-            catch (JsonException)
+            catch (JsonException ex)
             {
-                // Skip corrupted headers — don't crash the entire batch.
+                // Skip corrupted headers — don't crash the entire batch, but log so
+                // operators can trace missing headers back to the source message.
+                _logger.LogWarning(ex,
+                    "Skipping corrupted headers for message {SequenceNumber} — headers will not be propagated",
+                    msg.SequenceNumber);
             }
         }
 

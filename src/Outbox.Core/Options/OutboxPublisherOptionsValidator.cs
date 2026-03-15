@@ -37,6 +37,30 @@ internal sealed class OutboxPublisherOptionsValidator : IValidateOptions<OutboxP
         if (options.CircuitBreakerOpenDurationSeconds <= 0)
             errors.Add("CircuitBreakerOpenDurationSeconds must be greater than 0.");
 
+        // Cross-field invariants — these prevent subtle race conditions and ordering violations.
+
+        if (options.PartitionGracePeriodSeconds > 0 && options.LeaseDurationSeconds > 0 &&
+            options.PartitionGracePeriodSeconds < options.LeaseDurationSeconds)
+        {
+            errors.Add(
+                $"PartitionGracePeriodSeconds ({options.PartitionGracePeriodSeconds}) must be >= " +
+                $"LeaseDurationSeconds ({options.LeaseDurationSeconds}). " +
+                "Otherwise, a new publisher can claim a partition while the old publisher still holds active leases, " +
+                "breaking ordering guarantees.");
+        }
+
+        var heartbeatTimeoutMs = options.HeartbeatTimeoutSeconds * 1000;
+        if (options.HeartbeatIntervalMs > 0 && heartbeatTimeoutMs > 0 &&
+            heartbeatTimeoutMs < options.HeartbeatIntervalMs * 3)
+        {
+            errors.Add(
+                $"HeartbeatTimeoutSeconds ({options.HeartbeatTimeoutSeconds}s) should be >= " +
+                $"3x HeartbeatIntervalMs ({options.HeartbeatIntervalMs}ms) to tolerate at least 2 missed heartbeats. " +
+                "Current timeout fires after only " +
+                $"{(double)heartbeatTimeoutMs / options.HeartbeatIntervalMs:F1}x intervals, " +
+                "which may cause false staleness detection and unnecessary rebalancing.");
+        }
+
         return errors.Count > 0
             ? ValidateOptionsResult.Fail(errors)
             : ValidateOptionsResult.Success;
