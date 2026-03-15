@@ -137,7 +137,7 @@ services:
       dockerfile: samples/Sample.SqlServer.EventHub/Dockerfile
     environment:
       ConnectionStrings__OutboxDb: "Server=azuresqledge,1433;Database=OutboxSample;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true;"
-      ConnectionStrings__EventHub: "Endpoint=sb://eventhubs-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+      Outbox__EventHub__ConnectionString: "Endpoint=sb://eventhubs-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
       Outbox__EventHub__EventHubName: "orders"
     env_file: .env
     restart: on-failure
@@ -172,7 +172,7 @@ services:
       dockerfile: samples/Sample.PostgreSQL.EventHub/Dockerfile
     environment:
       ConnectionStrings__OutboxDb: "Host=postgres;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD};Database=OutboxSample;"
-      ConnectionStrings__EventHub: "Endpoint=sb://eventhubs-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+      Outbox__EventHub__ConnectionString: "Endpoint=sb://eventhubs-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
       Outbox__EventHub__EventHubName: "orders"
     env_file: .env
     restart: on-failure

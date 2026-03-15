@@ -13,8 +13,8 @@ public sealed class EventHubConsumer(IConfiguration configuration, ILogger<Event
         // EventHub emulator is slow to start
         await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
 
-        var connectionString = configuration.GetConnectionString("EventHub")
-            ?? throw new InvalidOperationException("ConnectionStrings:EventHub is not configured.");
+        var connectionString = configuration["Outbox:EventHub:ConnectionString"]
+            ?? throw new InvalidOperationException("Outbox:EventHub:ConnectionString is not configured.");
         var eventHubName = configuration["Outbox:EventHub:EventHubName"]
             ?? throw new InvalidOperationException("Outbox:EventHub:EventHubName is not configured.");
 

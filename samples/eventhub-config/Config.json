@@ -8,11 +8,7 @@
                     {
                         "Name": "orders",
                         "PartitionCount": "8",
-                        "ConsumerGroups": [
-                            {
-                                "Name": "$Default"
-                            }
-                        ]
+                        "ConsumerGroups": []
                     }
                 ]
             }

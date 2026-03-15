@@ -1,4 +1,5 @@
-using System.Net.Http.Json;
+using Confluent.Kafka;
+using Confluent.Kafka.Admin;
 using Microsoft.Data.SqlClient;
 using Npgsql;
 
@@ -113,41 +114,30 @@ static async Task InitRedpandaAsync(string brokers)
 {
     Console.WriteLine("Initializing Redpanda topic...");
 
-    var host = brokers.Split(':')[0];
-    var adminUrl = $"http://{host}:9644/v1/topics";
-
-    using var http = new HttpClient();
-
     await RetryAsync(async () =>
     {
-        var payload = new
-        {
-            name = "orders",
-            partition_count = 8,
-            replication_factor = 1
-        };
+        using var adminClient = new AdminClientBuilder(
+            new AdminClientConfig { BootstrapServers = brokers }).Build();
 
-        var response = await http.PostAsJsonAsync(adminUrl, payload);
-
-        if (response.IsSuccessStatusCode)
+        try
         {
+            await adminClient.CreateTopicsAsync(new[]
+            {
+                new TopicSpecification
+                {
+                    Name = "orders",
+                    NumPartitions = 8,
+                    ReplicationFactor = 1
+                }
+            });
             Console.WriteLine("Redpanda: 'orders' topic created with 8 partitions.");
         }
-        else
+        catch (CreateTopicsException ex) when (ex.Results.Any(r =>
+            r.Error.Code == ErrorCode.TopicAlreadyExists))
         {
-            var body = await response.Content.ReadAsStringAsync();
-            // Topic may already exist — treat as success
-            if (body.Contains("already exists") || body.Contains("topic_already_exists"))
-            {
-                Console.WriteLine("Redpanda: 'orders' topic already exists.");
-            }
-            else
-            {
-                throw new HttpRequestException(
-                    $"Failed to create Redpanda topic. Status: {response.StatusCode}, Body: {body}");
-            }
+            Console.WriteLine("Redpanda: 'orders' topic already exists.");
         }
-    }, "Redpanda Admin API");
+    }, "Redpanda topic creation");
 }
 
 // ── Retry helper ──────────────────────────────────────────────────────────

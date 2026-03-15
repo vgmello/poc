@@ -9,5 +9,6 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.1" />
     <PackageReference Include="Npgsql" Version="9.0.3" />
+    <PackageReference Include="Confluent.Kafka" Version="2.8.0" />
   </ItemGroup>
 </Project>
