@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Diagnostics.Metrics;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -53,7 +55,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             OrphanSweepIntervalMs = 100_000,
             DeadLetterSweepIntervalMs = 100_000,
             CircuitBreakerFailureThreshold = 3,
-            CircuitBreakerOpenDurationSeconds = 30,
+            CircuitBreakerOpenDurationSeconds = 30
         };
 
         _optionsMonitor = Substitute.For<IOptionsMonitor<OutboxPublisherOptions>>();
@@ -73,7 +75,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
     private static OutboxMessage MakeMessage(
         long seq, string topic = "orders", string key = "key-1", int retryCount = 0) =>
-        new(seq, topic, key, "OrderCreated", null, System.Text.Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow, 0, retryCount, DateTimeOffset.UtcNow);
+        new(seq, topic, key, "OrderCreated", null, System.Text.Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow, 0,
+            retryCount, DateTimeOffset.UtcNow);
 
     [Fact]
     public async Task RegistersAndUnregistersProducer()
@@ -89,8 +92,14 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         await service.StartAsync(cts.Token);
+
         // Wait for cancellation to allow ExecuteAsync to run
-        try { await Task.Delay(350, CancellationToken.None); } catch { /* Intentionally empty */ }
+        try { await Task.Delay(350, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         await _store.Received(1).RegisterProducerAsync(Arg.Any<CancellationToken>());
@@ -111,6 +120,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
                 // Return messages on first call, empty afterwards
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -118,7 +128,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(350, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(350, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Both messages have same topic+key, so should be sent in one call
@@ -149,6 +165,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -159,7 +176,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(350, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(350, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // BUG-2 fix: ReleaseLeaseAsync should be called with incrementRetry: true
@@ -187,6 +210,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return new[] { poisonMessage };
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -194,7 +218,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(350, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(350, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         await _store.Received().DeadLetterAsync(
@@ -217,7 +247,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         {
             MakeMessage(1, "orders", "key-1"),
             MakeMessage(2, "orders", "key-2"),
-            MakeMessage(3, "shipments", "key-1"),
+            MakeMessage(3, "shipments", "key-1")
         };
 
         var callCount = 0;
@@ -226,6 +256,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -233,7 +264,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(350, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(350, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // 3 different (topic, key) combos → 3 SendAsync calls
@@ -259,6 +296,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
                 // Return messages for more than threshold+1 batches so circuit-open path is hit
                 if (Interlocked.Increment(ref callCount) <= _options.CircuitBreakerFailureThreshold + 2)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -270,7 +308,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // The circuit-open release should use CancellationToken.None (not a linked token)
@@ -294,6 +338,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -317,7 +362,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // The finally block should have attempted to release ALL 3 messages
@@ -345,11 +396,21 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         Assert.False(_healthState.IsPublishLoopRunning);
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(100, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(100, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
 
         Assert.True(_healthState.IsPublishLoopRunning);
 
-        try { await Task.Delay(250, CancellationToken.None); } catch { /* Intentionally empty */ }
+        try { await Task.Delay(250, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         Assert.False(_healthState.IsPublishLoopRunning);
@@ -428,6 +489,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -443,7 +505,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(350, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(350, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         await _store.Received().ReleaseLeaseAsync(
@@ -487,6 +555,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -502,7 +571,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Succeeded message should be deleted
@@ -532,6 +607,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -553,7 +629,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         Assert.True(publishFailedCalled);
@@ -573,7 +655,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(200, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(200, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Since registration always fails and cancellation happens quickly, no producer is registered
@@ -593,6 +681,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -600,7 +689,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(350, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(350, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         await _eventHandler.Received(2).OnMessagePublishedAsync(
@@ -629,6 +724,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -644,7 +740,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Transport succeeded, so delete should have been attempted (handler threw BEFORE delete,
@@ -682,6 +784,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
                 // Fail enough times to open circuit, then succeed
                 if (Interlocked.Increment(ref sendCallCount) <= _options.CircuitBreakerFailureThreshold)
                     throw new InvalidOperationException("broker down");
+
                 return Task.CompletedTask;
             });
 
@@ -697,7 +800,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(1400, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(1400, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // The successful send should have triggered a delete, not a retry-incremented release
@@ -731,6 +840,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return new[] { poisonMsg, healthyMsg1, healthyMsg2 };
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -742,7 +852,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Poison message should have been dead-lettered (this happens before handler call)
@@ -777,6 +893,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return new[] { poisonMsg, healthyMsg };
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -792,7 +909,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // With the fix: healthy messages should be sent and deleted normally.
@@ -817,14 +940,20 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         // Always return empty — forces poll interval to ramp up
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(Array.Empty<OutboxMessage>());
 
         var service = CreateService();
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(550, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(550, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // With MaxPollIntervalMs=100, after backoff saturates we get at most ~5 calls/500ms.
@@ -848,13 +977,15 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 // Return empty first to build up backoff, then a message to reset it, then empty
                 var n = Interlocked.Increment(ref callCount);
+
                 if (n <= 3) return Array.Empty<OutboxMessage>(); // build up interval
-                if (n == 4) return messages;                     // resets to MinPollIntervalMs
+                if (n == 4) return messages; // resets to MinPollIntervalMs
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -862,7 +993,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(600));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(650, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(650, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Transport should have been called once (for the one non-empty batch)
@@ -883,26 +1020,33 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 // Return messages for first CircuitBreakerFailureThreshold + 3 polls to open circuit
                 // then keep returning messages so the "publishedAny=false && batch.Count>0" path runs
                 if (Interlocked.Increment(ref callCount) <= _options.CircuitBreakerFailureThreshold + 3)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
         // Fail every send to trip the circuit breaker
         _transport.SendAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<OutboxMessage>>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("broker down"));
 
         var service = CreateService();
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(600));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(650, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(650, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // After threshold failures, circuit opens. Subsequent batches see circuit open
@@ -924,12 +1068,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         var leaseBatchCallCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 // Throw on the very first call, then return empty
                 if (Interlocked.Increment(ref leaseBatchCallCount) == 1)
                     throw new InvalidOperationException("transient DB crash");
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -940,7 +1085,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(550, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(550, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // After the error + MaxPollIntervalMs delay, the loop should have polled at least once more
@@ -975,12 +1126,14 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 var n = Interlocked.Increment(ref callCount);
+
                 if (n == 1)
                     throw new OutOfMemoryException("unexpected error in loop"); // hits outer catch
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -990,7 +1143,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(550, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(550, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // After the error the loop should have continued and polled again
@@ -1008,16 +1167,17 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         var messages = new[] { MakeMessage(1) };
         var sendCallCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(messages);
 
         _transport.SendAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<OutboxMessage>>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 // Fail enough times to open the circuit, then succeed
                 if (Interlocked.Increment(ref sendCallCount) <= _options.CircuitBreakerFailureThreshold)
                     throw new InvalidOperationException("broker down");
+
                 return Task.CompletedTask;
             });
 
@@ -1037,7 +1197,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(1400, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(1400, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         Assert.True(circuitChangedCalled,
@@ -1080,6 +1246,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 // Cancel the token and then throw OCE — so the when-filter matches
                 cts.Cancel();
+
                 throw new OperationCanceledException("stopped");
             });
 
@@ -1089,7 +1256,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         var service = CreateService();
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(200, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(200, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Unregister must NOT be called — we never successfully registered
@@ -1107,6 +1280,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     throw new InvalidOperationException("transient DB error");
+
                 return Task.FromResult("producer-retry");
             });
 
@@ -1121,7 +1295,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(TimeSpan.FromSeconds(3.5), CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(TimeSpan.FromSeconds(3.5), CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // RegisterProducerAsync was called at least twice (first failure + retry)
@@ -1147,7 +1327,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(200, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(200, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Never successfully registered, so Unregister must not be called
@@ -1171,7 +1357,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(300, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(300, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         // StopAsync should complete without throwing even though Unregister failed
         await service.StopAsync(CancellationToken.None);
 
@@ -1189,20 +1381,25 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         var messages = new[] { MakeMessage(1) };
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(messages);
 
         // Transport delays until cancellation, then throws OCE from the cancellation token.
         _transport.SendAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<OutboxMessage>>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 var token = (CancellationToken)ci[3];
+
                 // Wait until cancellation happens, then throw OCE linked to the token
                 return Task.Run(async () =>
                 {
                     try { await Task.Delay(Timeout.Infinite, token); }
-                    catch (OperationCanceledException) { /* Intentionally empty */ }
+                    catch (OperationCanceledException)
+                    {
+                        /* Intentionally empty */
+                    }
+
                     token.ThrowIfCancellationRequested();
                 }, CancellationToken.None);
             });
@@ -1233,22 +1430,30 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         var firstCall = true;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 var token = (CancellationToken)ci[4];
+
                 if (firstCall)
                 {
                     firstCall = false;
+
                     // Simulate a long-running lease batch that gets cancelled
                     return Task.Run(async () =>
                     {
                         try { await Task.Delay(Timeout.Infinite, token); }
-                        catch (OperationCanceledException) { /* Intentionally empty */ }
+                        catch (OperationCanceledException)
+                        {
+                            /* Intentionally empty */
+                        }
+
                         token.ThrowIfCancellationRequested();
+
                         return (IReadOnlyList<OutboxMessage>)Array.Empty<OutboxMessage>();
                     }, CancellationToken.None);
                 }
+
                 return Task.FromResult((IReadOnlyList<OutboxMessage>)Array.Empty<OutboxMessage>());
             });
 
@@ -1275,11 +1480,12 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     throw new InvalidOperationException("unexpected error"); // hits outer catch
+
                 return Array.Empty<OutboxMessage>();
             });
 
@@ -1309,16 +1515,17 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
         _transport.SendAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<OutboxMessage>>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("broker down"));
 
         var publishFailedCalled = false;
@@ -1332,7 +1539,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(350, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(350, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         Assert.True(publishFailedCalled, "Expected OnPublishFailedAsync to be called on transport failure");
@@ -1353,28 +1566,30 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
         // Transport fails
         _transport.SendAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<OutboxMessage>>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("broker down"));
 
         // ReleaseLeaseAsync also fails (first call — with incrementRetry:true)
         // but succeeds on second call (from finally block with incrementRetry:false)
         var releaseCallCount = 0;
         _store.ReleaseLeaseAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<long>>(),
-            Arg.Any<bool>(), Arg.Any<CancellationToken>())
+                Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 if (Interlocked.Increment(ref releaseCallCount) == 1)
                     throw new InvalidOperationException("DB also down");
+
                 return Task.CompletedTask;
             });
 
@@ -1382,7 +1597,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(400));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(450, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(450, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // First release attempt (incrementRetry:true) failed, then finally block tried again
@@ -1402,34 +1623,41 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
         // Transport succeeds
         _transport.SendAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<OutboxMessage>>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
         // Delete fails
         _store.DeletePublishedAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<long>>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("DB down"));
 
         // Release also fails (covers lines 347-351)
         _store.ReleaseLeaseAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<long>>(),
-            Arg.Any<bool>(), Arg.Any<CancellationToken>())
+                Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("DB still down"));
 
         var service = CreateService();
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(350, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(350, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Delete was attempted
@@ -1450,12 +1678,12 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(messages);
 
         // Throw PartialSendException on every call to accumulate circuit breaker failures
         _transport.SendAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<OutboxMessage>>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .ThrowsAsync(new PartialSendException(
                 [1L],
                 [2L],
@@ -1475,7 +1703,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(800));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(700, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(700, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // After threshold partial failures, circuit should open
@@ -1595,17 +1829,18 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     return messages;
+
                 return Array.Empty<OutboxMessage>();
             });
 
         // Partial send: seq 1 succeeded, seq 2 failed
         _transport.SendAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<OutboxMessage>>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .ThrowsAsync(new PartialSendException(
                 [1L],
                 [2L],
@@ -1614,7 +1849,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         // Delete for succeeded messages fails
         _store.DeletePublishedAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<long>>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("DB blip"));
 
         // ReleaseLeaseAsync SUCCEEDS (default NSubstitute behaviour)
@@ -1624,7 +1859,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(400));
 
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(450, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(450, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Delete was attempted for succeeded sequence
@@ -1654,7 +1895,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         // Publish loop returns empty batches (doesn't crash on its own)
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(Array.Empty<OutboxMessage>());
 
         // Heartbeat fails persistently — after 3 consecutive failures the loop throws,
@@ -1692,7 +1933,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             .Returns("producer-1");
 
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<CancellationToken>())
+                Arg.Any<CancellationToken>())
             .Returns(Array.Empty<OutboxMessage>());
 
         // Heartbeat fails persistently

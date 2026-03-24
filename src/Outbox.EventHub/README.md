@@ -10,22 +10,30 @@ services.AddOutbox(configuration, outbox =>
     outbox.UsePostgreSql(connectionFactory);
     outbox.UseEventHub(opts =>
     {
-        opts.ConnectionString = "Endpoint=sb://...";
-        opts.EventHubName = "my-hub";
+        opts.ConnectionString = "Endpoint=sb://my-namespace.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=...";
     });
 });
 ```
 
-Or bring your own client (e.g., for `DefaultAzureCredential`):
+The connection string must be namespace-level (no `EntityPath`). The Event Hub name comes from each message's `TopicName` column in the outbox table.
+
+### Custom client factory
+
+To use `DefaultAzureCredential` or any custom client creation logic, provide your own `EventHubClientFactory` delegate:
 
 ```csharp
-outbox.UseEventHub(
-    clientFactory: sp => new EventHubProducerClient("namespace.servicebus.windows.net", "hub", credential),
-    configure: opts => opts.SendTimeoutSeconds = 30
-);
+outbox.UseEventHub()
+    .UseClientFactory(eventHubName => new EventHubProducerClient(
+        "my-namespace.servicebus.windows.net", eventHubName, new DefaultAzureCredential()));
 ```
 
+The delegate receives the Event Hub name (from the message's `TopicName`) and returns a client. Clients are cached per topic name for the transport's lifetime.
+
 ## How it works
+
+### Multi-Event Hub support
+
+The transport manages a `ConcurrentDictionary<string, EventHubProducerClient>` internally. On the first send to a given topic name, it calls the `EventHubClientFactory` delegate to create a client and caches it. Subsequent sends to the same topic reuse the cached client. Clients sharing a namespace share the underlying AMQP connection.
 
 ### Message mapping
 
@@ -54,11 +62,7 @@ Unlike the Kafka transport, EventHub's `SendAsync` is truly async—no thread bl
 
 ### Disposal
 
-`DisposeAsync` does **not** dispose the `EventHubProducerClient`—it's owned by the DI container.
-
-### Topic validation
-
-If `EventHubName` is configured and the `topicName` in a `SendAsync` call doesn't match (case-insensitive), an `InvalidOperationException` is thrown. Leave `EventHubName` empty to skip this check.
+`DisposeAsync` closes all cached `EventHubProducerClient` instances.
 
 ## Configuration
 
@@ -66,8 +70,7 @@ Bind from `"Outbox:EventHub"` in `IConfiguration`.
 
 | Option | Default | Description |
 |---|---|---|
-| `ConnectionString` | `""` | EventHub connection string |
-| `EventHubName` | `""` | Target EventHub name |
+| `ConnectionString` | `""` | Namespace-level EventHub connection string |
 | `MaxBatchSizeBytes` | `1048576` | Batch size limit (0 = use EventHub default) |
 | `SendTimeoutSeconds` | `15` | Per-sub-batch send timeout |
 

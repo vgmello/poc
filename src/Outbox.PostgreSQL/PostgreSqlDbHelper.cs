@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Data.Common;
 using Npgsql;
 
@@ -24,6 +26,7 @@ internal sealed class PostgreSqlDbHelper
         var conn = await _connectionFactory(_serviceProvider, ct).ConfigureAwait(false);
         if (conn.State != System.Data.ConnectionState.Open)
             await conn.OpenAsync(ct).ConfigureAwait(false);
+
         return conn;
     }
 
@@ -31,6 +34,7 @@ internal sealed class PostgreSqlDbHelper
     {
         var cmd = new NpgsqlCommand(sql, (NpgsqlConnection)conn);
         cmd.CommandTimeout = _options.CommandTimeoutSeconds;
+
         return cmd;
     }
 
@@ -38,15 +42,16 @@ internal sealed class PostgreSqlDbHelper
         Func<DbConnection, CancellationToken, Task> action,
         CancellationToken ct)
     {
-        int maxAttempts = _options.TransientRetryMaxAttempts;
-        int backoffMs = _options.TransientRetryBackoffMs;
+        var maxAttempts = _options.TransientRetryMaxAttempts;
+        var backoffMs = _options.TransientRetryBackoffMs;
 
-        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
                 await using var conn = await OpenConnectionAsync(ct).ConfigureAwait(false);
                 await action(conn, ct).ConfigureAwait(false);
+
                 return;
             }
             catch (NpgsqlException ex) when (IsTransientNpgsqlError(ex) && attempt < maxAttempts)
@@ -70,7 +75,7 @@ internal sealed class PostgreSqlDbHelper
                 return true;
         }
 
-        if (ex.InnerException is System.IO.IOException or System.Net.Sockets.SocketException)
+        if (ex.InnerException is IOException or System.Net.Sockets.SocketException)
             return true;
 
         return false;

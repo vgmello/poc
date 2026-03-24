@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Outbox.IntegrationTests.Fixtures;

@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Reflection;
 using Microsoft.Data.SqlClient;
 using Outbox.SqlServer;
@@ -34,11 +36,11 @@ public class SqlServerTransientErrorTests
     }
 
     [Theory]
-    [InlineData(1205)]   // deadlock victim
-    [InlineData(-2)]     // timeout
-    [InlineData(40613)]  // Azure SQL database not available
-    [InlineData(40197)]  // Azure SQL service error
-    [InlineData(40501)]  // Azure SQL service busy
+    [InlineData(1205)] // deadlock victim
+    [InlineData(-2)] // timeout
+    [InlineData(40613)] // Azure SQL database not available
+    [InlineData(40197)] // Azure SQL service error
+    [InlineData(40501)] // Azure SQL service busy
     [InlineData(49918)]
     [InlineData(49919)]
     [InlineData(49920)]
@@ -49,10 +51,10 @@ public class SqlServerTransientErrorTests
     }
 
     [Theory]
-    [InlineData(547)]   // FK violation
-    [InlineData(2627)]  // unique violation
-    [InlineData(8152)]  // string truncation
-    [InlineData(0)]     // generic
+    [InlineData(547)] // FK violation
+    [InlineData(2627)] // unique violation
+    [InlineData(8152)] // string truncation
+    [InlineData(0)] // generic
     public void NonTransientErrorNumbers_ReturnFalse(int errorNumber)
     {
         var ex = CreateSqlException(errorNumber);

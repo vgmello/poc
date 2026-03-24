@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Npgsql;
 using Outbox.IntegrationTests.Fixtures;
 using Outbox.IntegrationTests.Helpers;
@@ -33,6 +35,7 @@ public class ProcessKillTests
         await OutboxTestHelper.WaitUntilAsync(async () =>
         {
             var owners = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
+
             return owners.Values.Any(v => v != null);
         }, TimeSpan.FromSeconds(10), message: "Publisher A should claim partitions");
 
@@ -89,7 +92,9 @@ public class ProcessKillTests
                 var owners = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
                 var producerB = (await OutboxTestHelper.GetProducerIdsAsync(_infra.ConnectionString))
                     .FirstOrDefault(id => id != producerIdA);
+
                 if (producerB == null) return false;
+
                 return owners.Values.Count(v => v == producerB) > 16;
             }, TimeSpan.FromSeconds(30), message: "Publisher B should claim A's orphaned partitions");
 
@@ -121,7 +126,7 @@ public class ProcessKillTests
             o =>
             {
                 OutboxTestHelper.FastTestOptions(o);
-                o.LeaseDurationSeconds = 5;  // Short lease for faster test
+                o.LeaseDurationSeconds = 5; // Short lease for faster test
             });
 
         // Make transport fail so messages stay leased (not deleted)
@@ -133,6 +138,7 @@ public class ProcessKillTests
         await OutboxTestHelper.WaitUntilAsync(async () =>
         {
             var owners = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
+
             return owners.Values.Any(v => v != null);
         }, TimeSpan.FromSeconds(10), message: "Publisher A should claim partitions");
 
@@ -143,12 +149,14 @@ public class ProcessKillTests
         await OutboxTestHelper.WaitUntilAsync(async () =>
         {
             var retryCounts = await OutboxTestHelper.GetRetryCountsAsync(_infra.ConnectionString);
+
             return retryCounts.Any(r => r.RetryCount > 0);
         }, TimeSpan.FromSeconds(10), message: "Publisher A should increment retry counts on transport failure");
 
         // Capture retry counts before simulating kill
         var retryCountsBeforeKill = await OutboxTestHelper.GetRetryCountsAsync(_infra.ConnectionString);
-        _output.WriteLine($"Retry counts before kill: {string.Join(", ", retryCountsBeforeKill.Select(r => $"seq={r.Seq}:retry={r.RetryCount}"))}");
+        _output.WriteLine(
+            $"Retry counts before kill: {string.Join(", ", retryCountsBeforeKill.Select(r => $"seq={r.Seq}:retry={r.RetryCount}"))}");
 
         // Simulate SIGKILL: stop A gracefully (we can't truly SIGKILL in a test),
         // then re-create stale producer state to simulate the effect of an abrupt kill.
@@ -156,6 +164,7 @@ public class ProcessKillTests
         hostA.Dispose();
 
         var producerIdA = "dead-producer-sigkill";
+
         await using (var conn = new NpgsqlConnection(_infra.ConnectionString))
         {
             await conn.OpenAsync();
@@ -202,6 +211,7 @@ public class ProcessKillTests
             await OutboxTestHelper.WaitUntilAsync(async () =>
             {
                 var count = await OutboxTestHelper.GetOutboxCountAsync(_infra.ConnectionString);
+
                 return count == 0;
             }, TimeSpan.FromSeconds(30), message: "Publisher B should drain all messages");
 

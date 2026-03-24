@@ -1,0 +1,321 @@
+// Copyright (c) OrgName. All rights reserved.
+
+namespace Outbox.PostgreSQL;
+
+internal sealed class PostgreSqlQueries
+{
+    // Store queries
+    public string RegisterProducer { get; }
+    public string UnregisterProducer { get; }
+    public string LeaseBatch { get; }
+    public string DeletePublished { get; }
+    public string ReleaseLeaseWithRetry { get; }
+    public string ReleaseLeaseNoRetry { get; }
+    public string DeadLetter { get; }
+    public string Heartbeat { get; }
+    public string GetTotalPartitions { get; }
+    public string GetOwnedPartitions { get; }
+    public string RebalanceMarkStale { get; }
+    public string RebalanceClaim { get; }
+    public string RebalanceRelease { get; }
+    public string ClaimOrphanPartitions { get; }
+    public string SweepDeadLetters { get; }
+    public string GetPendingCount { get; }
+
+    // Dead-letter manager queries
+    public string DeadLetterGet { get; }
+    public string DeadLetterReplay { get; }
+    public string DeadLetterPurge { get; }
+    public string DeadLetterPurgeAll { get; }
+
+    public PostgreSqlQueries(string schemaName, string tablePrefix)
+    {
+        var outboxTable = $"{schemaName}.{tablePrefix}outbox";
+        var deadLetterTable = $"{schemaName}.{tablePrefix}outbox_dead_letter";
+        var producersTable = $"{schemaName}.{tablePrefix}outbox_producers";
+        var partitionsTable = $"{schemaName}.{tablePrefix}outbox_partitions";
+
+        // ---- Store queries ----
+
+        RegisterProducer = $@"
+INSERT INTO {producersTable} (producer_id, registered_at_utc, last_heartbeat_utc, host_name)
+VALUES (@producer_id, clock_timestamp(), clock_timestamp(), @host_name)
+ON CONFLICT (producer_id) DO UPDATE
+SET last_heartbeat_utc = clock_timestamp(),
+    host_name          = EXCLUDED.host_name;";
+
+        UnregisterProducer = $@"
+UPDATE {partitionsTable}
+SET    owner_producer_id = NULL,
+       owned_since_utc   = NULL,
+       grace_expires_utc = NULL
+WHERE  owner_producer_id = @producer_id;
+
+DELETE FROM {producersTable}
+WHERE  producer_id = @producer_id;";
+
+        LeaseBatch = $@"
+WITH batch AS (
+    SELECT o.sequence_number
+    FROM {outboxTable} o
+    INNER JOIN {partitionsTable} op
+        ON  op.owner_producer_id = @publisher_id
+        AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < clock_timestamp())
+        AND ((hashtext(o.partition_key) & 2147483647) % @total_partitions) = op.partition_id
+    WHERE (o.leased_until_utc IS NULL OR o.leased_until_utc < clock_timestamp())
+      AND o.retry_count < @max_retry_count
+    ORDER BY o.event_datetime_utc, o.event_ordinal
+    LIMIT @batch_size
+    FOR UPDATE OF o SKIP LOCKED
+)
+UPDATE {outboxTable} o
+SET    leased_until_utc = clock_timestamp() + make_interval(secs => @lease_duration_seconds),
+       lease_owner      = @publisher_id,
+       retry_count      = CASE WHEN o.leased_until_utc IS NOT NULL
+                               THEN o.retry_count + 1
+                               ELSE o.retry_count END
+FROM   batch b
+WHERE  o.sequence_number = b.sequence_number
+RETURNING o.sequence_number, o.topic_name, o.partition_key, o.event_type,
+          o.headers, o.payload, o.payload_content_type,
+          o.event_datetime_utc, o.event_ordinal,
+          o.retry_count, o.created_at_utc;";
+
+        DeletePublished = $@"
+DELETE FROM {outboxTable}
+WHERE  sequence_number = ANY(@published_ids)
+  AND  lease_owner = @publisher_id;";
+
+        ReleaseLeaseWithRetry = $@"
+UPDATE {outboxTable}
+SET    leased_until_utc = NULL,
+       lease_owner      = NULL,
+       retry_count      = retry_count + 1
+WHERE  sequence_number = ANY(@ids)
+  AND  lease_owner = @publisher_id;";
+
+        ReleaseLeaseNoRetry = $@"
+UPDATE {outboxTable}
+SET    leased_until_utc = NULL,
+       lease_owner      = NULL
+WHERE  sequence_number = ANY(@ids)
+  AND  lease_owner = @publisher_id;";
+
+        DeadLetter = $@"
+WITH dead AS (
+    DELETE FROM {outboxTable}
+    WHERE  sequence_number = ANY(@ids)
+      AND  lease_owner = @publisher_id
+    RETURNING sequence_number, topic_name, partition_key, event_type,
+              headers, payload, payload_content_type,
+              created_at_utc, retry_count,
+              event_datetime_utc, event_ordinal
+)
+INSERT INTO {deadLetterTable}
+    (sequence_number, topic_name, partition_key, event_type, headers, payload,
+     payload_content_type,
+     created_at_utc, retry_count, event_datetime_utc, event_ordinal,
+     dead_lettered_at_utc, last_error)
+SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
+       payload_content_type,
+       created_at_utc, retry_count, event_datetime_utc, event_ordinal,
+       clock_timestamp(), @last_error
+FROM dead;";
+
+        Heartbeat = $@"
+UPDATE {producersTable}
+SET    last_heartbeat_utc = clock_timestamp()
+WHERE  producer_id = @producer_id;
+
+UPDATE {partitionsTable}
+SET    grace_expires_utc = NULL
+WHERE  owner_producer_id = @producer_id
+  AND  grace_expires_utc IS NOT NULL;";
+
+        GetTotalPartitions = $"SELECT COUNT(*) FROM {partitionsTable};";
+
+        GetOwnedPartitions = $@"
+SELECT partition_id
+FROM   {partitionsTable}
+WHERE  owner_producer_id = @producer_id;";
+
+        RebalanceMarkStale = $@"
+UPDATE {partitionsTable}
+SET    grace_expires_utc = clock_timestamp() + make_interval(secs => @partition_grace_period_seconds)
+WHERE  owner_producer_id <> @producer_id
+  AND  owner_producer_id IS NOT NULL
+  AND  grace_expires_utc IS NULL
+  AND  owner_producer_id NOT IN (
+           SELECT producer_id
+           FROM   {producersTable}
+           WHERE  last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
+       );";
+
+        RebalanceClaim = $@"
+WITH counts AS (
+    SELECT
+        (SELECT COUNT(*) FROM {partitionsTable}) AS total_partitions,
+        (SELECT COUNT(*) FROM {producersTable}
+         WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
+        (SELECT COUNT(*) FROM {partitionsTable}
+         WHERE owner_producer_id = @producer_id) AS currently_owned
+),
+fair AS (
+    SELECT
+        CEIL(total_partitions::float / NULLIF(active_producers, 0))::int AS fair_share,
+        currently_owned
+    FROM counts
+),
+to_claim AS (
+    SELECT op.partition_id
+    FROM {partitionsTable} op, fair f
+    WHERE (op.owner_producer_id IS NULL OR op.grace_expires_utc < clock_timestamp())
+      AND f.fair_share - f.currently_owned > 0
+    ORDER BY op.partition_id
+    LIMIT GREATEST(0, (SELECT f.fair_share - f.currently_owned FROM fair f))
+    FOR UPDATE OF op SKIP LOCKED
+)
+UPDATE {partitionsTable}
+SET    owner_producer_id = @producer_id,
+       owned_since_utc   = clock_timestamp(),
+       grace_expires_utc = NULL
+FROM   to_claim
+WHERE  {partitionsTable}.partition_id = to_claim.partition_id;";
+
+        RebalanceRelease = $@"
+WITH counts AS (
+    SELECT
+        (SELECT COUNT(*) FROM {partitionsTable}) AS total_partitions,
+        (SELECT COUNT(*) FROM {producersTable}
+         WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
+        (SELECT COUNT(*) FROM {partitionsTable}
+         WHERE owner_producer_id = @producer_id) AS currently_owned
+),
+fair AS (
+    SELECT
+        CEIL(total_partitions::float / NULLIF(active_producers, 0))::int AS fair_share,
+        currently_owned
+    FROM counts
+),
+to_release AS (
+    SELECT op.partition_id
+    FROM {partitionsTable} op, fair f
+    WHERE op.owner_producer_id = @producer_id
+      AND f.currently_owned > f.fair_share
+    ORDER BY op.partition_id DESC
+    LIMIT GREATEST(0, (SELECT f.currently_owned - f.fair_share FROM fair f))
+    FOR UPDATE OF op SKIP LOCKED
+)
+UPDATE {partitionsTable}
+SET    owner_producer_id = NULL,
+       owned_since_utc   = NULL,
+       grace_expires_utc = NULL
+FROM   to_release
+WHERE  {partitionsTable}.partition_id = to_release.partition_id;";
+
+        ClaimOrphanPartitions = $@"
+WITH counts AS (
+    SELECT
+        (SELECT COUNT(*) FROM {partitionsTable}) AS total_partitions,
+        (SELECT COUNT(*) FROM {producersTable}
+         WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
+        (SELECT COUNT(*) FROM {partitionsTable}
+         WHERE owner_producer_id = @producer_id) AS currently_owned
+),
+fair AS (
+    SELECT
+        CEIL(total_partitions::float / NULLIF(active_producers, 0))::int AS fair_share,
+        currently_owned
+    FROM counts
+),
+to_claim AS (
+    SELECT op.partition_id
+    FROM {partitionsTable} op, fair f
+    WHERE op.owner_producer_id IS NULL
+      AND f.fair_share - f.currently_owned > 0
+    ORDER BY op.partition_id
+    LIMIT GREATEST(0, (SELECT f.fair_share - f.currently_owned FROM fair f))
+    FOR UPDATE OF op SKIP LOCKED
+)
+UPDATE {partitionsTable}
+SET    owner_producer_id = @producer_id,
+       owned_since_utc   = clock_timestamp(),
+       grace_expires_utc = NULL
+FROM   to_claim
+WHERE  {partitionsTable}.partition_id = to_claim.partition_id;";
+
+        SweepDeadLetters = $@"
+WITH dead AS (
+    DELETE FROM {outboxTable} o
+    USING (
+        SELECT sequence_number
+        FROM {outboxTable}
+        WHERE retry_count >= @max_retry_count
+          AND (leased_until_utc IS NULL OR leased_until_utc < clock_timestamp())
+          AND (lease_owner IS NULL
+               OR leased_until_utc < clock_timestamp() - make_interval(secs => @lease_duration_seconds)
+               OR lease_owner NOT IN (
+                   SELECT producer_id
+                   FROM {producersTable}
+                   WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
+               ))
+        FOR UPDATE SKIP LOCKED
+    ) d
+    WHERE o.sequence_number = d.sequence_number
+    RETURNING o.sequence_number, o.topic_name, o.partition_key, o.event_type,
+              o.headers, o.payload, o.payload_content_type,
+              o.created_at_utc, o.retry_count,
+              o.event_datetime_utc, o.event_ordinal
+)
+INSERT INTO {deadLetterTable}
+    (sequence_number, topic_name, partition_key, event_type, headers, payload,
+     payload_content_type,
+     created_at_utc, retry_count, event_datetime_utc, event_ordinal,
+     dead_lettered_at_utc, last_error)
+SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
+       payload_content_type,
+       created_at_utc, retry_count, event_datetime_utc, event_ordinal,
+       clock_timestamp(), @last_error
+FROM dead;";
+
+        GetPendingCount = $@"
+SELECT COUNT(*) FROM {outboxTable}
+WHERE  leased_until_utc IS NULL OR leased_until_utc < clock_timestamp();";
+
+        // ---- Dead-letter manager queries ----
+
+        DeadLetterGet = $@"
+SELECT dead_letter_seq, sequence_number, topic_name, partition_key, event_type, headers, payload,
+       payload_content_type,
+       event_datetime_utc, event_ordinal, retry_count, created_at_utc,
+       dead_lettered_at_utc, last_error
+FROM   {deadLetterTable}
+ORDER  BY dead_letter_seq
+LIMIT  @limit OFFSET @offset;";
+
+        DeadLetterReplay = $@"
+WITH replayed AS (
+    DELETE FROM {deadLetterTable}
+    WHERE  dead_letter_seq = ANY(@ids)
+    RETURNING sequence_number, topic_name, partition_key, event_type, headers, payload,
+              payload_content_type,
+              created_at_utc, event_datetime_utc, event_ordinal
+)
+INSERT INTO {outboxTable}
+    (topic_name, partition_key, event_type, headers, payload,
+     payload_content_type,
+     created_at_utc, event_datetime_utc, event_ordinal,
+     leased_until_utc, lease_owner, retry_count)
+SELECT topic_name, partition_key, event_type, headers, payload,
+       payload_content_type,
+       created_at_utc, event_datetime_utc, event_ordinal,
+       NULL, NULL, 0
+FROM replayed;";
+
+        DeadLetterPurge = $@"
+DELETE FROM {deadLetterTable}
+WHERE  dead_letter_seq = ANY(@ids);";
+
+        DeadLetterPurgeAll = $"DELETE FROM {deadLetterTable};";
+    }
+}

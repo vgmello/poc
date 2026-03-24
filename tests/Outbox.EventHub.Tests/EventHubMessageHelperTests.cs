@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Text;
 using Outbox.Core.Models;
 using Xunit;
@@ -26,7 +28,7 @@ public class EventHubMessageHelperTests
     [Fact]
     public void CreateEventData_ValidJsonHeaders_PropertiesContainHeaderEntries()
     {
-        var headers = new Dictionary<string, string> { {"correlationId","abc-123"}, {"source","svc-a"} };
+        var headers = new Dictionary<string, string> { { "correlationId", "abc-123" }, { "source", "svc-a" } };
         var msg = CreateMessage(headers: headers);
 
         var eventData = EventHubMessageHelper.CreateEventData(msg);
@@ -60,7 +62,7 @@ public class EventHubMessageHelperTests
     public void CreateEventData_EventTypeOverwritesUserSuppliedHeaderValue()
     {
         // Even if headers contain "EventType", the system value wins
-        var headers = new Dictionary<string, string> { {"EventType","user-supplied-value"} };
+        var headers = new Dictionary<string, string> { { "EventType", "user-supplied-value" } };
         var msg = CreateMessage(eventType: "SystemEvent", headers: headers);
 
         var eventData = EventHubMessageHelper.CreateEventData(msg);

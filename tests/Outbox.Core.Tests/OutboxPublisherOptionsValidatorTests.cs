@@ -1,10 +1,12 @@
-using Microsoft.Extensions.Options;
+// Copyright (c) OrgName. All rights reserved.
+
+using System.ComponentModel.DataAnnotations;
 using Outbox.Core.Options;
 using Xunit;
 
 namespace Outbox.Core.Tests;
 
-public class OutboxPublisherOptionsValidatorTests
+public class OutboxPublisherOptionsTests
 {
     private static OutboxPublisherOptions ValidOptions() => new()
     {
@@ -20,20 +22,22 @@ public class OutboxPublisherOptionsValidatorTests
         MaxPollIntervalMs = 5000,
         RebalanceIntervalMs = 30_000,
         OrphanSweepIntervalMs = 60_000,
-        DeadLetterSweepIntervalMs = 60_000,
+        DeadLetterSweepIntervalMs = 60_000
     };
 
-    private static ValidateOptionsResult Validate(OutboxPublisherOptions options)
+    private static List<ValidationResult> Validate(OutboxPublisherOptions options)
     {
-        var validator = new OutboxPublisherOptionsValidator();
-        return validator.Validate(null, options);
+        var context = new ValidationContext(options);
+        var results = new List<ValidationResult>();
+        Validator.TryValidateObject(options, context, results, validateAllProperties: true);
+
+        return results;
     }
 
     [Fact]
     public void ValidOptions_ReturnsSuccess()
     {
-        var result = Validate(ValidOptions());
-        Assert.True(result.Succeeded);
+        Assert.Empty(Validate(ValidOptions()));
     }
 
     [Theory]
@@ -43,9 +47,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.BatchSize = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("BatchSize", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("BatchSize"));
     }
 
     [Theory]
@@ -55,9 +59,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.LeaseDurationSeconds = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("LeaseDurationSeconds", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("LeaseDurationSeconds"));
     }
 
     [Theory]
@@ -67,9 +71,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.MaxRetryCount = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("MaxRetryCount", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("MaxRetryCount"));
     }
 
     [Theory]
@@ -79,9 +83,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.MinPollIntervalMs = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("MinPollIntervalMs", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("MinPollIntervalMs"));
     }
 
     [Theory]
@@ -91,9 +95,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.MaxPollIntervalMs = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("MaxPollIntervalMs", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("MaxPollIntervalMs"));
     }
 
     [Theory]
@@ -103,9 +107,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.HeartbeatIntervalMs = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("HeartbeatIntervalMs", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("HeartbeatIntervalMs"));
     }
 
     [Theory]
@@ -115,9 +119,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.HeartbeatTimeoutSeconds = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("HeartbeatTimeoutSeconds", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("HeartbeatTimeoutSeconds"));
     }
 
     [Theory]
@@ -127,9 +131,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.PartitionGracePeriodSeconds = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("PartitionGracePeriodSeconds", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("PartitionGracePeriodSeconds"));
     }
 
     [Theory]
@@ -139,9 +143,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.RebalanceIntervalMs = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("RebalanceIntervalMs", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("RebalanceIntervalMs"));
     }
 
     [Theory]
@@ -151,9 +155,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.OrphanSweepIntervalMs = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("OrphanSweepIntervalMs", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("OrphanSweepIntervalMs"));
     }
 
     [Theory]
@@ -163,9 +167,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.DeadLetterSweepIntervalMs = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("DeadLetterSweepIntervalMs", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("DeadLetterSweepIntervalMs"));
     }
 
     [Theory]
@@ -175,9 +179,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.CircuitBreakerFailureThreshold = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("CircuitBreakerFailureThreshold", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("CircuitBreakerFailureThreshold"));
     }
 
     [Theory]
@@ -187,9 +191,9 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.CircuitBreakerOpenDurationSeconds = value;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("CircuitBreakerOpenDurationSeconds", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("CircuitBreakerOpenDurationSeconds"));
     }
 
     [Fact]
@@ -198,9 +202,9 @@ public class OutboxPublisherOptionsValidatorTests
         var options = ValidOptions();
         options.MinPollIntervalMs = 5000;
         options.MaxPollIntervalMs = 100;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("MaxPollIntervalMs must be >= MinPollIntervalMs", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.ErrorMessage!.Contains("MaxPollIntervalMs must be >= MinPollIntervalMs"));
     }
 
     [Fact]
@@ -208,11 +212,12 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.LeaseDurationSeconds = 60;
-        options.PartitionGracePeriodSeconds = 45; // less than LeaseDurationSeconds
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("PartitionGracePeriodSeconds", result.FailureMessage);
-        Assert.Contains("LeaseDurationSeconds", result.FailureMessage);
+        options.PartitionGracePeriodSeconds = 45;
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r =>
+            r.MemberNames.Contains("PartitionGracePeriodSeconds") &&
+            r.MemberNames.Contains("LeaseDurationSeconds"));
     }
 
     [Fact]
@@ -220,25 +225,25 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.LeaseDurationSeconds = 60;
-        options.PartitionGracePeriodSeconds = 60; // equal — must be strictly greater
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("PartitionGracePeriodSeconds", result.FailureMessage);
-        Assert.Contains("strictly greater", result.FailureMessage);
+        options.PartitionGracePeriodSeconds = 60;
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r =>
+            r.ErrorMessage!.Contains("strictly greater") &&
+            r.MemberNames.Contains("PartitionGracePeriodSeconds"));
     }
 
     [Fact]
     public void CrossField_HeartbeatTimeoutTooShort_ReturnsFailure()
     {
         var options = ValidOptions();
-        // HeartbeatTimeoutSeconds * 1000 < HeartbeatIntervalMs * 3
-        // e.g. 10s timeout, 5000ms interval → 10000 < 15000
         options.HeartbeatIntervalMs = 5000;
         options.HeartbeatTimeoutSeconds = 10;
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("HeartbeatTimeoutSeconds", result.FailureMessage);
-        Assert.Contains("HeartbeatIntervalMs", result.FailureMessage);
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r =>
+            r.MemberNames.Contains("HeartbeatTimeoutSeconds") &&
+            r.MemberNames.Contains("HeartbeatIntervalMs"));
     }
 
     [Fact]
@@ -246,10 +251,11 @@ public class OutboxPublisherOptionsValidatorTests
     {
         var options = ValidOptions();
         options.MaxRetryCount = 3;
-        options.CircuitBreakerFailureThreshold = 3; // MaxRetryCount <= threshold
-        var result = Validate(options);
-        Assert.True(result.Failed);
-        Assert.Contains("MaxRetryCount", result.FailureMessage);
-        Assert.Contains("CircuitBreakerFailureThreshold", result.FailureMessage);
+        options.CircuitBreakerFailureThreshold = 3;
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r =>
+            r.MemberNames.Contains("MaxRetryCount") &&
+            r.MemberNames.Contains("CircuitBreakerFailureThreshold"));
     }
 }

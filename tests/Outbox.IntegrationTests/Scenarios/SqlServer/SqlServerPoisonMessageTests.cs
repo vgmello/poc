@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Microsoft.Data.SqlClient;
 using Outbox.IntegrationTests.Fixtures;
 using Outbox.IntegrationTests.Helpers;
@@ -27,7 +29,11 @@ public class SqlServerPoisonMessageTests
         // Use MaxRetryCount=3 for faster test
         var (host, transport) = SqlServerTestHelper.BuildPublisherHost(
             _infra.SqlServerConnectionString, _infra.BootstrapServers,
-            o => { o.MaxRetryCount = 4; o.CircuitBreakerFailureThreshold = 3; });
+            o =>
+            {
+                o.MaxRetryCount = 4;
+                o.CircuitBreakerFailureThreshold = 3;
+            });
 
         // Make transport fail for a specific partition key (simulating oversized message)
         var poisonKey = "poison-key";
@@ -46,6 +52,7 @@ public class SqlServerPoisonMessageTests
             {
                 var outboxCount = await SqlServerTestHelper.GetOutboxCountAsync(_infra.SqlServerConnectionString);
                 var dlqCount = await SqlServerTestHelper.GetDeadLetterCountAsync(_infra.SqlServerConnectionString);
+
                 return outboxCount == 0 && dlqCount >= 1;
             }, TimeSpan.FromSeconds(30), message: "Poison message should be dead-lettered, healthy messages published");
 

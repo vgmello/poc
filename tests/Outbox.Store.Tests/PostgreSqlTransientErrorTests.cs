@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Net.Sockets;
 using System.Reflection;
 using Npgsql;
@@ -15,6 +17,7 @@ public class PostgreSqlTransientErrorTests
         typeof(Exception)
             .GetField("_innerException", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(ex, inner);
+
         return ex;
     }
 
@@ -55,7 +58,7 @@ public class PostgreSqlTransientErrorTests
     [Fact]
     public void InnerException_IOException_ReturnTrue()
     {
-        var ex = CreateNpgsqlExceptionWithInner(new System.IO.IOException("connection reset"));
+        var ex = CreateNpgsqlExceptionWithInner(new IOException("connection reset"));
         Assert.True(PostgreSqlDbHelper.IsTransientNpgsqlError(ex));
     }
 

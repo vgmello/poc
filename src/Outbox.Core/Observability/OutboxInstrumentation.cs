@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 

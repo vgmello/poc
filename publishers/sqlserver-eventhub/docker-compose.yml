@@ -64,7 +64,6 @@ services:
     environment:
       ConnectionStrings__OutboxDb: "Server=azuresqledge,1433;Database=outbox;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=true;"
       Outbox__EventHub__ConnectionString: "Endpoint=sb://eventhubs-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
-      Outbox__EventHub__EventHubName: "orders"
     restart: unless-stopped
     depends_on:
       dbinit:

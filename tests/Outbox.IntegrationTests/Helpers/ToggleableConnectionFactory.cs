@@ -1,10 +1,12 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Data.Common;
 using Npgsql;
 
 namespace Outbox.IntegrationTests.Helpers;
 
 /// <summary>
-/// Connection factory that can be toggled to simulate DB outages.
+///     Connection factory that can be toggled to simulate DB outages.
 /// </summary>
 public sealed class ToggleableConnectionFactory
 {

@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Confluent.Kafka;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -49,6 +51,7 @@ public class KafkaOutboxBuilderExtensionsTests
             outbox.UseKafka(producerFactory: sp =>
             {
                 factoryInvoked = true;
+
                 return mockProducer;
             });
         });
@@ -123,7 +126,7 @@ public class KafkaOutboxBuilderExtensionsTests
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["Outbox:Kafka:BootstrapServers"] = "localhost:9092",
+                ["Outbox:Kafka:BootstrapServers"] = "localhost:9092"
             })
             .Build();
 

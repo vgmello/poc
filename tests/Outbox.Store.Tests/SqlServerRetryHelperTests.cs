@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Data.Common;
 using System.Reflection;
 using Microsoft.Data.SqlClient;
@@ -12,7 +14,7 @@ public class SqlServerRetryHelperTests
     private static SqlServerStoreOptions FastOptions(int maxAttempts = 3) => new()
     {
         TransientRetryMaxAttempts = maxAttempts,
-        TransientRetryBackoffMs = 1,
+        TransientRetryBackoffMs = 1
     };
 
     private static SqlException CreateSqlException(int errorNumber)
@@ -47,20 +49,21 @@ public class SqlServerRetryHelperTests
         // SqlConnection is sealed and cannot be mocked, so we test retry behavior
         // via factory-level exceptions (throwing before a connection is returned).
         // Non-transient error 2627 (unique violation) should not be retried.
-        int factoryCallCount = 0;
+        var factoryCallCount = 0;
         var serviceProvider = Substitute.For<IServiceProvider>();
         var nonTransientEx = CreateSqlException(2627);
 
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> factory = (_, _) =>
         {
             factoryCallCount++;
+
             throw nonTransientEx;
         };
 
         var helper = new SqlServerDbHelper(factory, serviceProvider, FastOptions(maxAttempts: 3));
 
-        var ex = await Assert.ThrowsAsync<SqlException>(
-            () => helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));
+        var ex = await Assert.ThrowsAsync<SqlException>(() =>
+            helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));
 
         Assert.Equal(1, factoryCallCount);
         Assert.Equal(2627, ex.Number);
@@ -69,19 +72,20 @@ public class SqlServerRetryHelperTests
     [Fact]
     public async Task TransientMaxAttemptsExceeded_ThrowsAfterMaxAttempts()
     {
-        int factoryCallCount = 0;
+        var factoryCallCount = 0;
         var serviceProvider = Substitute.For<IServiceProvider>();
 
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> factory = (_, _) =>
         {
             factoryCallCount++;
+
             throw CreateSqlException(1205); // deadlock — transient
         };
 
         var helper = new SqlServerDbHelper(factory, serviceProvider, FastOptions(maxAttempts: 3));
 
-        var ex = await Assert.ThrowsAsync<SqlException>(
-            () => helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));
+        var ex = await Assert.ThrowsAsync<SqlException>(() =>
+            helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));
 
         // maxAttempts=3: attempts 1 and 2 are retried (attempt < maxAttempts), attempt 3 throws
         Assert.Equal(3, factoryCallCount);
@@ -92,19 +96,20 @@ public class SqlServerRetryHelperTests
     public async Task TransientMaxAttempts1_ThrowsImmediately()
     {
         // With maxAttempts=1, even transient errors should not be retried (no attempt < 1 retry)
-        int factoryCallCount = 0;
+        var factoryCallCount = 0;
         var serviceProvider = Substitute.For<IServiceProvider>();
 
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> factory = (_, _) =>
         {
             factoryCallCount++;
+
             throw CreateSqlException(40613); // Azure SQL unavailable — transient
         };
 
         var helper = new SqlServerDbHelper(factory, serviceProvider, FastOptions(maxAttempts: 1));
 
-        var ex = await Assert.ThrowsAsync<SqlException>(
-            () => helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));
+        var ex = await Assert.ThrowsAsync<SqlException>(() =>
+            helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));
 
         Assert.Equal(1, factoryCallCount);
         Assert.Equal(40613, ex.Number);

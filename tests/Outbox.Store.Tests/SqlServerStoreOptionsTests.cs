@@ -1,3 +1,6 @@
+// Copyright (c) OrgName. All rights reserved.
+
+using System.ComponentModel.DataAnnotations;
 using Outbox.SqlServer;
 using Xunit;
 
@@ -5,6 +8,15 @@ namespace Outbox.Store.Tests;
 
 public class SqlServerStoreOptionsTests
 {
+    private static List<ValidationResult> Validate(SqlServerStoreOptions options)
+    {
+        var context = new ValidationContext(options);
+        var results = new List<ValidationResult>();
+        Validator.TryValidateObject(options, context, results, validateAllProperties: true);
+
+        return results;
+    }
+
     [Fact]
     public void DefaultSchemaName_IsDbo()
     {
@@ -41,9 +53,9 @@ public class SqlServerStoreOptionsTests
     [InlineData("Schema123")]
     public void ValidSchemaName_SetsSuccessfully(string schemaName)
     {
-        var options = new SqlServerStoreOptions();
-        options.SchemaName = schemaName;
-        Assert.Equal(schemaName, options.SchemaName);
+        var options = new SqlServerStoreOptions { SchemaName = schemaName };
+        var results = Validate(options);
+        Assert.Empty(results);
     }
 
     [Theory]
@@ -53,10 +65,12 @@ public class SqlServerStoreOptionsTests
     [InlineData("my space")]
     [InlineData("schema;DROP TABLE")]
     [InlineData("public.outbox")]
-    public void InvalidSchemaName_ThrowsArgumentException(string schemaName)
+    public void InvalidSchemaName_FailsValidation(string schemaName)
     {
-        var options = new SqlServerStoreOptions();
-        Assert.Throws<ArgumentException>(() => options.SchemaName = schemaName);
+        var options = new SqlServerStoreOptions { SchemaName = schemaName };
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("SchemaName"));
     }
 
     [Fact]
@@ -73,9 +87,9 @@ public class SqlServerStoreOptionsTests
     [InlineData("_prefix")]
     public void TablePrefix_ValidPrefixes_Accepted(string prefix)
     {
-        var opts = new SqlServerStoreOptions();
-        opts.TablePrefix = prefix;
-        Assert.Equal(prefix, opts.TablePrefix);
+        var opts = new SqlServerStoreOptions { TablePrefix = prefix };
+        var results = Validate(opts);
+        Assert.Empty(results);
     }
 
     [Theory]
@@ -84,25 +98,28 @@ public class SqlServerStoreOptionsTests
     [InlineData("prefix;DROP")]
     [InlineData("has space")]
     [InlineData("   ")]
-    public void TablePrefix_InvalidPrefixes_ThrowsArgumentException(string prefix)
+    public void TablePrefix_InvalidPrefixes_FailsValidation(string prefix)
     {
-        var opts = new SqlServerStoreOptions();
-        Assert.Throws<ArgumentException>(() => opts.TablePrefix = prefix);
+        var opts = new SqlServerStoreOptions { TablePrefix = prefix };
+        var results = Validate(opts);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("TablePrefix"));
     }
 
     [Fact]
     public void TablePrefix_EmptyString_Allowed()
     {
-        var opts = new SqlServerStoreOptions();
-        opts.TablePrefix = "Something";
-        opts.TablePrefix = "";
-        Assert.Equal("", opts.TablePrefix);
+        var opts = new SqlServerStoreOptions { TablePrefix = "" };
+        var results = Validate(opts);
+        Assert.Empty(results);
     }
 
     [Fact]
-    public void TablePrefix_Null_ThrowsArgumentNullException()
+    public void TablePrefix_Null_FailsValidation()
     {
-        var opts = new SqlServerStoreOptions();
-        Assert.Throws<ArgumentNullException>(() => opts.TablePrefix = null!);
+        var opts = new SqlServerStoreOptions { TablePrefix = null! };
+        var results = Validate(opts);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("TablePrefix"));
     }
 }

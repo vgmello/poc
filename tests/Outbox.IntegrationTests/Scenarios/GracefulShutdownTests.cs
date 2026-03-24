@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Outbox.IntegrationTests.Fixtures;
 using Outbox.IntegrationTests.Helpers;
 using Xunit;
@@ -26,7 +28,11 @@ public class GracefulShutdownTests
         // Use long lease so we can tell the difference between "released" and "expired"
         var (hostA, _) = OutboxTestHelper.BuildPublisherHost(
             _infra.ConnectionString, _infra.BootstrapServers,
-            o => { o.LeaseDurationSeconds = 120; o.PartitionGracePeriodSeconds = 180; });
+            o =>
+            {
+                o.LeaseDurationSeconds = 120;
+                o.PartitionGracePeriodSeconds = 180;
+            });
 
         await hostA.StartAsync();
         await Task.Delay(TimeSpan.FromSeconds(3)); // Let A register and claim partitions
@@ -46,6 +52,7 @@ public class GracefulShutdownTests
 
         // Assert: leased messages have leased_until_utc = NULL (released, not waiting for 120s expiry)
         var remaining = await OutboxTestHelper.GetOutboxCountAsync(_infra.ConnectionString);
+
         if (remaining > 0)
         {
             await using var conn = new Npgsql.NpgsqlConnection(_infra.ConnectionString);

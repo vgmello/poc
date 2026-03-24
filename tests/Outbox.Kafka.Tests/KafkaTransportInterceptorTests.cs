@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Text;
 using Confluent.Kafka;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -24,7 +26,7 @@ public class KafkaTransportInterceptorTests
             MaxBatchSizeBytes = 1_048_576,
             BootstrapServers = "localhost:9092",
             Acks = "All",
-            EnableIdempotence = true,
+            EnableIdempotence = true
         };
 
         // Simulate successful produce: invoke callback with success

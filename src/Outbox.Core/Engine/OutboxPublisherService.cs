@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Diagnostics;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -10,7 +12,7 @@ using Outbox.Core.Options;
 namespace Outbox.Core.Engine;
 
 #pragma warning disable S3776 // Cognitive Complexity — publish loop and restart loop are inherently complex orchestration methods
-#pragma warning disable S107  // Constructor has too many parameters — DI requires all dependencies
+#pragma warning disable S107 // Constructor has too many parameters — DI requires all dependencies
 internal sealed class OutboxPublisherService : BackgroundService
 {
     private const int MaxConsecutiveRestarts = 5;
@@ -59,12 +61,15 @@ internal sealed class OutboxPublisherService : BackgroundService
 
         string producerId = null!;
         var attempt = 0;
+
         while (!stoppingToken.IsCancellationRequested)
         {
             attempt++;
+
             try
             {
                 producerId = await _store.RegisterProducerAsync(stoppingToken);
+
                 break;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -77,6 +82,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                 _logger.LogError(ex,
                     "Failed to register outbox producer (attempt {Attempt}), retrying in {Delay:F0}s",
                     attempt, delay.TotalSeconds);
+
                 try { await Task.Delay(delay, stoppingToken); }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
             }
@@ -110,9 +116,9 @@ internal sealed class OutboxPublisherService : BackgroundService
     }
 
     /// <summary>
-    /// Runs all loops with a linked CancellationTokenSource. If any loop exits
-    /// unexpectedly, all loops are cancelled and restarted with exponential backoff.
-    /// After <see cref="MaxConsecutiveRestarts"/> consecutive failures, the host is stopped.
+    ///     Runs all loops with a linked CancellationTokenSource. If any loop exits
+    ///     unexpectedly, all loops are cancelled and restarted with exponential backoff.
+    ///     After <see cref="MaxConsecutiveRestarts" /> consecutive failures, the host is stopped.
     /// </summary>
     private async Task RunLoopsWithRestartAsync(
         string producerId, TopicCircuitBreaker circuitBreaker, CancellationToken stoppingToken)
@@ -132,7 +138,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                     HeartbeatLoopAsync(producerId, ct),
                     RebalanceLoopAsync(producerId, ct),
                     OrphanSweepLoopAsync(producerId, ct),
-                    DeadLetterSweepLoopAsync(ct),
+                    DeadLetterSweepLoopAsync(ct)
                 };
 
                 // Wait for the first task to complete (success or failure).
@@ -145,7 +151,9 @@ internal sealed class OutboxPublisherService : BackgroundService
                 // Note: await unwraps AggregateException, so we only see the first inner exception.
                 try { await Task.WhenAll(tasks); }
                 catch (OperationCanceledException)
-                { /* expected — we just cancelled them */ }
+                {
+                    /* expected — we just cancelled them */
+                }
 
                 // If the host is stopping, exit cleanly.
                 if (stoppingToken.IsCancellationRequested)
@@ -169,13 +177,14 @@ internal sealed class OutboxPublisherService : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Unexpected error in outbox loop orchestration");
+
                 if (stoppingToken.IsCancellationRequested)
                     return;
             }
 
             _healthState.SetPublishLoopRunning(false);
             _healthState.RecordLoopRestart();
-            int restarts = _healthState.ConsecutiveLoopRestarts;
+            var restarts = _healthState.ConsecutiveLoopRestarts;
 
             if (restarts >= MaxConsecutiveRestarts)
             {
@@ -183,6 +192,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                     "Outbox loops have restarted {Count} consecutive times — stopping host",
                     restarts);
                 _appLifetime.StopApplication();
+
                 return;
             }
 
@@ -242,6 +252,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                 {
                     pollIntervalMs = Math.Min(pollIntervalMs * 2, opts.MaxPollIntervalMs);
                     await Task.Delay(pollIntervalMs, ct);
+
                     continue;
                 }
 
@@ -309,6 +320,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                                 incrementRetry: false, CancellationToken.None);
                             foreach (var sn in sequenceNumbers)
                                 unprocessedSequences.Remove(sn);
+
                             continue;
                         }
 
@@ -335,10 +347,12 @@ internal sealed class OutboxPublisherService : BackgroundService
                                 unprocessedSequences.Remove(sn);
 
                             var (stateChanged, newState) = circuitBreaker.RecordSuccess(topicName);
+
                             if (stateChanged)
                             {
                                 _healthState.SetCircuitClosed(topicName);
                                 _instrumentation.CircuitBreakerStateChanges.Add(1);
+
                                 try
                                 {
                                     await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
@@ -376,6 +390,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                                 _logger.LogWarning(deleteEx,
                                     "Failed to delete {Count} published messages — they will be re-delivered on next poll",
                                     sequenceNumbers.Count);
+
                                 // Release WITHOUT retry increment — transport succeeded.
                                 try
                                 {
@@ -420,6 +435,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                                 _logger.LogWarning(deleteEx,
                                     "Failed to delete {Count} partially-sent messages — they will be re-delivered",
                                     pex.SucceededSequenceNumbers.Count);
+
                                 try
                                 {
                                     await _store.ReleaseLeaseAsync(producerId, pex.SucceededSequenceNumbers,
@@ -456,6 +472,7 @@ internal sealed class OutboxPublisherService : BackgroundService
 
                             // Record failure for circuit breaker (the send did partially fail)
                             var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
+
                             if (stateChanged)
                             {
                                 _healthState.SetCircuitOpen(topicName);
@@ -574,6 +591,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                 if (!publishedAny && batch.Count > 0)
                 {
                     pollIntervalMs = Math.Min(pollIntervalMs * 2, opts.MaxPollIntervalMs);
+
                     try { await Task.Delay(pollIntervalMs, ct); }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
                 }
@@ -589,6 +607,7 @@ internal sealed class OutboxPublisherService : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Unexpected error in publish loop");
+
                 try
                 {
                     await Task.Delay(_options.CurrentValue.MaxPollIntervalMs, ct);
@@ -603,7 +622,7 @@ internal sealed class OutboxPublisherService : BackgroundService
 
     private async Task HeartbeatLoopAsync(string producerId, CancellationToken ct)
     {
-        int consecutiveFailures = 0;
+        var consecutiveFailures = 0;
         const int maxConsecutiveHeartbeatFailures = 3;
 
         while (!ct.IsCancellationRequested)
@@ -642,6 +661,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                     _logger.LogCritical(
                         "Heartbeat failed {Count} consecutive times — exiting loop to trigger restart",
                         consecutiveFailures);
+
                     throw;
                 }
             }
@@ -657,6 +677,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                 await Task.Delay(_options.CurrentValue.RebalanceIntervalMs, ct);
                 await _store.RebalanceAsync(producerId, ct);
                 var ownedPartitions = await _store.GetOwnedPartitionsAsync(producerId, ct);
+
                 try
                 {
                     await _eventHandler.OnRebalanceAsync(producerId, ownedPartitions, ct);
@@ -726,10 +747,12 @@ internal sealed class OutboxPublisherService : BackgroundService
             return messages;
 
         List<OutboxMessage>? result = null;
-        for (int i = 0; i < messages.Count; i++)
+
+        for (var i = 0; i < messages.Count; i++)
         {
             var msg = messages[i];
             OutboxMessageContext? context = null;
+
             foreach (var interceptor in _interceptors)
             {
                 if (interceptor.AppliesTo(msg))
@@ -738,12 +761,14 @@ internal sealed class OutboxPublisherService : BackgroundService
                     await interceptor.InterceptAsync(context, ct);
                 }
             }
+
             if (context is not null)
             {
                 result ??= [..messages];
                 result[i] = context.ToOutboxMessage();
             }
         }
+
         return result ?? messages;
     }
 

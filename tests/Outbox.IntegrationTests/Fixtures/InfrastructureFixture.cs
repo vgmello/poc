@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Configurations;
 using DotNet.Testcontainers.Containers;
@@ -39,6 +41,7 @@ public sealed class InfrastructureFixture : IAsyncLifetime
         {
             var host = _sqlServer.Hostname;
             var port = _sqlServer.GetMappedPublicPort(1433);
+
             return $"Server={host},{port};Database=master;User Id=sa;Password={SqlServerPassword};TrustServerCertificate=True;";
         }
     }
@@ -121,7 +124,7 @@ public sealed class InfrastructureFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// Custom wait strategy that verifies SQL Server is ready by attempting a connection.
+    ///     Custom wait strategy that verifies SQL Server is ready by attempting a connection.
     /// </summary>
     private sealed class SqlServerReadyWaitStrategy : IWaitUntil
     {
@@ -131,11 +134,13 @@ public sealed class InfrastructureFixture : IAsyncLifetime
             {
                 var host = container.Hostname;
                 var port = container.GetMappedPublicPort(1433);
-                var connStr = $"Server={host},{port};Database=master;User Id=sa;Password={SqlServerPassword};TrustServerCertificate=True;Connect Timeout=3;";
+                var connStr =
+                    $"Server={host},{port};Database=master;User Id=sa;Password={SqlServerPassword};TrustServerCertificate=True;Connect Timeout=3;";
                 await using var conn = new SqlConnection(connStr);
                 await conn.OpenAsync();
                 await using var cmd = new SqlCommand("SELECT 1", conn);
                 await cmd.ExecuteScalarAsync();
+
                 return true;
             }
             catch

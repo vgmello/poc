@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Text.Json;
 using Outbox.IntegrationTests.Fixtures;
 using Outbox.IntegrationTests.Helpers;
@@ -58,6 +60,7 @@ public class OrderingTests
                 .Select(m =>
                 {
                     var doc = JsonDocument.Parse(m.Value);
+
                     return doc.RootElement.GetProperty("index").GetInt32();
                 })
                 .ToList();
@@ -67,6 +70,7 @@ public class OrderingTests
             // Deduplicate (at-least-once may produce duplicates)
             var deduped = new List<int>();
             var seen = new HashSet<int>();
+
             foreach (var idx in indices)
             {
                 if (seen.Add(idx))
@@ -77,7 +81,7 @@ public class OrderingTests
             Assert.Equal(50, deduped.Count);
 
             // Assert: ordering preserved (each element > previous)
-            for (int i = 1; i < deduped.Count; i++)
+            for (var i = 1; i < deduped.Count; i++)
             {
                 Assert.True(deduped[i] > deduped[i - 1],
                     $"Ordering violation: index {deduped[i]} came after {deduped[i - 1]} at position {i}");

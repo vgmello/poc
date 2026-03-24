@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Data.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -13,8 +15,10 @@ public static class PostgreSqlOutboxBuilderExtensions
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         Action<PostgreSqlStoreOptions>? configure = null)
     {
-        builder.Services.Configure<PostgreSqlStoreOptions>(
-            builder.Configuration.GetSection("Outbox:PostgreSql"));
+        builder.Services.AddOptions<PostgreSqlStoreOptions>()
+            .BindConfiguration("Outbox:PostgreSql")
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
 
         if (configure is not null)
             builder.Services.Configure(configure);

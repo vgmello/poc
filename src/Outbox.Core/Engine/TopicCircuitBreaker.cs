@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Collections.Concurrent;
 using Outbox.Core.Models;
 
@@ -26,6 +28,7 @@ internal sealed class TopicCircuitBreaker
                 DateTimeOffset.UtcNow >= entry.OpenedAtUtc.AddSeconds(_openDurationSeconds))
             {
                 entry.State = CircuitState.HalfOpen;
+
                 return false;
             }
 
@@ -58,10 +61,12 @@ internal sealed class TopicCircuitBreaker
         lock (entry.Lock)
         {
             entry.FailureCount++;
+
             if (entry.FailureCount >= _failureThreshold && entry.State != CircuitState.Open)
             {
                 entry.State = CircuitState.Open;
                 entry.OpenedAtUtc = DateTimeOffset.UtcNow;
+
                 return (true, CircuitState.Open);
             }
 

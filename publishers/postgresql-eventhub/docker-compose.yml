@@ -62,7 +62,6 @@ services:
     environment:
       ConnectionStrings__OutboxDb: "Host=postgres;Username=postgres;Password=${POSTGRES_PASSWORD};Database=${POSTGRES_DB:-outbox}"
       Outbox__EventHub__ConnectionString: "Endpoint=sb://eventhubs-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
-      Outbox__EventHub__EventHubName: "orders"
     restart: unless-stopped
     depends_on:
       dbinit:

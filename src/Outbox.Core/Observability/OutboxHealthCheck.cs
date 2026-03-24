@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using Outbox.Core.Options;
@@ -5,8 +7,8 @@ using Outbox.Core.Options;
 namespace Outbox.Core.Observability;
 
 /// <summary>
-/// Health check that reports the outbox publisher's operational state.
-/// Does NOT check DB or broker connectivity — those are handled by Aspire.
+///     Health check that reports the outbox publisher's operational state.
+///     Does NOT check DB or broker connectivity — those are handled by Aspire.
 /// </summary>
 public sealed class OutboxHealthCheck : IHealthCheck
 {
@@ -30,7 +32,7 @@ public sealed class OutboxHealthCheck : IHealthCheck
             ["lastHeartbeatUtc"] = _state.LastHeartbeatUtc,
             ["lastPollUtc"] = _state.LastPollUtc,
             ["lastSuccessfulPublishUtc"] = _state.LastSuccessfulPublishUtc,
-            ["consecutiveLoopRestarts"] = _state.ConsecutiveLoopRestarts,
+            ["consecutiveLoopRestarts"] = _state.ConsecutiveLoopRestarts
         };
 
         var openCircuits = _state.GetOpenCircuits();
@@ -46,6 +48,7 @@ public sealed class OutboxHealthCheck : IHealthCheck
 
         // Unhealthy: heartbeat stale (3x interval = missed 2 consecutive heartbeats)
         var heartbeatStalenessThreshold = TimeSpan.FromMilliseconds(opts.HeartbeatIntervalMs * 3);
+
         if (_state.LastHeartbeatUtc != DateTimeOffset.MinValue &&
             now - _state.LastHeartbeatUtc > heartbeatStalenessThreshold)
         {
@@ -66,6 +69,7 @@ public sealed class OutboxHealthCheck : IHealthCheck
 
         // Unhealthy: no polls at all for an extended period (3x max poll interval)
         var pollStalenessThreshold = TimeSpan.FromMilliseconds(opts.MaxPollIntervalMs * 3);
+
         if (_state.LastPollUtc != DateTimeOffset.MinValue &&
             now - _state.LastPollUtc > pollStalenessThreshold)
         {

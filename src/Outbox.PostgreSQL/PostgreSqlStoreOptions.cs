@@ -1,44 +1,27 @@
-using System.Text.RegularExpressions;
+// Copyright (c) OrgName. All rights reserved.
+
+using System.ComponentModel.DataAnnotations;
 
 namespace Outbox.PostgreSQL;
 
 public sealed class PostgreSqlStoreOptions
 {
-    private static readonly Regex ValidSchemaPattern = new(
-        @"^[a-zA-Z_][a-zA-Z0-9_]*$", RegexOptions.Compiled);
+    [Required]
+    [RegularExpression(@"^[a-zA-Z_][a-zA-Z0-9_]*$",
+        ErrorMessage = "SchemaName must match pattern [a-zA-Z_][a-zA-Z0-9_]*.")]
+    public string SchemaName { get; set; } = "public";
 
-    private string _schemaName = "public";
-    private string _tablePrefix = "";
+    [Required(AllowEmptyStrings = true)]
+    [RegularExpression(@"^[a-zA-Z_][a-zA-Z0-9_]*$",
+        ErrorMessage = "TablePrefix must be empty or match pattern [a-zA-Z_][a-zA-Z0-9_]*.")]
+    public string TablePrefix { get; set; } = "";
 
+    [Range(1, int.MaxValue)]
     public int CommandTimeoutSeconds { get; set; } = 30;
 
-    public string SchemaName
-    {
-        get => _schemaName;
-        set
-        {
-            if (string.IsNullOrWhiteSpace(value) || !ValidSchemaPattern.IsMatch(value))
-                throw new ArgumentException(
-                    $"SchemaName '{value}' is invalid. Must match pattern [a-zA-Z_][a-zA-Z0-9_]*.",
-                    nameof(value));
-            _schemaName = value;
-        }
-    }
-
-    public string TablePrefix
-    {
-        get => _tablePrefix;
-        set
-        {
-            ArgumentNullException.ThrowIfNull(value);
-            if (value.Length > 0 && (string.IsNullOrWhiteSpace(value) || !ValidSchemaPattern.IsMatch(value)))
-                throw new ArgumentException(
-                    $"TablePrefix '{value}' is invalid. Must be empty or match pattern [a-zA-Z_][a-zA-Z0-9_]*.",
-                    nameof(value));
-            _tablePrefix = value;
-        }
-    }
-
+    [Range(1, int.MaxValue)]
     public int TransientRetryMaxAttempts { get; set; } = 6;
+
+    [Range(1, int.MaxValue)]
     public int TransientRetryBackoffMs { get; set; } = 1000;
 }

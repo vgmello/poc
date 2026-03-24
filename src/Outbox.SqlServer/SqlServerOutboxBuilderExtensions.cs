@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Data.Common;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -13,8 +15,10 @@ public static class SqlServerOutboxBuilderExtensions
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         Action<SqlServerStoreOptions>? configure = null)
     {
-        builder.Services.Configure<SqlServerStoreOptions>(
-            builder.Configuration.GetSection("Outbox:SqlServer"));
+        builder.Services.AddOptions<SqlServerStoreOptions>()
+            .BindConfiguration("Outbox:SqlServer")
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
 
         if (configure is not null)
             builder.Services.Configure(configure);

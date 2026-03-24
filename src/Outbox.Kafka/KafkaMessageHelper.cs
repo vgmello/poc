@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Confluent.Kafka;
 using Outbox.Core.Models;
 
@@ -47,17 +49,17 @@ internal static class KafkaMessageHelper
     internal static int EstimateMessageSize(string partitionKey, OutboxMessage msg)
     {
         var size = System.Text.Encoding.UTF8.GetByteCount(partitionKey)
-                 + msg.Payload.Length
-                 + System.Text.Encoding.UTF8.GetByteCount(msg.EventType)
-                 + 100; // protocol framing overhead
+                   + msg.Payload.Length
+                   + System.Text.Encoding.UTF8.GetByteCount(msg.EventType)
+                   + 100; // protocol framing overhead
 
         if (msg.Headers is not null)
         {
             foreach (var kvp in msg.Headers)
             {
                 size += System.Text.Encoding.UTF8.GetByteCount(kvp.Key)
-                      + System.Text.Encoding.UTF8.GetByteCount(kvp.Value)
-                      + 20; // per-header Kafka framing
+                        + System.Text.Encoding.UTF8.GetByteCount(kvp.Value)
+                        + 20; // per-header Kafka framing
             }
         }
 
@@ -78,6 +80,7 @@ internal static class KafkaMessageHelper
         }
 
         kafkaHeaders.Add("EventType", System.Text.Encoding.UTF8.GetBytes(eventType));
+
         return kafkaHeaders;
     }
 }

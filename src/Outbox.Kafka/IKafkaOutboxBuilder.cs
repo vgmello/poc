@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Confluent.Kafka;
 using Outbox.Core.Abstractions;
 using Outbox.Core.Builder;

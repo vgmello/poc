@@ -69,19 +69,19 @@ Add to `appsettings.json`:
 
 ```json
 {
-  "ConnectionStrings": {
-    "OutboxDb": "Host=localhost;Database=myapp;Username=postgres;Password=..."
-  },
-  "Outbox": {
-    "Publisher": {
-      "BatchSize": 100,
-      "MaxRetryCount": 5,
-      "LeaseDurationSeconds": 45
+    "ConnectionStrings": {
+        "OutboxDb": "Host=localhost;Database=myapp;Username=postgres;Password=..."
     },
-    "Kafka": {
-      "BootstrapServers": "localhost:9092"
+    "Outbox": {
+        "Publisher": {
+            "BatchSize": 100,
+            "MaxRetryCount": 5,
+            "LeaseDurationSeconds": 45
+        },
+        "Kafka": {
+            "BootstrapServers": "localhost:9092"
+        }
     }
-  }
 }
 ```
 
@@ -91,8 +91,7 @@ For EventHub, replace the `Kafka` section:
 {
   "Outbox": {
     "EventHub": {
-      "ConnectionString": "Endpoint=sb://...",
-      "EventHubName": "my-hub"
+      "ConnectionString": "Endpoint=sb://my-namespace.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=..."
     }
   }
 }
@@ -102,12 +101,12 @@ For SQL Server store, use `"SqlServer"` instead of `"PostgreSql"`:
 
 ```json
 {
-  "Outbox": {
-    "SqlServer": {
-      "SchemaName": "dbo",
-      "CommandTimeoutSeconds": 30
+    "Outbox": {
+        "SqlServer": {
+            "SchemaName": "dbo",
+            "CommandTimeoutSeconds": 30
+        }
     }
-  }
 }
 ```
 
@@ -118,11 +117,13 @@ See [architecture.md](architecture.md) for the full options reference.
 Run the install script for your database. Both scripts are idempotent.
 
 **PostgreSQL:**
+
 ```bash
 psql -d myapp -f src/Outbox.PostgreSQL/db_scripts/install.sql
 ```
 
 **SQL Server:**
+
 ```bash
 sqlcmd -d myapp -i src/Outbox.SqlServer/db_scripts/install.sql
 ```

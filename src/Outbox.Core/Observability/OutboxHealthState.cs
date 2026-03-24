@@ -1,8 +1,10 @@
+// Copyright (c) OrgName. All rights reserved.
+
 namespace Outbox.Core.Observability;
 
 /// <summary>
-/// Thread-safe container for outbox publisher operational state.
-/// Written by <see cref="Engine.OutboxPublisherService"/>, read by health checks.
+///     Thread-safe container for outbox publisher operational state.
+///     Written by <see cref="Engine.OutboxPublisherService" />, read by health checks.
 /// </summary>
 public sealed class OutboxHealthState
 {
@@ -36,6 +38,7 @@ public sealed class OutboxHealthState
     public void SetPublishLoopRunning(bool running)
     {
         _isPublishLoopRunning = running;
+
         if (running)
         {
             Volatile.Write(ref _publishLoopStartedAtTicks, DateTimeOffset.UtcNow.Ticks);
@@ -55,19 +58,25 @@ public sealed class OutboxHealthState
     public void SetCircuitOpen(string topicName)
     {
         lock (_circuitLock)
+        {
             _openCircuits.Add(topicName);
+        }
     }
 
     public void SetCircuitClosed(string topicName)
     {
         lock (_circuitLock)
+        {
             _openCircuits.Remove(topicName);
+        }
     }
 
     public IReadOnlySet<string> GetOpenCircuits()
     {
         lock (_circuitLock)
+        {
             return new HashSet<string>(_openCircuits);
+        }
     }
 
     private static DateTimeOffset TicksToDateTimeOffset(long ticks) =>

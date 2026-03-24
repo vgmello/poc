@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Text;
 using Outbox.Core.Abstractions;
 using Outbox.Core.Models;
@@ -44,7 +46,8 @@ public class ModelTests
     [Fact]
     public void OutboxMessage_NullHeaders_IsAllowed()
     {
-        var msg = new OutboxMessage(1L, "topic", "key", "EventType", null, Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow);
+        var msg = new OutboxMessage(1L, "topic", "key", "EventType", null, Encoding.UTF8.GetBytes("{}"), "application/json",
+            DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow);
         Assert.Null(msg.Headers);
     }
 
@@ -58,9 +61,9 @@ public class ModelTests
         var msg3 = new OutboxMessage(1L, "topic", "key", "EventType", null, Encoding.UTF8.GetBytes("{}"), "application/json", ts, 0, 0, ts);
         var msg4 = new OutboxMessage(2L, "topic", "key", "EventType", null, payload, "application/json", ts, 0, 0, ts);
 
-        Assert.Equal(msg1, msg2);       // same byte[] reference
-        Assert.NotEqual(msg1, msg3);    // different byte[] reference
-        Assert.NotEqual(msg1, msg4);    // different SequenceNumber
+        Assert.Equal(msg1, msg2); // same byte[] reference
+        Assert.NotEqual(msg1, msg3); // different byte[] reference
+        Assert.NotEqual(msg1, msg4); // different SequenceNumber
     }
 
     [Fact]
@@ -134,12 +137,13 @@ public class ModelTests
         var payload = Encoding.UTF8.GetBytes("{}");
         var msg1 = new DeadLetteredMessage(1L, 1L, "t", "k", "E", null, payload, "application/json", ts, 0, 0, ts, ts, null);
         var msg2 = new DeadLetteredMessage(1L, 1L, "t", "k", "E", null, payload, "application/json", ts, 0, 0, ts, ts, null);
-        var msg3 = new DeadLetteredMessage(1L, 1L, "t", "k", "E", null, Encoding.UTF8.GetBytes("{}"), "application/json", ts, 0, 0, ts, ts, null);
+        var msg3 = new DeadLetteredMessage(1L, 1L, "t", "k", "E", null, Encoding.UTF8.GetBytes("{}"), "application/json", ts, 0, 0, ts, ts,
+            null);
         var msg4 = new DeadLetteredMessage(2L, 1L, "t", "k", "E", null, payload, "application/json", ts, 0, 0, ts, ts, null);
 
-        Assert.Equal(msg1, msg2);       // same byte[] reference
-        Assert.NotEqual(msg1, msg3);    // different byte[] reference, same content
-        Assert.NotEqual(msg1, msg4);    // different DeadLetterSeq
+        Assert.Equal(msg1, msg2); // same byte[] reference
+        Assert.NotEqual(msg1, msg3); // different byte[] reference, same content
+        Assert.NotEqual(msg1, msg4); // different DeadLetterSeq
     }
 
     [Fact]
@@ -163,7 +167,8 @@ public class ModelTests
         // Exercises the default interface method bodies on IOutboxEventHandler (lines with => Task.CompletedTask)
         IOutboxEventHandler handler = new MinimalEventHandler();
 
-        var msg = new OutboxMessage(1L, "t", "k", "E", null, Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow);
+        var msg = new OutboxMessage(1L, "t", "k", "E", null, Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow, 0, 0,
+            DateTimeOffset.UtcNow);
 
         await handler.OnMessagePublishedAsync(msg, default);
         await handler.OnMessageDeadLetteredAsync(msg, default);
@@ -175,5 +180,7 @@ public class ModelTests
         Assert.True(true, "All default interface methods completed without throwing");
     }
 
-    private sealed class MinimalEventHandler : IOutboxEventHandler { }
+    private sealed class MinimalEventHandler : IOutboxEventHandler
+    {
+    }
 }

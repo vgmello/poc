@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Outbox.IntegrationTests.Fixtures;
 using Outbox.IntegrationTests.Helpers;
 using Xunit;
@@ -47,11 +49,13 @@ public class CircuitBreakerRetryTests
             // Check retry counts — should be bounded by initial failures (2) + possible half-open probes.
             // With CircuitBreakerOpenDurationSeconds=5, at most 1 half-open probe may have fired.
             var retryCounts = await OutboxTestHelper.GetRetryCountsAsync(_infra.ConnectionString);
+
             foreach (var (seq, retryCount) in retryCounts)
             {
                 Assert.True(retryCount <= 3,
                     $"Message {seq} has retry_count={retryCount}, expected <= 3 (2 initial failures + at most 1 half-open probe)");
             }
+
             _output.WriteLine($"Retry counts during circuit open: {string.Join(", ", retryCounts.Select(r => r.RetryCount))}");
 
             // Wait through a few more circuit cycles with broker still down
@@ -60,6 +64,7 @@ public class CircuitBreakerRetryTests
             // Re-check: retry counts should be well below MaxRetryCount (10)
             // Only actual send attempts (initial failures + half-open probes) increment, not circuit-open releases
             retryCounts = await OutboxTestHelper.GetRetryCountsAsync(_infra.ConnectionString);
+
             foreach (var (seq, retryCount) in retryCounts)
             {
                 Assert.True(retryCount < 10,

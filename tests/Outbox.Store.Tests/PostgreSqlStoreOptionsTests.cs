@@ -1,3 +1,6 @@
+// Copyright (c) OrgName. All rights reserved.
+
+using System.ComponentModel.DataAnnotations;
 using Outbox.PostgreSQL;
 using Xunit;
 
@@ -5,6 +8,15 @@ namespace Outbox.Store.Tests;
 
 public class PostgreSqlStoreOptionsTests
 {
+    private static List<ValidationResult> Validate(PostgreSqlStoreOptions options)
+    {
+        var context = new ValidationContext(options);
+        var results = new List<ValidationResult>();
+        Validator.TryValidateObject(options, context, results, validateAllProperties: true);
+
+        return results;
+    }
+
     [Fact]
     public void DefaultSchemaName_IsPublic()
     {
@@ -41,9 +53,9 @@ public class PostgreSqlStoreOptionsTests
     [InlineData("Schema123")]
     public void ValidSchemaName_SetsSuccessfully(string schemaName)
     {
-        var options = new PostgreSqlStoreOptions();
-        options.SchemaName = schemaName;
-        Assert.Equal(schemaName, options.SchemaName);
+        var options = new PostgreSqlStoreOptions { SchemaName = schemaName };
+        var results = Validate(options);
+        Assert.Empty(results);
     }
 
     [Theory]
@@ -53,10 +65,12 @@ public class PostgreSqlStoreOptionsTests
     [InlineData("my schema")]
     [InlineData("schema;DROP TABLE")]
     [InlineData("public.outbox")]
-    public void InvalidSchemaName_ThrowsArgumentException(string schemaName)
+    public void InvalidSchemaName_FailsValidation(string schemaName)
     {
-        var options = new PostgreSqlStoreOptions();
-        Assert.Throws<ArgumentException>(() => options.SchemaName = schemaName);
+        var options = new PostgreSqlStoreOptions { SchemaName = schemaName };
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("SchemaName"));
     }
 
     [Fact]
@@ -73,9 +87,9 @@ public class PostgreSqlStoreOptionsTests
     [InlineData("_prefix")]
     public void TablePrefix_ValidPrefixes_Accepted(string prefix)
     {
-        var opts = new PostgreSqlStoreOptions();
-        opts.TablePrefix = prefix;
-        Assert.Equal(prefix, opts.TablePrefix);
+        var opts = new PostgreSqlStoreOptions { TablePrefix = prefix };
+        var results = Validate(opts);
+        Assert.Empty(results);
     }
 
     [Theory]
@@ -84,25 +98,28 @@ public class PostgreSqlStoreOptionsTests
     [InlineData("prefix;DROP")]
     [InlineData("has space")]
     [InlineData("   ")]
-    public void TablePrefix_InvalidPrefixes_ThrowsArgumentException(string prefix)
+    public void TablePrefix_InvalidPrefixes_FailsValidation(string prefix)
     {
-        var opts = new PostgreSqlStoreOptions();
-        Assert.Throws<ArgumentException>(() => opts.TablePrefix = prefix);
+        var opts = new PostgreSqlStoreOptions { TablePrefix = prefix };
+        var results = Validate(opts);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("TablePrefix"));
     }
 
     [Fact]
     public void TablePrefix_EmptyString_Allowed()
     {
-        var opts = new PostgreSqlStoreOptions();
-        opts.TablePrefix = "something";
-        opts.TablePrefix = "";
-        Assert.Equal("", opts.TablePrefix);
+        var opts = new PostgreSqlStoreOptions { TablePrefix = "" };
+        var results = Validate(opts);
+        Assert.Empty(results);
     }
 
     [Fact]
-    public void TablePrefix_Null_ThrowsArgumentNullException()
+    public void TablePrefix_Null_FailsValidation()
     {
-        var opts = new PostgreSqlStoreOptions();
-        Assert.Throws<ArgumentNullException>(() => opts.TablePrefix = null!);
+        var opts = new PostgreSqlStoreOptions { TablePrefix = null! };
+        var results = Validate(opts);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("TablePrefix"));
     }
 }

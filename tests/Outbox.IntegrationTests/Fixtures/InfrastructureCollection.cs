@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Xunit;
 
 namespace Outbox.IntegrationTests.Fixtures;

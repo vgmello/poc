@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Diagnostics.Metrics;
 using Outbox.IntegrationTests.Fixtures;
 using Outbox.IntegrationTests.Helpers;
@@ -56,6 +58,7 @@ public class PendingMetricTests
                 meterListener.RecordObservableInstruments();
                 var value = Interlocked.Read(ref capturedPendingValue);
                 _output.WriteLine($"Captured pending gauge value: {value}");
+
                 return value > 0;
             }, TimeSpan.FromSeconds(15), message: "Pending gauge should report > 0");
 
@@ -78,6 +81,7 @@ public class PendingMetricTests
                 meterListener.RecordObservableInstruments();
                 var value = Interlocked.Read(ref capturedPendingValue);
                 _output.WriteLine($"Pending gauge after drain: {value}");
+
                 return value == 0;
             }, TimeSpan.FromSeconds(15), message: "Pending gauge should reach 0 after drain");
 

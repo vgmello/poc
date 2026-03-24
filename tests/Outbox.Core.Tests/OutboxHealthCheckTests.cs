@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -24,7 +26,7 @@ public class OutboxHealthCheckTests
         MaxPollIntervalMs = 10,
         RebalanceIntervalMs = 30_000,
         OrphanSweepIntervalMs = 60_000,
-        DeadLetterSweepIntervalMs = 60_000,
+        DeadLetterSweepIntervalMs = 60_000
     };
 
     private static OutboxHealthCheck CreateHealthCheck(OutboxHealthState state, OutboxPublisherOptions? options = null)
@@ -32,6 +34,7 @@ public class OutboxHealthCheckTests
         var opts = options ?? SmallIntervalOptions();
         var monitor = Substitute.For<IOptionsMonitor<OutboxPublisherOptions>>();
         monitor.CurrentValue.Returns(opts);
+
         return new OutboxHealthCheck(state, monitor);
     }
 
@@ -178,7 +181,7 @@ public class OutboxHealthCheckTests
             MaxPollIntervalMs = 10_000,
             RebalanceIntervalMs = 30_000,
             OrphanSweepIntervalMs = 60_000,
-            DeadLetterSweepIntervalMs = 60_000,
+            DeadLetterSweepIntervalMs = 60_000
         };
         var check = CreateHealthCheck(state, opts);
 

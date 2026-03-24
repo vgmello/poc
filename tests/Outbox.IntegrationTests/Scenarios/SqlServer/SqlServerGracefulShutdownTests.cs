@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Microsoft.Data.SqlClient;
 using Outbox.IntegrationTests.Fixtures;
 using Outbox.IntegrationTests.Helpers;
@@ -27,7 +29,11 @@ public class SqlServerGracefulShutdownTests
         // Use long lease so we can tell the difference between "released" and "expired"
         var (hostA, _) = SqlServerTestHelper.BuildPublisherHost(
             _infra.SqlServerConnectionString, _infra.BootstrapServers,
-            o => { o.LeaseDurationSeconds = 120; o.PartitionGracePeriodSeconds = 180; });
+            o =>
+            {
+                o.LeaseDurationSeconds = 120;
+                o.PartitionGracePeriodSeconds = 180;
+            });
 
         await hostA.StartAsync();
         await Task.Delay(TimeSpan.FromSeconds(3)); // Let A register and claim partitions
@@ -47,6 +53,7 @@ public class SqlServerGracefulShutdownTests
 
         // Assert: leased messages have LeasedUntilUtc = NULL (released, not waiting for 120s expiry)
         var remaining = await SqlServerTestHelper.GetOutboxCountAsync(_infra.SqlServerConnectionString);
+
         if (remaining > 0)
         {
             await using var conn = new SqlConnection(_infra.SqlServerConnectionString);

@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -17,6 +19,7 @@ public class OutboxBuilderTests
     {
         var services = new ServiceCollection();
         var config = new ConfigurationBuilder().Build();
+        services.AddSingleton<IConfiguration>(config);
 
         services.AddOutbox(config, outbox =>
         {
@@ -40,9 +43,10 @@ public class OutboxBuilderTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Outbox:Publisher:BatchSize"] = "200",
-                ["Outbox:Publisher:MaxRetryCount"] = "10",
+                ["Outbox:Publisher:MaxRetryCount"] = "10"
             })
             .Build();
+        services.AddSingleton<IConfiguration>(config);
 
         services.AddOutbox(config, _ => { });
         services.AddSingleton(Substitute.For<IOutboxStore>());
@@ -61,9 +65,10 @@ public class OutboxBuilderTests
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["Outbox:Publisher:BatchSize"] = "200",
+                ["Outbox:Publisher:BatchSize"] = "200"
             })
             .Build();
+        services.AddSingleton<IConfiguration>(config);
 
         services.AddOutbox(config, outbox =>
         {
@@ -82,6 +87,7 @@ public class OutboxBuilderTests
     {
         var services = new ServiceCollection();
         var config = new ConfigurationBuilder().Build();
+        services.AddSingleton<IConfiguration>(config);
 
         services.AddOutbox(config, outbox =>
         {
@@ -100,6 +106,7 @@ public class OutboxBuilderTests
     {
         var services = new ServiceCollection();
         var config = new ConfigurationBuilder().Build();
+        services.AddSingleton<IConfiguration>(config);
         var mockHandler = Substitute.For<IOutboxEventHandler>();
 
         services.AddOutbox(config, outbox =>
@@ -119,6 +126,7 @@ public class OutboxBuilderTests
     {
         var services = new ServiceCollection();
         var config = new ConfigurationBuilder().Build();
+        services.AddSingleton<IConfiguration>(config);
 
         services.AddOutbox(config, _ => { });
         services.AddSingleton(Substitute.For<IOutboxStore>());
@@ -129,5 +137,7 @@ public class OutboxBuilderTests
         Assert.NotNull(handler);
     }
 
-    private sealed class TestEventHandler : IOutboxEventHandler { }
+    private sealed class TestEventHandler : IOutboxEventHandler
+    {
+    }
 }

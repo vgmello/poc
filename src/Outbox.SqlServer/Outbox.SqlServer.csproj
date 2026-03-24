@@ -8,6 +8,7 @@
     </AssemblyAttribute>
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.1.72" />
     <ProjectReference Include="../Outbox.Core/Outbox.Core.csproj" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.1" />
   </ItemGroup>

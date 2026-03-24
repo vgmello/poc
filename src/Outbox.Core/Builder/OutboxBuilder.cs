@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -20,6 +22,7 @@ internal sealed class OutboxBuilder : IOutboxBuilder
     public IOutboxBuilder ConfigurePublisher(Action<OutboxPublisherOptions> configure)
     {
         Services.Configure(configure);
+
         return this;
     }
 
@@ -27,12 +30,14 @@ internal sealed class OutboxBuilder : IOutboxBuilder
         where THandler : class, IOutboxEventHandler
     {
         Services.AddSingleton<IOutboxEventHandler, THandler>();
+
         return this;
     }
 
     public IOutboxBuilder ConfigureEvents(Func<IServiceProvider, IOutboxEventHandler> factory)
     {
         Services.AddSingleton(factory);
+
         return this;
     }
 
@@ -41,6 +46,7 @@ internal sealed class OutboxBuilder : IOutboxBuilder
     {
         Services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IOutboxMessageInterceptor, TInterceptor>());
+
         return this;
     }
 
@@ -48,6 +54,7 @@ internal sealed class OutboxBuilder : IOutboxBuilder
     public IOutboxBuilder AddMessageInterceptor(Func<IServiceProvider, IOutboxMessageInterceptor> factory)
     {
         Services.AddSingleton<IOutboxMessageInterceptor>(factory);
+
         return this;
     }
 }

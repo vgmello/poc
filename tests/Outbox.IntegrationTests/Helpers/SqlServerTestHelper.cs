@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Data.Common;
 using System.Text;
 using Confluent.Kafka;
@@ -13,7 +15,7 @@ using Outbox.SqlServer;
 namespace Outbox.IntegrationTests.Helpers;
 
 /// <summary>
-/// SQL Server equivalent of <see cref="ToggleableConnectionFactory"/>.
+///     SQL Server equivalent of <see cref="ToggleableConnectionFactory" />.
 /// </summary>
 public sealed class SqlServerToggleableConnectionFactory
 {
@@ -54,7 +56,7 @@ public static class SqlServerTestHelper
                 config.AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     // Empty section so Configure<T> binds cleanly
-                    ["Outbox:Publisher:BatchSize"] = "10",
+                    ["Outbox:Publisher:BatchSize"] = "10"
                 });
             })
             .ConfigureServices((ctx, services) =>
@@ -76,7 +78,7 @@ public static class SqlServerTestHelper
                         BootstrapServers = bootstrapServers,
                         Acks = Acks.All,
                         EnableIdempotence = true,
-                        LingerMs = 5,
+                        LingerMs = 5
                     }).Build());
 
                 services.AddSingleton<FaultyTransportWrapper>();
@@ -86,6 +88,7 @@ public static class SqlServerTestHelper
             .Build();
 
         var transport = host.Services.GetRequiredService<FaultyTransportWrapper>();
+
         return (host, transport);
     }
 
@@ -100,7 +103,7 @@ public static class SqlServerTestHelper
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync();
 
-        for (int i = 0; i < count; i++)
+        for (var i = 0; i < count; i++)
         {
             var key = partitionKey ?? $"key-{i % 10}";
             const string sql = @"
@@ -128,6 +131,7 @@ public static class SqlServerTestHelper
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync();
         await using var cmd = new SqlCommand("SELECT COUNT(*) FROM dbo.Outbox", conn);
+
         return (long)(int)(await cmd.ExecuteScalarAsync())!;
     }
 
@@ -136,6 +140,7 @@ public static class SqlServerTestHelper
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync();
         await using var cmd = new SqlCommand("SELECT COUNT(*) FROM dbo.OutboxDeadLetter", conn);
+
         return (long)(int)(await cmd.ExecuteScalarAsync())!;
     }
 
@@ -147,8 +152,12 @@ public static class SqlServerTestHelper
         await using var cmd = new SqlCommand(
             "SELECT SequenceNumber, RetryCount FROM dbo.Outbox ORDER BY SequenceNumber", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
+
         while (await reader.ReadAsync())
+        {
             results.Add((reader.GetInt64(0), reader.GetInt32(1)));
+        }
+
         return results;
     }
 
@@ -160,8 +169,12 @@ public static class SqlServerTestHelper
         await using var cmd = new SqlCommand(
             "SELECT PartitionId, OwnerProducerId FROM dbo.OutboxPartitions ORDER BY PartitionId", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
+
         while (await reader.ReadAsync())
+        {
             map[reader.GetInt32(0)] = await reader.IsDBNullAsync(1) ? null : reader.GetString(1);
+        }
+
         return map;
     }
 
@@ -172,8 +185,12 @@ public static class SqlServerTestHelper
         await conn.OpenAsync();
         await using var cmd = new SqlCommand("SELECT ProducerId FROM dbo.OutboxProducers", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
+
         while (await reader.ReadAsync())
+        {
             ids.Add(reader.GetString(0));
+        }
+
         return ids;
     }
 

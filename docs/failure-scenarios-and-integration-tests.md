@@ -19,12 +19,14 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** When the broker (EventHub/Kafka) becomes unreachable, messages accumulate in the outbox table. The circuit breaker opens. When the broker recovers, the backlog drains automatically without data loss or ordering violations.
 
 **Setup:**
+
 1. Start a publisher instance connected to a real DB and broker
 2. Insert 50 messages into the outbox table (mixed topics: `orders`, `shipments`)
 3. Wait for publisher to drain all 50 messages (verify on consumer side)
 4. Insert 100 more messages into the outbox table
 
 **Test steps:**
+
 1. **Block broker connectivity** (drop network to Kafka/EventHub via Toxiproxy or stop the broker container)
 2. Wait for 3 consecutive publish failures → circuit breaker should open
 3. **Assert:** `outbox.circuit_breaker.state_changes` metric incremented
@@ -43,11 +45,13 @@ This document defines all failure/error scenarios that must be validated through
 16. **Assert:** Health check returns `Healthy`
 
 **What can go wrong in production:**
+
 - Backlog grows unbounded → monitor outbox table depth metric
 - Burst of messages when broker recovers overwhelms downstream consumers
 - Circuit breaker open duration too short → excessive probing against a recovering broker
 
 **Runbook actions:**
+
 - Monitor `outbox.messages.pending` gauge and `outbox.circuit_breaker.state_changes`
 - Do NOT restart the publisher during outage — it's correctly backing off
 - After recovery, consider temporarily increasing `BatchSize` if backlog is large
@@ -60,11 +64,13 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** When the database is unreachable, all store operations fail. The publisher retries with backoff. When DB recovers, the publisher resumes automatically, re-establishes partition ownership, and drains any pending messages.
 
 **Setup:**
+
 1. Start 2 publisher instances (A and B) against the same DB
 2. Wait for partition rebalance — each should own ~16 partitions
 3. Insert 100 messages distributed across multiple partition keys
 
 **Test steps:**
+
 1. Wait for both publishers to begin processing messages
 2. **Stop the database** (stop PostgreSQL/SQL Server container)
 3. **Assert:** All store operations fail with transient errors, logged at ERROR level
@@ -80,11 +86,13 @@ This document defines all failure/error scenarios that must be validated through
 13. **Assert:** Both publishers have partitions assigned (verify via `outbox_partitions` table)
 
 **What can go wrong in production:**
+
 - Application cannot write new messages during DB outage (application transaction also fails — separate concern)
 - After long outage, partition ownership may be in limbo until grace period + rebalance completes (~2 minutes)
 - Dead producer rows accumulate in `outbox_producers` table
 
 **Runbook actions:**
+
 - Monitor error logs from all loops
 - After recovery, verify partition distribution: `SELECT partition_id, owner_producer_id FROM outbox_partitions`
 - Clean up stale producer rows: `DELETE FROM outbox_producers WHERE last_heartbeat_utc < NOW() - INTERVAL '1 hour'`
@@ -96,11 +104,13 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** When a publisher is killed mid-send (no graceful shutdown), in-flight leases expire, surviving publishers claim orphaned partitions, and messages are redelivered.
 
 **Setup:**
+
 1. Start 2 publisher instances (A and B)
 2. Wait for partition rebalance
 3. Insert 200 messages with a mix of partition keys ensuring both publishers have work
 
 **Test steps:**
+
 1. Verify both publishers are actively publishing (check consumer for messages from both)
 2. **SIGKILL publisher A** (`kill -9 <pid>`) — no graceful shutdown, no `UnregisterProducerAsync`
 3. **Assert:** Publisher A's row remains in `outbox_producers` table (not cleaned up)
@@ -116,11 +126,13 @@ This document defines all failure/error scenarios that must be validated through
 13. **Assert:** After stabilization, outbox table is empty
 
 **Recovery time measurement:**
+
 - Record timestamp of SIGKILL
 - Record timestamp of last message delivered to consumer
 - Expected: ≤ `HeartbeatTimeout + GracePeriod + LeaseExpiry + RebalanceInterval` = ~165 seconds worst case
 
 **Runbook actions:**
+
 - Verify dead producer's partitions were redistributed: `SELECT * FROM outbox_partitions WHERE owner_producer_id = '<dead-id>'`
 - Clean up dead producer: `DELETE FROM outbox_producers WHERE producer_id = '<dead-id>'`
 - Monitor for duplicate messages downstream
@@ -132,11 +144,13 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** On graceful shutdown, in-flight leases are released immediately (not waiting for lease expiry), reducing message processing delay.
 
 **Setup:**
+
 1. Start a publisher instance
 2. Configure `LeaseDurationSeconds = 120` (long lease to make the test clear)
 3. Insert 100 messages
 
 **Test steps:**
+
 1. Wait for publisher to begin processing (at least one batch leased)
 2. **Send SIGTERM** (graceful shutdown via `StopAsync`)
 3. **Assert:** The `PublishLoopAsync` `finally` block releases in-flight leased messages via `ReleaseLeaseAsync(..., incrementRetry: false, CancellationToken.None)` (leased_until_utc = NULL)
@@ -146,6 +160,7 @@ This document defines all failure/error scenarios that must be validated through
 7. **Assert:** All messages eventually published
 
 **Timing verification:**
+
 - After SIGTERM, measure time until previously-leased messages are re-processed
 - Should be < 10 seconds (rebalance + poll interval), NOT 120 seconds (lease expiry)
 
@@ -156,11 +171,13 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** A message that consistently fails transport send (e.g., too large for EventHub batch) eventually gets dead-lettered instead of retrying infinitely.
 
 **Setup:**
+
 1. Start a publisher instance with `MaxRetryCount = 3`
 2. Insert 1 message with a payload larger than `MaxBatchSizeBytes` (e.g., 2MB for EventHub's 1MB limit)
 3. Insert 5 normal messages with the same topic/partition key (to verify they're not blocked)
 
 **Test steps:**
+
 1. Wait for publisher to attempt sending the oversized message
 2. **Assert:** `SendAsync` throws `InvalidOperationException: Message too large`
 3. **Assert:** `ReleaseLeaseAsync` called with `incrementRetry: true`
@@ -172,6 +189,7 @@ This document defines all failure/error scenarios that must be validated through
 9. **Assert:** Dead letter table contains the oversized message with `last_error` populated
 
 **Verify no infinite retry:**
+
 - Track `retry_count` after each lease-release cycle
 - Must increment by 1 each time (because `incrementRetry: true`)
 
@@ -182,11 +200,13 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** Under intermittent failures (2 fail, 1 success pattern), messages still eventually dead-letter instead of retrying forever.
 
 **Setup:**
+
 1. Start a publisher with `MaxRetryCount = 5`, `CircuitBreakerFailureThreshold = 10` (high to prevent circuit from opening)
 2. Configure transport mock/proxy to fail 2 out of every 3 sends
 3. Insert 10 messages
 
 **Test steps:**
+
 1. **Assert:** Each failed send increments `retry_count` via `ReleaseLeaseAsync(incrementRetry: true)`
 2. **Assert:** Each successful send resets the circuit breaker failure count (but does NOT reset `retry_count` — that only resets on replay from dead letter)
 3. **Assert:** Messages that succeed are deleted from outbox
@@ -202,11 +222,13 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** When the circuit breaker is open, messages are released WITHOUT incrementing retry count. This prevents messages from being dead-lettered due to broker outage (not message-level failure).
 
 **Setup:**
+
 1. Start a publisher with `MaxRetryCount = 3`, `CircuitBreakerFailureThreshold = 2`
 2. Insert 10 messages
 3. Make the broker unreachable
 
 **Test steps:**
+
 1. Wait for 2 consecutive failures → circuit opens
 2. **Assert:** Subsequent leases are immediately released with `incrementRetry: false`
 3. **Assert:** `retry_count` stays at value from before circuit opened (incremented only during actual send attempts, not during circuit-open releases)
@@ -222,10 +244,12 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** When publishers scale up/down, partitions are redistributed fairly, the grace period prevents dual-processing, and no messages are lost or stuck.
 
 **Setup:**
+
 1. Start publisher A (should own all 32 partitions)
 2. Insert 500 messages distributed across many partition keys
 
 **Test steps — Scale Up:**
+
 1. Verify publisher A owns all 32 partitions
 2. Start publisher B
 3. Wait for rebalance interval (30s)
@@ -237,6 +261,7 @@ This document defines all failure/error scenarios that must be validated through
 9. **Assert:** Partitions split roughly 11/11/10 (ceil(32/3) = 11)
 
 **Test steps — Scale Down:**
+
 1. With A, B, C running, gracefully stop C
 2. Wait for rebalance
 3. **Assert:** C's partitions distributed to A and B (16/16)
@@ -244,6 +269,7 @@ This document defines all failure/error scenarios that must be validated through
 5. **Assert:** Messages that C had leased are released on graceful shutdown
 
 **Grace period verification:**
+
 1. With A and B running, kill A (SIGKILL — no graceful shutdown)
 2. **Assert:** B's rebalance sets `grace_expires_utc` on A's partitions
 3. **Assert:** B does NOT process A's partitions until grace expires
@@ -256,10 +282,12 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** If an internal loop (heartbeat, rebalance, etc.) crashes due to an unexpected exception, the linked CancellationTokenSource cancels all loops, and they restart automatically.
 
 **Setup:**
+
 1. Start a publisher instance
 2. Insert messages continuously
 
 **Test steps — Transient crash:**
+
 1. Simulate a transient error that causes the heartbeat loop to throw an unhandled exception (e.g., by temporarily revoking DB permissions for the heartbeat query)
 2. **Assert:** All loops are cancelled via linked CTS
 3. **Assert:** `ConsecutiveLoopRestarts` incremented to 1
@@ -271,6 +299,7 @@ This document defines all failure/error scenarios that must be validated through
 9. **Assert:** Messages continue to be published without loss
 
 **Test steps — Persistent crash (escalation to host stop):**
+
 1. Inject a persistent failure that causes loops to crash on every restart
 2. **Assert:** Restarts increase: 1, 2, 3, 4, 5
 3. **Assert:** Backoff delays double: 2s, 4s, 8s, 16s, 32s
@@ -285,9 +314,11 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** The outbox health check correctly reports Healthy, Degraded, and Unhealthy states based on internal publisher state.
 
 **Setup:**
+
 1. Start a publisher instance with `HeartbeatIntervalMs = 5000` (5s)
 
 **Test steps — Healthy state:**
+
 1. Let publisher run normally for 15 seconds
 2. **Assert:** Health check returns `Healthy`
 3. **Assert:** `data.publishLoopRunning = true`
@@ -295,6 +326,7 @@ This document defines all failure/error scenarios that must be validated through
 5. **Assert:** `data.openCircuitBreakers` is absent
 
 **Test steps — Degraded state (open circuits):**
+
 1. Block broker for one topic (e.g., via Toxiproxy on specific port)
 2. Wait for circuit breaker to open
 3. **Assert:** Health check returns `Degraded`
@@ -304,6 +336,7 @@ This document defines all failure/error scenarios that must be validated through
 7. **Assert:** Health check returns `Healthy`
 
 **Test steps — Unhealthy state (stale heartbeat):**
+
 1. Block database connectivity
 2. Wait for `HeartbeatIntervalMs * 3` (15s)
 3. **Assert:** Health check returns `Unhealthy` with stale heartbeat message
@@ -311,14 +344,17 @@ This document defines all failure/error scenarios that must be validated through
 5. **Assert:** Health check returns `Healthy` after next heartbeat succeeds
 
 **Test steps — Unhealthy state (loop stopped):**
+
 1. Force all loops to exit (via host shutdown)
 2. **Assert:** Health check returns `Unhealthy` with "publish loop is not running" message
 
 **Test steps — Unhealthy state (never heartbeated):**
+
 1. Start publisher, immediately query health check before first heartbeat completes
 2. **Assert:** Health check returns `Unhealthy` (loop started but no heartbeat recorded yet)
 
 **Test steps — Unhealthy state (stale poll):**
+
 1. Start publisher, block DB so poll loop cannot complete
 2. Wait for poll staleness threshold
 3. **Assert:** Health check returns `Unhealthy` (last poll is stale or never occurred)
@@ -330,9 +366,11 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** The `outbox.messages.pending` gauge accurately reflects the number of messages waiting in the outbox table.
 
 **Setup:**
+
 1. Start a publisher with broker blocked (so messages accumulate)
 
 **Test steps:**
+
 1. Insert 100 messages
 2. Wait for at least one heartbeat cycle (10s)
 3. **Assert:** `outbox.messages.pending` gauge = 100 (±10 for timing)
@@ -348,10 +386,12 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** Messages in the dead letter table can be replayed (moved back to outbox) and re-processed successfully.
 
 **Setup:**
+
 1. Create a poison message scenario (Scenario 5) to get a message into dead letter
 2. Fix the root cause (e.g., increase `MaxBatchSizeBytes` or fix the payload)
 
 **Test steps:**
+
 1. **Assert:** Dead letter table has ≥1 message
 2. Call `IDeadLetterManager.ReplayAsync` with the dead-lettered sequence numbers
 3. **Assert:** Messages moved from `outbox_dead_letter` back to `outbox` table
@@ -367,10 +407,12 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** Per-partition-key ordering is preserved even through failures, circuit breaker cycles, and publisher crashes.
 
 **Setup:**
+
 1. Insert 100 messages for partition key `order-123`, numbered 1-100 in `EventOrdinal`
 2. Configure broker to fail intermittently (every 3rd send)
 
 **Test steps:**
+
 1. Start publisher, let it process through failures and retries
 2. Collect all messages received by consumer for partition key `order-123`
 3. **Assert:** Messages are received in order (by `EventOrdinal`), even if some are duplicated
@@ -378,6 +420,7 @@ This document defines all failure/error scenarios that must be validated through
 5. **Assert:** No gaps (every message from 1-100 is present)
 
 **Repeat with publisher crash:**
+
 1. Insert 100 ordered messages
 2. Kill publisher at ~50% progress
 3. Start new publisher
@@ -391,10 +434,12 @@ This document defines all failure/error scenarios that must be validated through
 **What we're testing:** When the app can reach the DB but not the broker, the circuit breaker activates, messages accumulate safely, and auto-recovery works when network heals.
 
 **Setup:**
+
 1. Start publisher with both DB and broker reachable
 2. Insert 50 messages, wait for them to publish
 
 **Test steps:**
+
 1. **Block only broker connectivity** (keep DB reachable)
 2. Insert 100 more messages
 3. **Assert:** Publish attempts fail, circuit opens after threshold
@@ -424,26 +469,31 @@ The following scenarios are covered by unit tests in `OutboxPublisherServiceTest
 ## Test Execution Notes
 
 ### Timing Considerations
+
 - Tests involving heartbeat/rebalance timeouts are inherently slow (30-90 second waits)
 - Use shorter timeout values in test configuration (e.g., `HeartbeatTimeoutSeconds = 5`, `PartitionGracePeriodSeconds = 10`)
 - Still expect tests to take 30-120 seconds each
 
 ### Consumer Verification
+
 - All tests should verify message delivery via an actual consumer reading from the broker topic
 - Consumer should collect messages in a thread-safe list with timestamps
 - Ordering assertions should account for at-least-once semantics (duplicates allowed, order violations not)
 
 ### Cleanup Between Tests
+
 - Truncate `outbox`, `outbox_dead_letter`, `outbox_producers`, `outbox_partitions` tables
 - Re-seed partitions (32 rows)
 - Purge broker topics or use unique topic names per test
 - Kill all publisher instances
 
 ### Metrics Verification
+
 - Use `System.Diagnostics.Metrics.MeterListener` to capture metric values in tests
 - Or configure an in-memory metrics exporter
 
 ### Infrastructure Simulation Tools
+
 - **Toxiproxy:** Preferred for network fault injection (add latency, drop connections, limit bandwidth)
 - **Docker stop/start:** For simulating full service outages
 - **iptables/nftables:** For fine-grained network partition simulation

@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Text;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -38,7 +40,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
             MinPollIntervalMs = 10, MaxPollIntervalMs = 100,
             HeartbeatIntervalMs = 100_000, RebalanceIntervalMs = 100_000,
             OrphanSweepIntervalMs = 100_000, DeadLetterSweepIntervalMs = 100_000,
-            CircuitBreakerFailureThreshold = 3, CircuitBreakerOpenDurationSeconds = 30,
+            CircuitBreakerFailureThreshold = 3, CircuitBreakerOpenDurationSeconds = 30
         };
 
         _optionsMonitor = Substitute.For<IOptionsMonitor<OutboxPublisherOptions>>();
@@ -74,7 +76,13 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         var service = CreateService();
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         await _transport.Received().SendAsync("orders", "key-1",
@@ -99,7 +107,13 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         var service = CreateService(new[] { interceptor });
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         await _transport.Received().SendAsync("orders", "key-1",
@@ -123,7 +137,13 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         var service = CreateService(new[] { interceptor });
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         await interceptor.DidNotReceive().InterceptAsync(
@@ -169,7 +189,13 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         var service = CreateService(new[] { first, second });
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         Assert.Equal(new[] { "first", "second" }, order);
@@ -197,7 +223,13 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         var service = CreateService(new[] { interceptor });
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         // Interceptor failure is treated as transport failure — retry count incremented.
@@ -216,9 +248,12 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
     {
         _store.RegisterProducerAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var originalPayload = Encoding.UTF8.GetBytes("original");
-        var messages = new[] { new OutboxMessage(1, "orders", "key-1", "OrderCreated", null,
-            originalPayload, "application/json",
-            DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow) };
+        var messages = new[]
+        {
+            new OutboxMessage(1, "orders", "key-1", "OrderCreated", null,
+                originalPayload, "application/json",
+                DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow)
+        };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
@@ -231,7 +266,13 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         var service = CreateService(new[] { interceptor });
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
         await service.StartAsync(cts.Token);
-        try { await Task.Delay(600, CancellationToken.None); } catch { /* Intentionally empty */ }
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch
+        {
+            /* Intentionally empty */
+        }
+
         await service.StopAsync(CancellationToken.None);
 
         await _eventHandler.Received().OnMessagePublishedAsync(

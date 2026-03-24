@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Outbox.Core.Models;
 
 namespace Outbox.Core.Abstractions;

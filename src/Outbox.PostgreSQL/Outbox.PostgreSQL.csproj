@@ -8,6 +8,7 @@
     </AssemblyAttribute>
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.1.72" />
     <ProjectReference Include="../Outbox.Core/Outbox.Core.csproj" />
     <PackageReference Include="Npgsql" Version="9.0.3" />
   </ItemGroup>

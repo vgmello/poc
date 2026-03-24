@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Outbox.IntegrationTests.Fixtures;
 using Outbox.IntegrationTests.Helpers;
 using Xunit;
@@ -31,6 +33,7 @@ public class SqlServerMultiPublisherRebalanceTests
         await OutboxTestHelper.WaitUntilAsync(async () =>
         {
             var owners = await SqlServerTestHelper.GetPartitionOwnersAsync(_infra.SqlServerConnectionString);
+
             return owners.Values.Count(v => v != null) == 32;
         }, TimeSpan.FromSeconds(15), message: "A should own all 32 partitions");
 
@@ -47,6 +50,7 @@ public class SqlServerMultiPublisherRebalanceTests
         {
             var owners = await SqlServerTestHelper.GetPartitionOwnersAsync(_infra.SqlServerConnectionString);
             var grouped = owners.Values.Where(v => v != null).GroupBy(v => v).ToList();
+
             return grouped.Count == 2 && grouped.All(g => g.Count() >= 12); // ~16 each, allowing some variance
         }, TimeSpan.FromSeconds(30), message: "Partitions should be split roughly 16/16");
 
@@ -69,8 +73,9 @@ public class SqlServerMultiPublisherRebalanceTests
         await OutboxTestHelper.WaitUntilAsync(async () =>
         {
             var owners = await SqlServerTestHelper.GetPartitionOwnersAsync(_infra.SqlServerConnectionString);
+
             return owners.Values.Count(v => v != null) == 32
-                && owners.Values.Distinct().Count(v => v != null) == 1;
+                   && owners.Values.Distinct().Count(v => v != null) == 1;
         }, TimeSpan.FromSeconds(30), message: "A should reclaim all 32 partitions after B stops");
 
         _output.WriteLine("A reclaimed all partitions after B stopped");

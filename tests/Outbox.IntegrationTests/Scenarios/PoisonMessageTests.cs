@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Outbox.IntegrationTests.Fixtures;
 using Outbox.IntegrationTests.Helpers;
 using Xunit;
@@ -26,7 +28,11 @@ public class PoisonMessageTests
         // Use MaxRetryCount=3 for faster test
         var (host, transport) = OutboxTestHelper.BuildPublisherHost(
             _infra.ConnectionString, _infra.BootstrapServers,
-            o => { o.MaxRetryCount = 4; o.CircuitBreakerFailureThreshold = 3; });
+            o =>
+            {
+                o.MaxRetryCount = 4;
+                o.CircuitBreakerFailureThreshold = 3;
+            });
 
         // Make transport fail for a specific partition key (simulating oversized message)
         var poisonKey = "poison-key";
@@ -45,6 +51,7 @@ public class PoisonMessageTests
             {
                 var outboxCount = await OutboxTestHelper.GetOutboxCountAsync(_infra.ConnectionString);
                 var dlqCount = await OutboxTestHelper.GetDeadLetterCountAsync(_infra.ConnectionString);
+
                 return outboxCount == 0 && dlqCount >= 1;
             }, TimeSpan.FromSeconds(30), message: "Poison message should be dead-lettered, healthy messages published");
 

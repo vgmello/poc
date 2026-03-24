@@ -1,7 +1,8 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Options;
 using Outbox.Core.Abstractions;
 using Outbox.Core.Engine;
 using Outbox.Core.Observability;
@@ -16,11 +17,10 @@ public static class OutboxServiceCollectionExtensions
         IConfiguration configuration,
         Action<IOutboxBuilder> configure)
     {
-        services.Configure<OutboxPublisherOptions>(
-            configuration.GetSection("Outbox:Publisher"));
-
-        services.AddSingleton<IValidateOptions<OutboxPublisherOptions>,
-            OutboxPublisherOptionsValidator>();
+        services.AddOptions<OutboxPublisherOptions>()
+            .BindConfiguration("Outbox:Publisher")
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
 
         services.AddLogging();
         services.AddMetrics();

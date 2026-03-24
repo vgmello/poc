@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Text;
 using Confluent.Kafka;
 using Microsoft.Extensions.Configuration;
@@ -51,7 +53,7 @@ public static class OutboxTestHelper
                 config.AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     // Empty section so Configure<T> binds cleanly
-                    ["Outbox:Publisher:BatchSize"] = "10",
+                    ["Outbox:Publisher:BatchSize"] = "10"
                 });
             })
             .ConfigureServices((ctx, services) =>
@@ -73,7 +75,7 @@ public static class OutboxTestHelper
                         BootstrapServers = bootstrapServers,
                         Acks = Acks.All,
                         EnableIdempotence = true,
-                        LingerMs = 5,
+                        LingerMs = 5
                     }).Build());
 
                 services.AddSingleton<FaultyTransportWrapper>();
@@ -83,6 +85,7 @@ public static class OutboxTestHelper
             .Build();
 
         var transport = host.Services.GetRequiredService<FaultyTransportWrapper>();
+
         return (host, transport);
     }
 
@@ -97,7 +100,7 @@ public static class OutboxTestHelper
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
 
-        for (int i = 0; i < count; i++)
+        for (var i = 0; i < count; i++)
         {
             var key = partitionKey ?? $"key-{i % 10}";
             var sql = @"
@@ -130,26 +133,34 @@ public static class OutboxTestHelper
             BootstrapServers = bootstrapServers,
             GroupId = $"test-{Guid.NewGuid():N}",
             AutoOffsetReset = AutoOffsetReset.Earliest,
-            EnableAutoCommit = true,
+            EnableAutoCommit = true
         };
 
         using var consumer = new ConsumerBuilder<string, byte[]>(config).Build();
         consumer.Subscribe(topic);
 
         var deadline = DateTime.UtcNow + timeout;
+
         while (messages.Count < expectedCount && DateTime.UtcNow < deadline)
         {
             try
             {
                 var result = consumer.Consume(TimeSpan.FromMilliseconds(200));
+
                 if (result?.Message != null)
+                {
                     messages.Add(new ConsumedMessage(
                         result.Message.Key, result.Message.Value, result.Offset.Value));
+                }
             }
-            catch (ConsumeException) { /* topic may not exist yet */ }
+            catch (ConsumeException)
+            {
+                /* topic may not exist yet */
+            }
         }
 
         consumer.Close();
+
         return messages;
     }
 
@@ -162,6 +173,7 @@ public static class OutboxTestHelper
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
         await using var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM outbox", conn);
+
         return (long)(await cmd.ExecuteScalarAsync())!;
     }
 
@@ -170,6 +182,7 @@ public static class OutboxTestHelper
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
         await using var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM outbox_dead_letter", conn);
+
         return (long)(await cmd.ExecuteScalarAsync())!;
     }
 
@@ -181,8 +194,12 @@ public static class OutboxTestHelper
         await using var cmd = new NpgsqlCommand(
             "SELECT sequence_number, retry_count FROM outbox ORDER BY sequence_number", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
+
         while (await reader.ReadAsync())
+        {
             results.Add((reader.GetInt64(0), reader.GetInt32(1)));
+        }
+
         return results;
     }
 
@@ -193,8 +210,12 @@ public static class OutboxTestHelper
         await conn.OpenAsync();
         await using var cmd = new NpgsqlCommand("SELECT producer_id FROM outbox_producers", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
+
         while (await reader.ReadAsync())
+        {
             ids.Add(reader.GetString(0));
+        }
+
         return ids;
     }
 
@@ -206,8 +227,12 @@ public static class OutboxTestHelper
         await using var cmd = new NpgsqlCommand(
             "SELECT partition_id, owner_producer_id FROM outbox_partitions ORDER BY partition_id", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
+
         while (await reader.ReadAsync())
+        {
             map[reader.GetInt32(0)] = await reader.IsDBNullAsync(1) ? null : reader.GetString(1);
+        }
+
         return map;
     }
 
@@ -235,12 +260,15 @@ public static class OutboxTestHelper
     {
         var interval = pollInterval ?? TimeSpan.FromMilliseconds(200);
         var deadline = DateTime.UtcNow + timeout;
+
         while (DateTime.UtcNow < deadline)
         {
             if (await predicate())
                 return;
+
             await Task.Delay(interval);
         }
+
         throw new TimeoutException(message ?? $"Condition not met within {timeout}");
     }
 

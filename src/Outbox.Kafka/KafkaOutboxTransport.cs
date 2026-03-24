@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Confluent.Kafka;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -97,7 +99,7 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
         var pending = messages.Count;
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        for (int i = 0; i < messages.Count; i++)
+        for (var i = 0; i < messages.Count; i++)
         {
             var msg = messages[i];
             var seqNum = msg.SequenceNumber;
@@ -105,12 +107,13 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
             {
                 Key = partitionKey,
                 Value = msg.Payload,
-                Headers = KafkaMessageHelper.ParseHeaders(msg.Headers, msg.EventType),
+                Headers = KafkaMessageHelper.ParseHeaders(msg.Headers, msg.EventType)
             };
 
             if (_interceptors.Count > 0)
             {
                 TransportMessageContext<Message<string, byte[]>>? transportCtx = null;
+
                 foreach (var interceptor in _interceptors)
                 {
                     if (interceptor.AppliesTo(msg))
@@ -119,6 +122,7 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
                         await interceptor.InterceptAsync(transportCtx, cancellationToken);
                     }
                 }
+
                 if (transportCtx is not null)
                 {
                     kafkaMessage = transportCtx.Message;
@@ -130,12 +134,16 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
                 if (report.Error is { IsError: true })
                 {
                     lock (deliveryErrors)
+                    {
                         deliveryErrors.Add(new ProduceException<string, byte[]>(report.Error, report));
+                    }
                 }
                 else
                 {
                     lock (succeededInBatch)
+                    {
                         succeededInBatch.Add(seqNum);
+                    }
                 }
 
                 if (Interlocked.Decrement(ref pending) == 0)
@@ -189,8 +197,11 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
         // Don't dispose the producer — it's owned by the DI container.
         // Just flush any remaining messages with a short timeout.
         try { _producer.Flush(TimeSpan.FromSeconds(5)); }
-        catch { /* best effort during shutdown */ }
+        catch
+        {
+            /* best effort during shutdown */
+        }
+
         return ValueTask.CompletedTask;
     }
-
 }

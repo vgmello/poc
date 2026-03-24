@@ -1,9 +1,10 @@
-// src/Outbox.Core/Models/OutboxMessageContext.cs
+// Copyright (c) OrgName. All rights reserved.
+
 namespace Outbox.Core.Models;
 
 /// <summary>
-/// Mutable context passed to <see cref="Abstractions.IOutboxMessageInterceptor"/> implementations.
-/// Only created when at least one interceptor's <c>AppliesTo</c> returns true.
+///     Mutable context passed to <see cref="Abstractions.IOutboxMessageInterceptor" /> implementations.
+///     Only created when at least one interceptor's <c>AppliesTo</c> returns true.
 /// </summary>
 public sealed class OutboxMessageContext
 {
@@ -21,11 +22,13 @@ public sealed class OutboxMessageContext
 
     // Mutable fields
     private byte[] _payload;
+
     public byte[] Payload
     {
         get => _payload;
         set => _payload = value ?? throw new ArgumentNullException(nameof(value), "Payload cannot be set to null.");
     }
+
     public Dictionary<string, string>? Headers { get; set; }
     public string PayloadContentType { get; set; }
 

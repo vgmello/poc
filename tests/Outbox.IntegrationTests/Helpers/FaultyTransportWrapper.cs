@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Confluent.Kafka;
 using Outbox.Core.Abstractions;
 using Outbox.Core.Models;
@@ -5,8 +7,8 @@ using Outbox.Core.Models;
 namespace Outbox.IntegrationTests.Helpers;
 
 /// <summary>
-/// IOutboxTransport decorator that can be toggled to simulate broker failures.
-/// When not failing, delegates to a real Kafka producer.
+///     IOutboxTransport decorator that can be toggled to simulate broker failures.
+///     When not failing, delegates to a real Kafka producer.
 /// </summary>
 public sealed class FaultyTransportWrapper : IOutboxTransport
 {
@@ -49,10 +51,12 @@ public sealed class FaultyTransportWrapper : IOutboxTransport
             throw new InvalidOperationException("Simulated broker failure");
 
         var pred = _failPredicate;
+
         if (pred != null && messages.Any(pred))
             throw new InvalidOperationException("Simulated failure for matching message");
 
         var n = _failEveryN;
+
         if (n > 0 && count % n != 0)
             throw new InvalidOperationException($"Simulated intermittent failure (call {count}, succeeds every {n})");
 
@@ -78,7 +82,11 @@ public sealed class FaultyTransportWrapper : IOutboxTransport
         // Don't dispose the producer — it's owned by the DI container.
         // Just flush any remaining messages with a short timeout.
         try { _producer.Flush(TimeSpan.FromSeconds(3)); }
-        catch { /* best effort */ }
+        catch
+        {
+            /* best effort */
+        }
+
         return ValueTask.CompletedTask;
     }
 }

@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Confluent.Kafka;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -31,8 +33,9 @@ public static class KafkaOutboxBuilderExtensions
                 MessageSendMaxRetries = opts.MessageSendMaxRetries,
                 RetryBackoffMs = opts.RetryBackoffMs,
                 LingerMs = opts.LingerMs,
-                MessageTimeoutMs = opts.MessageTimeoutMs,
+                MessageTimeoutMs = opts.MessageTimeoutMs
             };
+
             return new ProducerBuilder<string, byte[]>(config).Build();
         });
 
@@ -65,7 +68,7 @@ internal sealed class KafkaOutboxBuilder : IKafkaOutboxBuilder
 
     public KafkaOutboxBuilder(IOutboxBuilder inner) => _inner = inner;
 
-    public Microsoft.Extensions.DependencyInjection.IServiceCollection Services => _inner.Services;
+    public IServiceCollection Services => _inner.Services;
     public Microsoft.Extensions.Configuration.IConfiguration Configuration => _inner.Configuration;
 
     public IKafkaOutboxBuilder AddTransportInterceptor<TInterceptor>()
@@ -73,29 +76,55 @@ internal sealed class KafkaOutboxBuilder : IKafkaOutboxBuilder
     {
         Services.TryAddEnumerable(
             ServiceDescriptor.Singleton<ITransportMessageInterceptor<Message<string, byte[]>>, TInterceptor>());
+
         return this;
     }
 
     /// <summary>
-    /// Registers a transport interceptor using a factory delegate.
-    /// Unlike the generic overload, calling this multiple times will register multiple instances.
+    ///     Registers a transport interceptor using a factory delegate.
+    ///     Unlike the generic overload, calling this multiple times will register multiple instances.
     /// </summary>
     public IKafkaOutboxBuilder AddTransportInterceptor(
         Func<IServiceProvider, ITransportMessageInterceptor<Message<string, byte[]>>> factory)
     {
         Services.AddSingleton(factory);
+
         return this;
     }
 
     // Delegate IOutboxBuilder methods — return this to preserve IKafkaOutboxBuilder for fluent chaining
     public IOutboxBuilder ConfigurePublisher(Action<OutboxPublisherOptions> configure)
-    { _inner.ConfigurePublisher(configure); return this; }
+    {
+        _inner.ConfigurePublisher(configure);
+
+        return this;
+    }
+
     public IOutboxBuilder ConfigureEvents<THandler>() where THandler : class, IOutboxEventHandler
-    { _inner.ConfigureEvents<THandler>(); return this; }
+    {
+        _inner.ConfigureEvents<THandler>();
+
+        return this;
+    }
+
     public IOutboxBuilder ConfigureEvents(Func<IServiceProvider, IOutboxEventHandler> factory)
-    { _inner.ConfigureEvents(factory); return this; }
+    {
+        _inner.ConfigureEvents(factory);
+
+        return this;
+    }
+
     public IOutboxBuilder AddMessageInterceptor<TInterceptor>() where TInterceptor : class, IOutboxMessageInterceptor
-    { _inner.AddMessageInterceptor<TInterceptor>(); return this; }
+    {
+        _inner.AddMessageInterceptor<TInterceptor>();
+
+        return this;
+    }
+
     public IOutboxBuilder AddMessageInterceptor(Func<IServiceProvider, IOutboxMessageInterceptor> factory)
-    { _inner.AddMessageInterceptor(factory); return this; }
+    {
+        _inner.AddMessageInterceptor(factory);
+
+        return this;
+    }
 }

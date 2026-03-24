@@ -1,4 +1,5 @@
-// tests/Outbox.Core.Tests/OutboxMessageContextTests.cs
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Text;
 using Outbox.Core.Models;
 using Xunit;

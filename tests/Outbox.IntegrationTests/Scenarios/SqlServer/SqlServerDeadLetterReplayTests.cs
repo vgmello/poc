@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Microsoft.Extensions.DependencyInjection;
 using Outbox.Core.Abstractions;
 using Outbox.IntegrationTests.Fixtures;
@@ -28,7 +30,11 @@ public class SqlServerDeadLetterReplayTests
         // Phase 1: Create dead-lettered messages by using MaxRetryCount=1 and failing transport
         var (host1, transport1) = SqlServerTestHelper.BuildPublisherHost(
             _infra.SqlServerConnectionString, _infra.BootstrapServers,
-            o => { o.MaxRetryCount = 2; o.CircuitBreakerFailureThreshold = 1; });
+            o =>
+            {
+                o.MaxRetryCount = 2;
+                o.CircuitBreakerFailureThreshold = 1;
+            });
         transport1.SetFailing(true);
 
         await SqlServerTestHelper.InsertMessagesAsync(_infra.SqlServerConnectionString, 3, topic, "key-1");
@@ -68,10 +74,12 @@ public class SqlServerDeadLetterReplayTests
         // Assert: retry_count must be reset to 0 after replay — otherwise replayed messages
         // would be immediately re-dead-lettered without any delivery attempt
         var retryCounts = await SqlServerTestHelper.GetRetryCountsAsync(_infra.SqlServerConnectionString);
+
         foreach (var (seq, retryCount) in retryCounts)
         {
             Assert.Equal(0, retryCount);
         }
+
         _output.WriteLine("All replayed messages have retry_count = 0");
 
         // Phase 3: Start publisher — should publish the replayed messages

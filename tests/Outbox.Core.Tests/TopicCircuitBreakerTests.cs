@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Outbox.Core.Engine;
 using Outbox.Core.Models;
 using Xunit;

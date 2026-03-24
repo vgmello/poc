@@ -1,3 +1,6 @@
+// Copyright (c) OrgName. All rights reserved.
+
+using System.Collections.Concurrent;
 using Azure.Messaging.EventHubs;
 using Azure.Messaging.EventHubs.Producer;
 using Microsoft.Extensions.Logging;
@@ -9,22 +12,21 @@ namespace Outbox.EventHub;
 
 internal sealed class EventHubOutboxTransport : IOutboxTransport
 {
-    private readonly EventHubProducerClient _client;
+    private readonly ConcurrentDictionary<string, EventHubProducerClient> _clients = new();
+    private readonly EventHubClientFactory _clientFactory;
     private readonly int _sendTimeoutSeconds;
     private readonly int _maxBatchSizeBytes;
-    private readonly string _configuredEventHubName;
     private readonly List<ITransportMessageInterceptor<EventData>> _interceptors;
 
     public EventHubOutboxTransport(
-        EventHubProducerClient client,
         IOptions<EventHubTransportOptions> options,
         ILogger<EventHubOutboxTransport> logger,
-        IEnumerable<ITransportMessageInterceptor<EventData>> interceptors)
+        IEnumerable<ITransportMessageInterceptor<EventData>> interceptors,
+        EventHubClientFactory clientFactory)
     {
-        _client = client;
+        _clientFactory = clientFactory;
         _sendTimeoutSeconds = options.Value.SendTimeoutSeconds;
         _maxBatchSizeBytes = options.Value.MaxBatchSizeBytes;
-        _configuredEventHubName = options.Value.EventHubName;
         _interceptors = interceptors.ToList();
     }
 
@@ -37,14 +39,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
         IReadOnlyList<OutboxMessage> messages,
         CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrEmpty(topicName) &&
-            !string.IsNullOrEmpty(_configuredEventHubName) &&
-            !string.Equals(topicName, _configuredEventHubName, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException(
-                $"Message targets EventHub '{topicName}' but transport is configured for '{_configuredEventHubName}'. " +
-                "EventHub transport only supports a single EventHub per transport instance.");
-        }
+        var client = _clients.GetOrAdd(topicName, name => _clientFactory(name));
 
         var batchOptions = new CreateBatchOptions
         {
@@ -61,7 +56,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
             sendCts.CancelAfter(TimeSpan.FromSeconds(_sendTimeoutSeconds));
             var ct = sendCts.Token;
 
-            batch = await _client.CreateBatchAsync(batchOptions, ct);
+            batch = await client.CreateBatchAsync(batchOptions, ct);
 
             foreach (var msg in messages)
             {
@@ -70,6 +65,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
                 if (_interceptors.Count > 0)
                 {
                     TransportMessageContext<EventData>? transportCtx = null;
+
                     foreach (var interceptor in _interceptors)
                     {
                         if (interceptor.AppliesTo(msg))
@@ -78,6 +74,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
                             await interceptor.InterceptAsync(transportCtx, ct);
                         }
                     }
+
                     if (transportCtx is not null)
                     {
                         eventData = transportCtx.Message;
@@ -89,7 +86,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
                     // Current batch is full, send it and start a new one.
                     if (batch.Count > 0)
                     {
-                        await _client.SendAsync(batch, ct);
+                        await client.SendAsync(batch, ct);
                         sentSequenceNumbers.AddRange(currentBatchSequenceNumbers);
                         batch.Dispose();
                         batch = null;
@@ -98,7 +95,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
 
                     // Reset timeout for remaining messages.
                     sendCts.CancelAfter(TimeSpan.FromSeconds(_sendTimeoutSeconds));
-                    batch = await _client.CreateBatchAsync(batchOptions, ct);
+                    batch = await client.CreateBatchAsync(batchOptions, ct);
 
                     if (!batch.TryAdd(eventData))
                     {
@@ -112,7 +109,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
 
             if (batch is { Count: > 0 })
             {
-                await _client.SendAsync(batch, ct);
+                await client.SendAsync(batch, ct);
                 sentSequenceNumbers.AddRange(currentBatchSequenceNumbers);
             }
         }
@@ -136,10 +133,17 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
 
 #pragma warning restore S3776
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        // Don't dispose the EventHubProducerClient — it's owned by the DI container.
-        return ValueTask.CompletedTask;
-    }
+        foreach (var client in _clients.Values)
+        {
+            try { await client.CloseAsync(); }
+            catch
+            {
+                /* best effort during shutdown */
+            }
+        }
 
+        _clients.Clear();
+    }
 }

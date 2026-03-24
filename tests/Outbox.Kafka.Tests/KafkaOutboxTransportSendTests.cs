@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Text;
 using Confluent.Kafka;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -24,7 +26,7 @@ public class KafkaOutboxTransportSendTests
             MaxBatchSizeBytes = 1_048_576,
             BootstrapServers = "localhost:9092",
             Acks = "All",
-            EnableIdempotence = true,
+            EnableIdempotence = true
         });
 
         _transport = new KafkaOutboxTransport(
@@ -88,7 +90,7 @@ public class KafkaOutboxTransportSendTests
         {
             MakeMessage(1),
             MakeMessage(2),
-            MakeMessage(3),
+            MakeMessage(3)
         };
 
         var exception = await Record.ExceptionAsync(() =>
@@ -105,7 +107,7 @@ public class KafkaOutboxTransportSendTests
         {
             MakeMessage(1),
             MakeMessage(2),
-            MakeMessage(3),
+            MakeMessage(3)
         };
 
         await _transport.SendAsync("test-topic", "pk", messages, CancellationToken.None);
@@ -123,7 +125,7 @@ public class KafkaOutboxTransportSendTests
         var messages = new List<OutboxMessage>
         {
             MakeMessage(1),
-            MakeMessage(2),
+            MakeMessage(2)
         };
 
         var exception = await Record.ExceptionAsync(() =>
@@ -156,7 +158,7 @@ public class KafkaOutboxTransportSendTests
         var messages = new List<OutboxMessage>
         {
             MakeMessage(1),
-            MakeMessage(2),
+            MakeMessage(2)
         };
 
         var exception = await Record.ExceptionAsync(() =>
@@ -192,7 +194,7 @@ public class KafkaOutboxTransportSendTests
         {
             MakeMessage(1),
             MakeMessage(2),
-            MakeMessage(3),
+            MakeMessage(3)
         };
 
         var exception = await Record.ExceptionAsync(() =>
@@ -216,13 +218,13 @@ public class KafkaOutboxTransportSendTests
             MaxBatchSizeBytes = 200, // forces 1 message per sub-batch
             BootstrapServers = "localhost:9092",
             Acks = "All",
-            EnableIdempotence = true,
+            EnableIdempotence = true
         });
 
         var transport = new KafkaOutboxTransport(
             _producer,
             options,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<KafkaOutboxTransport>.Instance,
+            NullLogger<KafkaOutboxTransport>.Instance,
             Enumerable.Empty<ITransportMessageInterceptor<Message<string, byte[]>>>());
 
         // First sub-batch (message 1) succeeds, second sub-batch (message 2) fails entirely
@@ -245,7 +247,7 @@ public class KafkaOutboxTransportSendTests
         var messages = new List<OutboxMessage>
         {
             MakeMessage(1),
-            MakeMessage(2),
+            MakeMessage(2)
         };
 
         var exception = await Record.ExceptionAsync(() =>

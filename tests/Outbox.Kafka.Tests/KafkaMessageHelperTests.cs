@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using System.Text;
 using Outbox.Core.Models;
 using Xunit;
@@ -99,7 +101,7 @@ public class KafkaMessageHelperTests
     [Fact]
     public void EstimateMessageSize_MessageWithAllFields_ReturnsPositiveValue()
     {
-        var msg = MakeMessage(1, "payload", headers: new Dictionary<string, string> { {"key","value"} }, eventType: "SomeEvent");
+        var msg = MakeMessage(1, "payload", headers: new Dictionary<string, string> { { "key", "value" } }, eventType: "SomeEvent");
 
         var size = KafkaMessageHelper.EstimateMessageSize("partition-key", msg);
 
@@ -133,7 +135,7 @@ public class KafkaMessageHelperTests
     [Fact]
     public void ParseHeaders_ValidJson_ReturnsHeadersWithEntries()
     {
-        var dict = new Dictionary<string, string> { {"CorrelationId","abc"}, {"Source","svc"} };
+        var dict = new Dictionary<string, string> { { "CorrelationId", "abc" }, { "Source", "svc" } };
 
         var headers = KafkaMessageHelper.ParseHeaders(dict, "OrderCreated");
 
@@ -161,13 +163,13 @@ public class KafkaMessageHelperTests
     public void ParseHeaders_JsonContainsEventTypeKey_SkipsItAndUsesSystemEventType()
     {
         // User-supplied EventType should be ignored; system value wins
-        var dict = new Dictionary<string, string> { {"EventType","UserValue"}, {"Other","val"} };
+        var dict = new Dictionary<string, string> { { "EventType", "UserValue" }, { "Other", "val" } };
 
         var headers = KafkaMessageHelper.ParseHeaders(dict, "SystemEvent");
 
         var eventTypeHeaders = headers.Where(h => h.Key == "EventType").ToList();
         Assert.Single(eventTypeHeaders); // exactly one EventType header
         Assert.Equal("SystemEvent",
-            System.Text.Encoding.UTF8.GetString(eventTypeHeaders[0].GetValueBytes()));
+            Encoding.UTF8.GetString(eventTypeHeaders[0].GetValueBytes()));
     }
 }

@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Azure.Messaging.EventHubs;
 using Outbox.Core.Models;
 
@@ -16,6 +18,7 @@ internal static class EventHubMessageHelper
         }
 
         eventData.Properties["EventType"] = msg.EventType;
+
         return eventData;
     }
 }

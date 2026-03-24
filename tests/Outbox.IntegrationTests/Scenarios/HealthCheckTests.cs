@@ -1,3 +1,5 @@
+// Copyright (c) OrgName. All rights reserved.
+
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Outbox.IntegrationTests.Fixtures;
@@ -57,6 +59,7 @@ public class HealthCheckTests
             await OutboxTestHelper.WaitUntilAsync(async () =>
             {
                 var r = await healthCheckService.CheckHealthAsync();
+
                 return r.Entries["outbox"].Status == HealthStatus.Healthy;
             }, TimeSpan.FromSeconds(30), message: "Health should return to Healthy");
 
@@ -82,8 +85,8 @@ public class HealthCheckTests
             configureOptions: o =>
             {
                 OutboxTestHelper.FastTestOptions(o);
-                o.HeartbeatIntervalMs = 1_000;       // Fast heartbeat
-                o.HeartbeatTimeoutSeconds = 4;        // 4s timeout (>= 3x interval)
+                o.HeartbeatIntervalMs = 1_000; // Fast heartbeat
+                o.HeartbeatTimeoutSeconds = 4; // 4s timeout (>= 3x interval)
             },
             connectionFactory: connFactory);
 
@@ -111,6 +114,7 @@ public class HealthCheckTests
                 var r = await healthCheckService.CheckHealthAsync();
                 var status = r.Entries["outbox"].Status;
                 _output.WriteLine($"  Health: {status}");
+
                 return status == HealthStatus.Unhealthy;
             }, TimeSpan.FromSeconds(15), message: "Health should report Unhealthy after stale heartbeat");
 
@@ -122,6 +126,7 @@ public class HealthCheckTests
             await OutboxTestHelper.WaitUntilAsync(async () =>
             {
                 var r = await healthCheckService.CheckHealthAsync();
+
                 return r.Entries["outbox"].Status == HealthStatus.Healthy;
             }, TimeSpan.FromSeconds(30), message: "Health should recover after DB restored");
 

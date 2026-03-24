@@ -1,9 +1,11 @@
+// Copyright (c) OrgName. All rights reserved.
+
 namespace Outbox.Core.Models;
 
 /// <summary>
-/// Thrown by a transport when some messages in a batch were successfully sent
-/// but others failed. Allows the publisher to delete succeeded messages and
-/// only retry the failed ones.
+///     Thrown by a transport when some messages in a batch were successfully sent
+///     but others failed. Allows the publisher to delete succeeded messages and
+///     only retry the failed ones.
 /// </summary>
 public sealed class PartialSendException : Exception
 {
