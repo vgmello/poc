@@ -1,6 +1,8 @@
 // Copyright (c) OrgName. All rights reserved.
 
 using System.ComponentModel.DataAnnotations;
+using System.Data.Common;
+using Npgsql;
 using Outbox.PostgreSQL;
 using Xunit;
 
@@ -53,7 +55,7 @@ public class PostgreSqlStoreOptionsTests
     [InlineData("Schema123")]
     public void ValidSchemaName_SetsSuccessfully(string schemaName)
     {
-        var options = new PostgreSqlStoreOptions { SchemaName = schemaName };
+        var options = new PostgreSqlStoreOptions { SchemaName = schemaName, ConnectionString = "Host=localhost" };
         var results = Validate(options);
         Assert.Empty(results);
     }
@@ -87,7 +89,7 @@ public class PostgreSqlStoreOptionsTests
     [InlineData("_prefix")]
     public void TablePrefix_ValidPrefixes_Accepted(string prefix)
     {
-        var opts = new PostgreSqlStoreOptions { TablePrefix = prefix };
+        var opts = new PostgreSqlStoreOptions { TablePrefix = prefix, ConnectionString = "Host=localhost" };
         var results = Validate(opts);
         Assert.Empty(results);
     }
@@ -109,7 +111,7 @@ public class PostgreSqlStoreOptionsTests
     [Fact]
     public void TablePrefix_EmptyString_Allowed()
     {
-        var opts = new PostgreSqlStoreOptions { TablePrefix = "" };
+        var opts = new PostgreSqlStoreOptions { TablePrefix = "", ConnectionString = "Host=localhost" };
         var results = Validate(opts);
         Assert.Empty(results);
     }
@@ -163,5 +165,56 @@ public class PostgreSqlStoreOptionsTests
     {
         var opts = new PostgreSqlStoreOptions { SchemaName = "custom", SharedSchemaName = "shared" };
         Assert.Equal("shared", opts.GetSharedSchemaName());
+    }
+
+    [Fact]
+    public void ConnectionString_set_without_factory_is_valid()
+    {
+        var opts = new PostgreSqlStoreOptions { ConnectionString = "Host=localhost;Database=test" };
+        var results = Validate(opts);
+        Assert.DoesNotContain(results, r => r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionString)));
+    }
+
+    [Fact]
+    public void ConnectionFactory_set_without_connectionString_is_valid()
+    {
+        var opts = new PostgreSqlStoreOptions
+        {
+            ConnectionFactory = (_, _) => Task.FromResult<DbConnection>(new NpgsqlConnection())
+        };
+        var results = Validate(opts);
+        Assert.Empty(results.Where(r =>
+            r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionString)) ||
+            r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionFactory))));
+    }
+
+    [Fact]
+    public void Both_connectionString_and_factory_set_is_valid()
+    {
+        var opts = new PostgreSqlStoreOptions
+        {
+            ConnectionString = "Host=localhost;Database=test",
+            ConnectionFactory = (_, _) => Task.FromResult<DbConnection>(new NpgsqlConnection())
+        };
+        var results = Validate(opts);
+        Assert.Empty(results.Where(r =>
+            r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionString)) ||
+            r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionFactory))));
+    }
+
+    [Fact]
+    public void Neither_connectionString_nor_factory_is_invalid()
+    {
+        var opts = new PostgreSqlStoreOptions();
+        var results = Validate(opts);
+        Assert.Contains(results, r => r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionString)));
+    }
+
+    [Fact]
+    public void Empty_connectionString_without_factory_is_invalid()
+    {
+        var opts = new PostgreSqlStoreOptions { ConnectionString = "" };
+        var results = Validate(opts);
+        Assert.Contains(results, r => r.MemberNames.Contains(nameof(PostgreSqlStoreOptions.ConnectionString)));
     }
 }
