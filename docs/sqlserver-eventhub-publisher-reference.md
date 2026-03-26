@@ -412,7 +412,7 @@ END;
 
 **How it works, step by step:**
 
-1. Calculate **fair share** — `CEIL(total partitions / active publishers)`. With 32 partitions and 2 publishers, each gets 16.
+1. Calculate **fair share** — `CEIL(total partitions / active publishers)`. With 64 partitions and 2 publishers, each gets 32.
 2. If this publisher is **under** its fair share:
    - Mark stale publishers' partitions with a grace expiry (the grace period gives the original owner time to finish in-flight work)
    - Claim partitions that are unowned or past their grace expiry, using `UPDLOCK, READPAST` to avoid contention
@@ -609,7 +609,7 @@ Used by `DeletePublishedAsync`, `ReleaseLeaseAsync`, and `DeadLetterAsync` for t
 
 ## Timing diagram
 
-A typical lifecycle with one publisher and 32 partitions:
+A typical lifecycle with one publisher and 64 partitions:
 
 ```
 t=0s     RegisterPublisherAsync (MERGE into OutboxPublishers)
@@ -624,8 +624,8 @@ t=0.1s   LeaseBatchAsync → 0 messages (no partitions owned yet)
          Poll interval backs off to 200ms
 
 t=30s    RebalanceAsync runs
-         - 32 partitions / 1 publisher = 32 fair share
-         - Claims all 32 unowned partitions
+         - 64 partitions / 1 publisher = 64 fair share
+         - Claims all 64 unowned partitions
 
 t=30.1s  LeaseBatchAsync → up to 100 messages
          Send to Event Hub → DeletePublishedAsync
@@ -642,16 +642,16 @@ t=60s    OrphanSweepAsync (no orphans—all owned)
 --- Publisher B comes online ---
 
 t=90s    RebalanceAsync on Publisher A
-         - 32 partitions / 2 publishers = 16 fair share
-         - Publisher A owns 32, releases 16 (highest IDs)
+         - 64 partitions / 2 publishers = 32 fair share
+         - Publisher A owns 64, releases 32 (highest IDs)
 
          RebalanceAsync on Publisher B
-         - Claims 16 unowned partitions
+         - Claims 32 unowned partitions
 
 --- Publisher A shuts down ---
 
 t=???    UnregisterPublisherAsync
-         - Releases all 16 partitions (OwnerPublisherId = NULL)
+         - Releases all 32 partitions (OwnerPublisherId = NULL)
          - Deletes from OutboxPublishers
 
          Publisher B's next OrphanSweepAsync or RebalanceAsync

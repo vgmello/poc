@@ -245,15 +245,15 @@ This document defines all failure/error scenarios that must be validated through
 
 **Setup:**
 
-1. Start publisher A (should own all 32 partitions)
+1. Start publisher A (should own all 64 partitions)
 2. Insert 500 messages distributed across many partition keys
 
 **Test steps — Scale Up:**
 
-1. Verify publisher A owns all 32 partitions
+1. Verify publisher A owns all 64 partitions
 2. Start publisher B
 3. Wait for rebalance interval (30s)
-4. **Assert:** Partitions are split roughly 16/16 between A and B
+4. **Assert:** Partitions are split roughly 32/32 between A and B
 5. **Assert:** No messages were double-processed during rebalance (verify via consumer — no duplicates)
 6. **Assert:** No messages were dropped during handover (all 500 eventually delivered)
 7. Start publisher C

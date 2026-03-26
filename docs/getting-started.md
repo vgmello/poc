@@ -128,7 +128,7 @@ psql -d myapp -f src/Outbox.PostgreSQL/db_scripts/install.sql
 sqlcmd -d myapp -i src/Outbox.SqlServer/db_scripts/install.sql
 ```
 
-This creates four tables (`outbox`, `outbox_dead_letter`, `outbox_publishers`, `outbox_partitions`), indexes, diagnostic views, and seeds 32 partitions.
+This creates four tables (`outbox`, `outbox_dead_letter`, `outbox_publishers`, `outbox_partitions`), indexes, diagnostic views, and seeds 64 partitions.
 
 ## Writing messages to the outbox
 
@@ -239,9 +239,9 @@ app.MapPost("/dead-letters/replay", async (IDeadLetterManager dlm, long[] ids) =
 
 Scale horizontally by running multiple instances. Partitions are automatically distributed:
 
-- 1 publisher → owns all 32 partitions
-- 2 publishers → ~16 partitions each
-- 4 publishers → ~8 partitions each
+- 1 publisher → owns all 64 partitions
+- 2 publishers → ~32 partitions each
+- 4 publishers → ~16 partitions each
 
 Rebalancing happens automatically. Grace periods prevent dual processing during handover. See [architecture.md](architecture.md) for details.
 

@@ -215,7 +215,7 @@ The health check at `/health` reports three states:
     DELETE FROM outbox_publishers WHERE publisher_id = '<dead-publisher-id>';
     ```
 - Monitor for duplicate messages downstream
-- If multiple publishers die simultaneously, manually verify all 32 partitions are owned:
+- If multiple publishers die simultaneously, manually verify all 64 partitions are owned:
     ```sql
     SELECT COUNT(*) FROM outbox_partitions WHERE owner_publisher_id IS NULL;
     ```

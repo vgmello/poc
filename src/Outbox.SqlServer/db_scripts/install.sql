@@ -178,11 +178,11 @@ FROM dbo.OutboxDeadLetter;
 GO
 
 -- =============================================================================
--- SECTION 5: SEED DEFAULT PARTITIONS (32 partitions)
+-- SECTION 5: SEED DEFAULT PARTITIONS (64 partitions)
 -- =============================================================================
 
 DECLARE @i INT = 0;
-WHILE @i < 32
+WHILE @i < 64
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM dbo.OutboxPartitions WHERE OutboxTableName = N'Outbox' AND PartitionId = @i)
     BEGIN

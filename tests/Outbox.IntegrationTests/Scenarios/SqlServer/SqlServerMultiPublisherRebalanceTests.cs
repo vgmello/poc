@@ -25,7 +25,7 @@ public class SqlServerMultiPublisherRebalanceTests
         await SqlServerTestHelper.CleanupAsync(_infra.SqlServerConnectionString);
         var topic = OutboxTestHelper.UniqueTopic("ss-rebalance");
 
-        // Start publisher A — should own all 32 partitions
+        // Start publisher A — should own all 64 partitions
         var (hostA, _) = SqlServerTestHelper.BuildPublisherHost(
             _infra.SqlServerConnectionString, _infra.BootstrapServers);
         await hostA.StartAsync();
@@ -34,11 +34,11 @@ public class SqlServerMultiPublisherRebalanceTests
         {
             var owners = await SqlServerTestHelper.GetPartitionOwnersAsync(_infra.SqlServerConnectionString);
 
-            return owners.Values.Count(v => v != null) == 32;
-        }, TimeSpan.FromSeconds(15), message: "A should own all 32 partitions");
+            return owners.Values.Count(v => v != null) == 64;
+        }, TimeSpan.FromSeconds(15), message: "A should own all 64 partitions");
 
         var publishers = await SqlServerTestHelper.GetPublisherIdsAsync(_infra.SqlServerConnectionString);
-        _output.WriteLine($"A owns 32 partitions. PublisherId: {publishers[0]}");
+        _output.WriteLine($"A owns 64 partitions. PublisherId: {publishers[0]}");
 
         // Start publisher B
         var (hostB, _) = SqlServerTestHelper.BuildPublisherHost(
@@ -51,8 +51,8 @@ public class SqlServerMultiPublisherRebalanceTests
             var owners = await SqlServerTestHelper.GetPartitionOwnersAsync(_infra.SqlServerConnectionString);
             var grouped = owners.Values.Where(v => v != null).GroupBy(v => v).ToList();
 
-            return grouped.Count == 2 && grouped.All(g => g.Count() >= 12); // ~16 each, allowing some variance
-        }, TimeSpan.FromSeconds(30), message: "Partitions should be split roughly 16/16");
+            return grouped.Count == 2 && grouped.All(g => g.Count() >= 24); // ~32 each, allowing some variance
+        }, TimeSpan.FromSeconds(30), message: "Partitions should be split roughly 32/32");
 
         var ownersAfter = await SqlServerTestHelper.GetPartitionOwnersAsync(_infra.SqlServerConnectionString);
         var distribution = ownersAfter.Values.Where(v => v != null).GroupBy(v => v)
@@ -74,9 +74,9 @@ public class SqlServerMultiPublisherRebalanceTests
         {
             var owners = await SqlServerTestHelper.GetPartitionOwnersAsync(_infra.SqlServerConnectionString);
 
-            return owners.Values.Count(v => v != null) == 32
+            return owners.Values.Count(v => v != null) == 64
                    && owners.Values.Distinct().Count(v => v != null) == 1;
-        }, TimeSpan.FromSeconds(30), message: "A should reclaim all 32 partitions after B stops");
+        }, TimeSpan.FromSeconds(30), message: "A should reclaim all 64 partitions after B stops");
 
         _output.WriteLine("A reclaimed all partitions after B stopped");
 

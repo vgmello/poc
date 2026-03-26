@@ -25,7 +25,7 @@ public class MultiPublisherRebalanceTests
         await OutboxTestHelper.CleanupAsync(_infra.ConnectionString);
         var topic = OutboxTestHelper.UniqueTopic("rebalance");
 
-        // Start publisher A — should own all 32 partitions
+        // Start publisher A — should own all 64 partitions
         var (hostA, _) = OutboxTestHelper.BuildPublisherHost(
             _infra.ConnectionString, _infra.BootstrapServers);
         await hostA.StartAsync();
@@ -34,11 +34,11 @@ public class MultiPublisherRebalanceTests
         {
             var owners = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
 
-            return owners.Values.Count(v => v != null) == 32;
-        }, TimeSpan.FromSeconds(15), message: "A should own all 32 partitions");
+            return owners.Values.Count(v => v != null) == 64;
+        }, TimeSpan.FromSeconds(15), message: "A should own all 64 partitions");
 
         var publishers = await OutboxTestHelper.GetPublisherIdsAsync(_infra.ConnectionString);
-        _output.WriteLine($"A owns 32 partitions. PublisherId: {publishers[0]}");
+        _output.WriteLine($"A owns 64 partitions. PublisherId: {publishers[0]}");
 
         // Start publisher B
         var (hostB, _) = OutboxTestHelper.BuildPublisherHost(
@@ -51,8 +51,8 @@ public class MultiPublisherRebalanceTests
             var owners = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
             var grouped = owners.Values.Where(v => v != null).GroupBy(v => v).ToList();
 
-            return grouped.Count == 2 && grouped.All(g => g.Count() >= 12); // ~16 each, allowing some variance
-        }, TimeSpan.FromSeconds(30), message: "Partitions should be split roughly 16/16");
+            return grouped.Count == 2 && grouped.All(g => g.Count() >= 24); // ~32 each, allowing some variance
+        }, TimeSpan.FromSeconds(30), message: "Partitions should be split roughly 32/32");
 
         var ownersAfter = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
         var distribution = ownersAfter.Values.Where(v => v != null).GroupBy(v => v)
@@ -74,9 +74,9 @@ public class MultiPublisherRebalanceTests
         {
             var owners = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
 
-            return owners.Values.Count(v => v != null) == 32
+            return owners.Values.Count(v => v != null) == 64
                    && owners.Values.Distinct().Count(v => v != null) == 1;
-        }, TimeSpan.FromSeconds(30), message: "A should reclaim all 32 partitions after B stops");
+        }, TimeSpan.FromSeconds(30), message: "A should reclaim all 64 partitions after B stops");
 
         _output.WriteLine("A reclaimed all partitions after B stopped");
 

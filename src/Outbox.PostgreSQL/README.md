@@ -23,7 +23,7 @@ Run `db_scripts/install.sql` against your database to create the schema. The scr
 
 ## Schema
 
-Four tables, three indexes, two diagnostic views, and a 32-partition seed:
+Four tables, three indexes, two diagnostic views, and a 64-partition seed:
 
 | Table | Purpose |
 |---|---|

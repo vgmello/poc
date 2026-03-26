@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Tables: outbox, outbox_dead_letter, outbox_publishers, outbox_partitions
 -- Indexes: partial/covering indexes for efficient polling
--- Seeds: 32 partitions
+-- Seeds: 64 partitions
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -129,9 +129,9 @@ SELECT dead_letter_seq, sequence_number, topic_name, partition_key, event_type,
 FROM outbox_dead_letter;
 
 -- ---------------------------------------------------------------------------
--- Seed 32 partitions (idempotent)
+-- Seed 64 partitions (idempotent)
 -- ---------------------------------------------------------------------------
 INSERT INTO outbox_partitions (outbox_table_name, partition_id, owner_publisher_id, owned_since_utc, grace_expires_utc)
 SELECT 'outbox', g, NULL, NULL, NULL
-FROM generate_series(0, 31) AS g
+FROM generate_series(0, 63) AS g
 ON CONFLICT (outbox_table_name, partition_id) DO NOTHING;
