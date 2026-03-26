@@ -89,6 +89,93 @@ Messages with **different partition keys** have no ordering guarantee. If you ne
 
 A successfully sent message that fails to delete (e.g., database hiccup after the broker acknowledged) will be re-delivered on the next poll. Consumers must be idempotent. Use `SequenceNumber` as a deduplication key.
 
+## Publisher groups
+
+A publisher group is a configuration unit that binds a publisher to a specific outbox table. Each group operates on its own `outbox` + `dead_letter` table pair while sharing the `outbox_publishers` and `outbox_partitions` infrastructure tables.
+
+### Why groups exist
+
+Without groups, all publishers in a deployment compete for the same outbox table. If a service has multiple bounded contexts (orders, notifications, billing), their messages share a single retry/dead-letter pipeline. A poison message storm in one context can starve the others.
+
+Groups solve this by letting each context have its own outbox table, its own dead-letter table, and its own partition pool — while still sharing the lightweight infrastructure tables that coordinate publisher ownership.
+
+### How outbox_table_name works
+
+The `outbox_publishers` and `outbox_partitions` tables have an `outbox_table_name` column that scopes all operations. This column stores the bare table name of the outbox data table the publisher reads from (e.g., `outbox`, `orders_outbox`).
+
+```
+outbox_partitions
+┌───────────────────┬──────────────┬────────────────────┐
+│ outbox_table_name │ partition_id │ owner_publisher_id  │
+├───────────────────┼──────────────┼────────────────────┤
+│ outbox            │ 0            │ outbox-publisher-a1 │
+│ outbox            │ 1            │ outbox-publisher-a1 │
+│ orders_outbox     │ 0            │ orders-pub-b2      │
+│ orders_outbox     │ 1            │ orders-pub-b2      │
+│ orders_outbox     │ 2            │ orders-pub-b3      │
+└───────────────────┴──────────────┴────────────────────┘
+```
+
+Every query that touches these tables — heartbeat, rebalance, lease, sweep — filters by `outbox_table_name`. This means:
+
+- Publishers registered against `outbox` only see and compete for `outbox` partitions
+- Publishers registered against `orders_outbox` only see and compete for `orders_outbox` partitions
+- Fair-share calculation is scoped: `ceil(partitions_for_this_table / active_publishers_for_this_table)`
+- Each outbox table can have a different number of partitions
+
+### The group is the outbox table assignment
+
+A group doesn't introduce a new abstraction — it simply answers "which outbox table does this publisher read from?" The group name (`"orders"`) is a human-readable label used for:
+
+- Prefixing the publisher ID: `orders-outbox-publisher-{guid}`
+- Keying DI services so each group has its own store, transport, and health state
+- Naming the meter: `orders.Outbox.Publisher`
+- Tagging logs with `OutboxGroup = "orders"`
+
+If two groups point to the same outbox table, they share the same partition pool and rebalance together. This is intentional — the `outbox_table_name` is the real grouping key, not the group name.
+
+### Registration
+
+```csharp
+// Default — single outbox table, no group name
+services.AddOutbox(config, outbox =>
+{
+    outbox.UsePostgreSql(connectionFactory);
+    outbox.UseKafka();
+});
+
+// Multiple groups — each with its own outbox + dead_letter table
+services.AddOutbox("orders", config, outbox =>
+{
+    outbox.UsePostgreSql(connectionFactory, o => o.TablePrefix = "orders_");
+    outbox.UseKafka();
+});
+
+services.AddOutbox("notifications", config, outbox =>
+{
+    outbox.UsePostgreSql(connectionFactory, o => o.TablePrefix = "notifications_");
+    outbox.UseKafka();
+});
+```
+
+Each `AddOutbox` call registers a fully independent `OutboxPublisherService` instance with its own 5 background loops, its own circuit breakers, its own health check, and its own metrics. Groups don't share any runtime state.
+
+### Database layout with groups
+
+```
+Shared infrastructure (one set per database):
+  outbox_publishers    — all publishers across all groups, scoped by outbox_table_name
+  outbox_partitions    — all partitions across all groups, scoped by outbox_table_name
+
+Per-group data tables:
+  outbox               — default group's messages
+  outbox_dead_letter   — default group's dead letters
+  orders_outbox        — orders group's messages
+  orders_outbox_dead_letter — orders group's dead letters
+```
+
+The infrastructure tables use `SharedSchemaName` (defaults to the same schema as data tables). Per-group data tables use the `TablePrefix` to derive their names.
+
 ## Partition ownership
 
 Messages are distributed across logical partitions using a hash of the partition key:
@@ -97,7 +184,7 @@ Messages are distributed across logical partitions using a hash of the partition
 partition_id = hash(partition_key) % total_partitions
 ```
 
-PostgreSQL uses `hashtext()` and SQL Server uses `CHECKSUM()`—different functions, producing different mappings. By default, 32 partitions are seeded.
+PostgreSQL uses `hashtext()` and SQL Server uses `CHECKSUM()`—different functions, producing different mappings. By default, 32 partitions are seeded per outbox table. Each group can have a different partition count, configured in the install script.
 
 ### How ownership is distributed
 
@@ -166,6 +253,8 @@ The publisher exposes an ASP.NET Core health check under the name `"outbox"`.
 
 The health check reflects the publisher's internal state only. Database and broker connectivity are left to infrastructure health checks.
 
+When using publisher groups, each group registers its own health check (e.g., `"outbox-orders"`, `"outbox-notifications"`) with independent state — one group going unhealthy doesn't affect others.
+
 ## Loop coordination and restart
 
 All five loops run inside a shared cancellation scope. If any loop exits (crash or completion), the linked `CancellationTokenSource` cancels the others. After all loops stop:
@@ -177,7 +266,7 @@ All five loops run inside a shared cancellation scope. If any loop exits (crash 
 
 ## Observability
 
-### Metrics (meter: `"Outbox"`)
+### Metrics (meter: `"Outbox"`, or `"{groupName}.Outbox"` when using publisher groups)
 
 | Metric                                 | Type           | Description                   |
 | -------------------------------------- | -------------- | ----------------------------- |
@@ -192,7 +281,7 @@ All five loops run inside a shared cancellation scope. If any loop exits (crash 
 
 ### Distributed tracing
 
-An `ActivitySource` named `"Outbox"` creates one activity per `(topic, partitionKey)` group, tagged with `messaging.destination.name` and `messaging.batch.message_count`.
+An `ActivitySource` named `"Outbox"` (or `"{groupName}.Outbox"` when using publisher groups) creates one activity per `(topic, partitionKey)` group, tagged with `messaging.destination.name` and `messaging.batch.message_count`.
 
 ## Event handler callbacks
 
@@ -223,6 +312,7 @@ All publisher options are in the `"Outbox:Publisher"` configuration section and 
 
 | Option                              | Default | Description                            |
 | ----------------------------------- | ------- | -------------------------------------- |
+| `GroupName`                         | null    | Publisher group name (null = default)  |
 | `BatchSize`                         | 100     | Messages per poll                      |
 | `LeaseDurationSeconds`              | 45      | Lock duration per message              |
 | `MaxRetryCount`                     | 5       | Retries before dead-lettering          |
