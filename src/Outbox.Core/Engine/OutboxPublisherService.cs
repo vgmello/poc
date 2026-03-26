@@ -863,7 +863,7 @@ internal sealed class OutboxPublisherService : BackgroundService
             "BatchSize={BatchSize}, LeaseDuration={LeaseDuration}s, MaxRetry={MaxRetry}, " +
             "Poll={MinPoll}-{MaxPoll}ms, Heartbeat={HbInterval}ms/timeout={HbTimeout}s, " +
             "GracePeriod={Grace}s, CircuitBreaker={CbThreshold}failures/{CbDuration}s, " +
-            "Interceptors={InterceptorCount}",
+            "PublishThreads={PublishThreads}, Interceptors={InterceptorCount}",
             opts.BatchSize,
             opts.LeaseDurationSeconds,
             opts.MaxRetryCount,
@@ -874,6 +874,7 @@ internal sealed class OutboxPublisherService : BackgroundService
             opts.PartitionGracePeriodSeconds,
             opts.CircuitBreakerFailureThreshold,
             opts.CircuitBreakerOpenDurationSeconds,
+            opts.PublishThreadCount,
             _interceptors.Count);
     }
 }
