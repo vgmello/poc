@@ -439,3 +439,6 @@ temp/
 
 # Perf Tests Results
 **/tests/**/results
+
+# Git worktrees
+.worktrees/
