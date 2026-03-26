@@ -46,9 +46,9 @@ public class GracefulShutdownTests
         hostA.Dispose();
         _output.WriteLine("Host A stopped gracefully");
 
-        // Assert: producer unregistered
-        var producers = await OutboxTestHelper.GetProducerIdsAsync(_infra.ConnectionString);
-        Assert.Empty(producers);
+        // Assert: publisher unregistered
+        var publishers = await OutboxTestHelper.GetPublisherIdsAsync(_infra.ConnectionString);
+        Assert.Empty(publishers);
 
         // Assert: leased messages have leased_until_utc = NULL (released, not waiting for 120s expiry)
         var remaining = await OutboxTestHelper.GetOutboxCountAsync(_infra.ConnectionString);

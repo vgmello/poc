@@ -14,17 +14,19 @@ public sealed class OutboxHealthCheck : IHealthCheck
 {
     private readonly OutboxHealthState _state;
     private readonly IOptionsMonitor<OutboxPublisherOptions> _options;
+    private readonly string? _groupName;
 
-    public OutboxHealthCheck(OutboxHealthState state, IOptionsMonitor<OutboxPublisherOptions> options)
+    public OutboxHealthCheck(OutboxHealthState state, IOptionsMonitor<OutboxPublisherOptions> options, string? groupName = null)
     {
         _state = state;
         _options = options;
+        _groupName = groupName;
     }
 
     public Task<HealthCheckResult> CheckHealthAsync(
         HealthCheckContext context, CancellationToken cancellationToken = default)
     {
-        var opts = _options.CurrentValue;
+        var opts = _options.Get(_groupName ?? Microsoft.Extensions.Options.Options.DefaultName);
         var now = DateTimeOffset.UtcNow;
         var data = new Dictionary<string, object>
         {

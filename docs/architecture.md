@@ -105,9 +105,9 @@ Three background loops manage partition assignment:
 
 **Heartbeat loop** (every 10s) — Updates `last_heartbeat_utc` for this publisher and cancels any pending grace period on its partitions. This signals "I'm still alive."
 
-**Rebalance loop** (every 30s) — Computes a fair share (`ceil(total_partitions / active_producers)`) and:
+**Rebalance loop** (every 30s) — Computes a fair share (`ceil(total_partitions / active_publishers)`) and:
 
-1. Marks stale producers' partitions with a grace period
+1. Marks stale publishers' partitions with a grace period
 2. Claims unowned or grace-expired partitions up to the fair share
 3. Releases excess partitions if over the fair share
 
@@ -115,9 +115,9 @@ Three background loops manage partition assignment:
 
 ### The grace period
 
-When a producer stops heartbeating, its partitions aren't immediately reassigned. Instead, they enter a grace period (`PartitionGracePeriodSeconds`, default 60s). The grace period must be strictly longer than `LeaseDurationSeconds` (default 45s) to prevent two publishers from processing the same partition simultaneously.
+When a publisher stops heartbeating, its partitions aren't immediately reassigned. Instead, they enter a grace period (`PartitionGracePeriodSeconds`, default 60s). The grace period must be strictly longer than `LeaseDurationSeconds` (default 45s) to prevent two publishers from processing the same partition simultaneously.
 
-If the original producer comes back and heartbeats, the grace period is cancelled. If it doesn't, the partition becomes claimable.
+If the original publisher comes back and heartbeats, the grace period is cancelled. If it doesn't, the partition becomes claimable.
 
 ## Circuit breaker
 

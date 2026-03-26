@@ -3,6 +3,7 @@
 using System.Text;
 using Outbox.Core.Abstractions;
 using Outbox.Core.Models;
+using Outbox.Core.Options;
 using Xunit;
 
 namespace Outbox.Core.Tests;
@@ -174,10 +175,17 @@ public class ModelTests
         await handler.OnMessageDeadLetteredAsync(msg, default);
         await handler.OnPublishFailedAsync(new[] { msg }, new Exception("fail"), default);
         await handler.OnCircuitBreakerStateChangedAsync("topic", CircuitState.Open, default);
-        await handler.OnRebalanceAsync("producer-1", [0, 1], default);
+        await handler.OnRebalanceAsync("publisher-1", [0, 1], default);
 
         // All default implementations simply return Task.CompletedTask — reaching here means they completed successfully.
         Assert.True(true, "All default interface methods completed without throwing");
+    }
+
+    [Fact]
+    public void OutboxPublisherOptions_GroupName_DefaultsToNull()
+    {
+        var opts = new OutboxPublisherOptions();
+        Assert.Null(opts.GroupName);
     }
 
     private sealed class MinimalEventHandler : IOutboxEventHandler

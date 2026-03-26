@@ -10,6 +10,8 @@ internal sealed class OutboxInstrumentation : IDisposable
     public const string ActivitySourceName = "Outbox";
     public const string MeterName = "Outbox";
 
+    public string? GroupName { get; }
+
     public ActivitySource ActivitySource { get; }
     public Meter Meter { get; }
 
@@ -23,10 +25,12 @@ internal sealed class OutboxInstrumentation : IDisposable
     public Histogram<int> BatchSize { get; }
     public ObservableGauge<long> MessagesPending { get; private set; } = null!;
 
-    public OutboxInstrumentation(IMeterFactory meterFactory)
+    public OutboxInstrumentation(IMeterFactory meterFactory, string? groupName = null)
     {
-        ActivitySource = new ActivitySource(ActivitySourceName);
-        Meter = meterFactory.Create(MeterName);
+        GroupName = groupName;
+        var meterName = groupName is not null ? $"{groupName}.Outbox" : MeterName;
+        ActivitySource = new ActivitySource(meterName);
+        Meter = meterFactory.Create(meterName);
 
         MessagesPublished = Meter.CreateCounter<long>(
             "outbox.messages.published",

@@ -47,9 +47,9 @@ public class SqlServerGracefulShutdownTests
         hostA.Dispose();
         _output.WriteLine("Host A stopped gracefully");
 
-        // Assert: producer unregistered
-        var producers = await SqlServerTestHelper.GetProducerIdsAsync(_infra.SqlServerConnectionString);
-        Assert.Empty(producers);
+        // Assert: publisher unregistered
+        var publishers = await SqlServerTestHelper.GetPublisherIdsAsync(_infra.SqlServerConnectionString);
+        Assert.Empty(publishers);
 
         // Assert: leased messages have LeasedUntilUtc = NULL (released, not waiting for 120s expiry)
         var remaining = await SqlServerTestHelper.GetOutboxCountAsync(_infra.SqlServerConnectionString);

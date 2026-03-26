@@ -1,6 +1,7 @@
 // Copyright (c) OrgName. All rights reserved.
 
 using System.Diagnostics;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -27,39 +28,54 @@ internal sealed class OutboxPublisherService : BackgroundService
     private readonly OutboxHealthState _healthState;
     private readonly IHostApplicationLifetime _appLifetime;
     private readonly List<IOutboxMessageInterceptor> _interceptors;
+    private readonly string? _groupName;
 
     public OutboxPublisherService(
-        IOutboxStore store,
-        IOutboxTransport transport,
-        IOutboxEventHandler eventHandler,
+        IServiceProvider serviceProvider,
         IOptionsMonitor<OutboxPublisherOptions> options,
-        ILogger<OutboxPublisherService> logger,
-        OutboxInstrumentation instrumentation,
-        OutboxHealthState healthState,
         IHostApplicationLifetime appLifetime,
-        IEnumerable<IOutboxMessageInterceptor> interceptors)
+        string? groupName = null)
     {
-        _store = store;
-        _transport = transport;
-        _eventHandler = eventHandler;
+        _groupName = groupName;
         _options = options;
-        _logger = logger;
-        _instrumentation = instrumentation;
-        _healthState = healthState;
         _appLifetime = appLifetime;
-        _interceptors = interceptors.ToList();
+        _logger = serviceProvider.GetRequiredService<ILoggerFactory>().CreateLogger<OutboxPublisherService>();
+
+        if (groupName is not null)
+        {
+            _store = serviceProvider.GetRequiredKeyedService<IOutboxStore>(groupName);
+            _transport = serviceProvider.GetRequiredKeyedService<IOutboxTransport>(groupName);
+            _eventHandler = serviceProvider.GetKeyedService<IOutboxEventHandler>(groupName)
+                ?? serviceProvider.GetRequiredService<IOutboxEventHandler>();
+            _instrumentation = serviceProvider.GetRequiredKeyedService<OutboxInstrumentation>(groupName);
+            _healthState = serviceProvider.GetRequiredKeyedService<OutboxHealthState>(groupName);
+            _interceptors = serviceProvider.GetKeyedServices<IOutboxMessageInterceptor>(groupName).ToList();
+        }
+        else
+        {
+            _store = serviceProvider.GetRequiredService<IOutboxStore>();
+            _transport = serviceProvider.GetRequiredService<IOutboxTransport>();
+            _eventHandler = serviceProvider.GetRequiredService<IOutboxEventHandler>();
+            _instrumentation = serviceProvider.GetRequiredService<OutboxInstrumentation>();
+            _healthState = serviceProvider.GetRequiredService<OutboxHealthState>();
+            _interceptors = serviceProvider.GetServices<IOutboxMessageInterceptor>().ToList();
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var opts = _options.CurrentValue;
+        var opts = GetOptions();
         LogConfigurationSummary(opts);
+
+        using var groupScope = _groupName is not null
+            ? _logger.BeginScope(new Dictionary<string, object?> { ["OutboxGroup"] = _groupName })
+            : null;
 
         var circuitBreaker = new TopicCircuitBreaker(
             opts.CircuitBreakerFailureThreshold,
             opts.CircuitBreakerOpenDurationSeconds);
 
-        string producerId = null!;
+        string publisherId = null!;
         var attempt = 0;
 
         while (!stoppingToken.IsCancellationRequested)
@@ -68,7 +84,7 @@ internal sealed class OutboxPublisherService : BackgroundService
 
             try
             {
-                producerId = await _store.RegisterProducerAsync(stoppingToken);
+                publisherId = await _store.RegisterPublisherAsync(stoppingToken);
 
                 break;
             }
@@ -80,7 +96,7 @@ internal sealed class OutboxPublisherService : BackgroundService
             {
                 var delay = TimeSpan.FromSeconds(Math.Min(2 * Math.Pow(2, attempt - 1), 60));
                 _logger.LogError(ex,
-                    "Failed to register outbox producer (attempt {Attempt}), retrying in {Delay:F0}s",
+                    "Failed to register outbox publisher (attempt {Attempt}), retrying in {Delay:F0}s",
                     attempt, delay.TotalSeconds);
 
                 try { await Task.Delay(delay, stoppingToken); }
@@ -91,13 +107,13 @@ internal sealed class OutboxPublisherService : BackgroundService
         if (stoppingToken.IsCancellationRequested)
             return;
 
-        _logger.LogInformation("Outbox publisher registered as producer {ProducerId}", producerId);
+        _logger.LogInformation("Outbox publisher registered as publisher {PublisherId}", publisherId);
 
         _instrumentation.RegisterPendingGauge();
 
         try
         {
-            await RunLoopsWithRestartAsync(producerId, circuitBreaker, stoppingToken);
+            await RunLoopsWithRestartAsync(publisherId, circuitBreaker, stoppingToken);
         }
         finally
         {
@@ -105,12 +121,12 @@ internal sealed class OutboxPublisherService : BackgroundService
 
             try
             {
-                await _store.UnregisterProducerAsync(producerId, CancellationToken.None);
-                _logger.LogInformation("Outbox publisher unregistered producer {ProducerId}", producerId);
+                await _store.UnregisterPublisherAsync(publisherId, CancellationToken.None);
+                _logger.LogInformation("Outbox publisher unregistered publisher {PublisherId}", publisherId);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to unregister producer {ProducerId} during shutdown", producerId);
+                _logger.LogWarning(ex, "Failed to unregister publisher {PublisherId} during shutdown", publisherId);
             }
         }
     }
@@ -121,7 +137,7 @@ internal sealed class OutboxPublisherService : BackgroundService
     ///     After <see cref="MaxConsecutiveRestarts" /> consecutive failures, the host is stopped.
     /// </summary>
     private async Task RunLoopsWithRestartAsync(
-        string producerId, TopicCircuitBreaker circuitBreaker, CancellationToken stoppingToken)
+        string publisherId, TopicCircuitBreaker circuitBreaker, CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -134,10 +150,10 @@ internal sealed class OutboxPublisherService : BackgroundService
             {
                 var tasks = new[]
                 {
-                    PublishLoopAsync(producerId, circuitBreaker, ct),
-                    HeartbeatLoopAsync(producerId, ct),
-                    RebalanceLoopAsync(producerId, ct),
-                    OrphanSweepLoopAsync(producerId, ct),
+                    PublishLoopAsync(publisherId, circuitBreaker, ct),
+                    HeartbeatLoopAsync(publisherId, ct),
+                    RebalanceLoopAsync(publisherId, ct),
+                    OrphanSweepLoopAsync(publisherId, ct),
                     DeadLetterSweepLoopAsync(ct)
                 };
 
@@ -216,9 +232,9 @@ internal sealed class OutboxPublisherService : BackgroundService
     }
 
     private async Task PublishLoopAsync(
-        string producerId, TopicCircuitBreaker circuitBreaker, CancellationToken ct)
+        string publisherId, TopicCircuitBreaker circuitBreaker, CancellationToken ct)
     {
-        var opts = _options.CurrentValue;
+        var opts = GetOptions();
         var pollIntervalMs = opts.MinPollIntervalMs;
 
         // Reset restart counter after sustained healthy operation (30s of successful polling
@@ -230,11 +246,11 @@ internal sealed class OutboxPublisherService : BackgroundService
         {
             try
             {
-                opts = _options.CurrentValue;
+                opts = GetOptions();
                 var pollSw = Stopwatch.StartNew();
 
                 var batch = await _store.LeaseBatchAsync(
-                    producerId, opts.BatchSize, opts.LeaseDurationSeconds,
+                    publisherId, opts.BatchSize, opts.LeaseDurationSeconds,
                     opts.MaxRetryCount, ct);
 
                 pollSw.Stop();
@@ -271,7 +287,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                 if (poison.Count > 0)
                 {
                     await _store.DeadLetterAsync(
-                        producerId,
+                        publisherId,
                         poison.Select(m => m.SequenceNumber).ToList(),
                         "Max retry count exceeded",
                         CancellationToken.None);
@@ -316,7 +332,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                         if (circuitBreaker.IsOpen(topicName))
                         {
                             // Circuit open — release without incrementing retry count.
-                            await _store.ReleaseLeaseAsync(producerId, sequenceNumbers,
+                            await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
                                 incrementRetry: false, CancellationToken.None);
                             foreach (var sn in sequenceNumbers)
                                 unprocessedSequences.Remove(sn);
@@ -383,7 +399,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                             // Delete from outbox — separate try since transport already succeeded.
                             try
                             {
-                                await _store.DeletePublishedAsync(producerId, sequenceNumbers, ct);
+                                await _store.DeletePublishedAsync(publisherId, sequenceNumbers, ct);
                             }
                             catch (Exception deleteEx)
                             {
@@ -394,7 +410,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                                 // Release WITHOUT retry increment — transport succeeded.
                                 try
                                 {
-                                    await _store.ReleaseLeaseAsync(producerId, sequenceNumbers,
+                                    await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
                                         incrementRetry: false, CancellationToken.None);
                                 }
                                 catch (Exception releaseEx)
@@ -423,7 +439,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                             // Delete the succeeded messages — they're already on the broker
                             try
                             {
-                                await _store.DeletePublishedAsync(producerId, pex.SucceededSequenceNumbers, CancellationToken.None);
+                                await _store.DeletePublishedAsync(publisherId, pex.SucceededSequenceNumbers, CancellationToken.None);
                                 _instrumentation.MessagesPublished.Add(pex.SucceededSequenceNumbers.Count);
                                 _healthState.RecordSuccessfulPublish();
                                 // Only remove from safety net after successful delete
@@ -438,7 +454,7 @@ internal sealed class OutboxPublisherService : BackgroundService
 
                                 try
                                 {
-                                    await _store.ReleaseLeaseAsync(producerId, pex.SucceededSequenceNumbers,
+                                    await _store.ReleaseLeaseAsync(publisherId, pex.SucceededSequenceNumbers,
                                         incrementRetry: false, CancellationToken.None);
                                     // Only remove from safety net after successful release
                                     foreach (var sn in pex.SucceededSequenceNumbers)
@@ -456,7 +472,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                             // Release the failed messages with retry increment
                             try
                             {
-                                await _store.ReleaseLeaseAsync(producerId, pex.FailedSequenceNumbers,
+                                await _store.ReleaseLeaseAsync(publisherId, pex.FailedSequenceNumbers,
                                     incrementRetry: true, CancellationToken.None);
                                 // Only remove from safety net after successful release
                                 foreach (var sn in pex.FailedSequenceNumbers)
@@ -514,7 +530,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                             // so the retry count is correctly incremented.
                             try
                             {
-                                await _store.ReleaseLeaseAsync(producerId, sequenceNumbers,
+                                await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
                                     incrementRetry: true, CancellationToken.None);
                                 // Only remove from safety net after successful release
                                 foreach (var sn in sequenceNumbers)
@@ -572,7 +588,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                         try
                         {
                             await _store.ReleaseLeaseAsync(
-                                producerId,
+                                publisherId,
                                 unprocessedSequences.ToList(),
                                 incrementRetry: false,
                                 CancellationToken.None);
@@ -610,7 +626,7 @@ internal sealed class OutboxPublisherService : BackgroundService
 
                 try
                 {
-                    await Task.Delay(_options.CurrentValue.MaxPollIntervalMs, ct);
+                    await Task.Delay(GetOptions().MaxPollIntervalMs, ct);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -620,7 +636,7 @@ internal sealed class OutboxPublisherService : BackgroundService
         }
     }
 
-    private async Task HeartbeatLoopAsync(string producerId, CancellationToken ct)
+    private async Task HeartbeatLoopAsync(string publisherId, CancellationToken ct)
     {
         var consecutiveFailures = 0;
         const int maxConsecutiveHeartbeatFailures = 3;
@@ -629,8 +645,8 @@ internal sealed class OutboxPublisherService : BackgroundService
         {
             try
             {
-                await Task.Delay(_options.CurrentValue.HeartbeatIntervalMs, ct);
-                await _store.HeartbeatAsync(producerId, ct);
+                await Task.Delay(GetOptions().HeartbeatIntervalMs, ct);
+                await _store.HeartbeatAsync(publisherId, ct);
                 _healthState.RecordHeartbeat();
                 consecutiveFailures = 0;
 
@@ -668,25 +684,25 @@ internal sealed class OutboxPublisherService : BackgroundService
         }
     }
 
-    private async Task RebalanceLoopAsync(string producerId, CancellationToken ct)
+    private async Task RebalanceLoopAsync(string publisherId, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(_options.CurrentValue.RebalanceIntervalMs, ct);
-                await _store.RebalanceAsync(producerId, ct);
-                var ownedPartitions = await _store.GetOwnedPartitionsAsync(producerId, ct);
+                await Task.Delay(GetOptions().RebalanceIntervalMs, ct);
+                await _store.RebalanceAsync(publisherId, ct);
+                var ownedPartitions = await _store.GetOwnedPartitionsAsync(publisherId, ct);
 
                 try
                 {
-                    await _eventHandler.OnRebalanceAsync(producerId, ownedPartitions, ct);
+                    await _eventHandler.OnRebalanceAsync(publisherId, ownedPartitions, ct);
                 }
                 catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
                 {
                     _logger.LogWarning(handlerEx,
-                        "OnRebalanceAsync handler threw for producer {ProducerId} — continuing",
-                        producerId);
+                        "OnRebalanceAsync handler threw for publisher {PublisherId} — continuing",
+                        publisherId);
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -700,14 +716,14 @@ internal sealed class OutboxPublisherService : BackgroundService
         }
     }
 
-    private async Task OrphanSweepLoopAsync(string producerId, CancellationToken ct)
+    private async Task OrphanSweepLoopAsync(string publisherId, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(_options.CurrentValue.OrphanSweepIntervalMs, ct);
-                await _store.ClaimOrphanPartitionsAsync(producerId, ct);
+                await Task.Delay(GetOptions().OrphanSweepIntervalMs, ct);
+                await _store.ClaimOrphanPartitionsAsync(publisherId, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -726,8 +742,8 @@ internal sealed class OutboxPublisherService : BackgroundService
         {
             try
             {
-                await Task.Delay(_options.CurrentValue.DeadLetterSweepIntervalMs, ct);
-                await _store.SweepDeadLettersAsync(_options.CurrentValue.MaxRetryCount, ct);
+                await Task.Delay(GetOptions().DeadLetterSweepIntervalMs, ct);
+                await _store.SweepDeadLettersAsync(GetOptions().MaxRetryCount, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -771,6 +787,9 @@ internal sealed class OutboxPublisherService : BackgroundService
 
         return result ?? messages;
     }
+
+    private OutboxPublisherOptions GetOptions() =>
+        _options.Get(_groupName ?? Microsoft.Extensions.Options.Options.DefaultName);
 
     private void LogConfigurationSummary(OutboxPublisherOptions opts)
     {

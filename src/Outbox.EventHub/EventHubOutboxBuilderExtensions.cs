@@ -4,6 +4,7 @@ using Azure.Messaging.EventHubs;
 using Azure.Messaging.EventHubs.Producer;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Outbox.Core.Abstractions;
 using Outbox.Core.Builder;
@@ -17,19 +18,54 @@ public static class EventHubOutboxBuilderExtensions
         this IOutboxBuilder builder,
         Action<EventHubTransportOptions>? configure = null)
     {
-        builder.Services.Configure<EventHubTransportOptions>(
-            builder.Configuration.GetSection("Outbox:EventHub"));
+        var groupName = builder.GroupName;
 
-        if (configure is not null)
-            builder.Services.Configure(configure);
-
-        builder.Services.TryAddSingleton<EventHubClientFactory>(sp =>
+        if (groupName is not null)
         {
-            var opts = sp.GetRequiredService<IOptions<EventHubTransportOptions>>().Value;
+            builder.Services.Configure<EventHubTransportOptions>(groupName,
+                builder.Configuration.GetSection("Outbox:EventHub"));
 
-            return eventHubName => new EventHubProducerClient(opts.ConnectionString, eventHubName);
-        });
-        builder.Services.TryAddSingleton<IOutboxTransport, EventHubOutboxTransport>();
+            if (configure is not null)
+                builder.Services.Configure(groupName, configure);
+
+            builder.Services.TryAddKeyedSingleton<EventHubClientFactory>(groupName, (sp, _) =>
+            {
+                var opts = sp.GetRequiredService<IOptionsMonitor<EventHubTransportOptions>>().Get(groupName);
+
+                return eventHubName => new EventHubProducerClient(opts.ConnectionString, eventHubName);
+            });
+
+            builder.Services.TryAddKeyedSingleton<IOutboxTransport>(groupName, (sp, _) =>
+            {
+                var opts = sp.GetRequiredService<IOptionsMonitor<EventHubTransportOptions>>().Get(groupName);
+                var clientFactory = sp.GetRequiredKeyedService<EventHubClientFactory>(groupName);
+                var logger = sp.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger<EventHubOutboxTransport>();
+                var interceptors = sp.GetKeyedServices<ITransportMessageInterceptor<EventData>>(groupName);
+
+                return new EventHubOutboxTransport(
+                    Options.Create(opts),
+                    logger,
+                    interceptors,
+                    clientFactory);
+            });
+        }
+        else
+        {
+            builder.Services.Configure<EventHubTransportOptions>(
+                builder.Configuration.GetSection("Outbox:EventHub"));
+
+            if (configure is not null)
+                builder.Services.Configure(configure);
+
+            builder.Services.TryAddSingleton<EventHubClientFactory>(sp =>
+            {
+                var opts = sp.GetRequiredService<IOptions<EventHubTransportOptions>>().Value;
+
+                return eventHubName => new EventHubProducerClient(opts.ConnectionString, eventHubName);
+            });
+            builder.Services.TryAddSingleton<IOutboxTransport, EventHubOutboxTransport>();
+        }
 
         return new EventHubOutboxBuilder(builder);
     }
@@ -43,12 +79,16 @@ internal sealed class EventHubOutboxBuilder : IEventHubOutboxBuilder
 
     public IServiceCollection Services => _inner.Services;
     public Microsoft.Extensions.Configuration.IConfiguration Configuration => _inner.Configuration;
+    public string? GroupName => _inner.GroupName;
 
     public IEventHubOutboxBuilder AddTransportInterceptor<TInterceptor>()
         where TInterceptor : class, ITransportMessageInterceptor<EventData>
     {
-        Services.TryAddEnumerable(
-            ServiceDescriptor.Singleton<ITransportMessageInterceptor<EventData>, TInterceptor>());
+        if (GroupName is not null)
+            Services.AddKeyedSingleton<ITransportMessageInterceptor<EventData>, TInterceptor>(GroupName);
+        else
+            Services.TryAddEnumerable(
+                ServiceDescriptor.Singleton<ITransportMessageInterceptor<EventData>, TInterceptor>());
 
         return this;
     }
@@ -60,16 +100,31 @@ internal sealed class EventHubOutboxBuilder : IEventHubOutboxBuilder
     public IEventHubOutboxBuilder AddTransportInterceptor(
         Func<IServiceProvider, ITransportMessageInterceptor<EventData>> factory)
     {
-        Services.AddSingleton(factory);
+        if (GroupName is not null)
+            Services.AddKeyedSingleton<ITransportMessageInterceptor<EventData>>(
+                GroupName, (sp, _) => factory(sp));
+        else
+            Services.AddSingleton(factory);
 
         return this;
     }
 
     public IEventHubOutboxBuilder UseClientFactory(EventHubClientFactory factory)
     {
-        var existing = Services.FirstOrDefault(d => d.ServiceType == typeof(EventHubClientFactory));
-        if (existing is not null) Services.Remove(existing);
-        Services.AddSingleton(factory);
+        if (GroupName is not null)
+        {
+            var existing = Services.FirstOrDefault(d =>
+                d.IsKeyedService && d.ServiceType == typeof(EventHubClientFactory) &&
+                Equals(d.ServiceKey, GroupName));
+            if (existing is not null) Services.Remove(existing);
+            Services.AddKeyedSingleton(GroupName, (_, _) => factory);
+        }
+        else
+        {
+            var existing = Services.FirstOrDefault(d => d.ServiceType == typeof(EventHubClientFactory));
+            if (existing is not null) Services.Remove(existing);
+            Services.AddSingleton(factory);
+        }
 
         return this;
     }

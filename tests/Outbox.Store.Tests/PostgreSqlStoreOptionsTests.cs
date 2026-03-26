@@ -122,4 +122,46 @@ public class PostgreSqlStoreOptionsTests
         Assert.NotEmpty(results);
         Assert.Contains(results, r => r.MemberNames.Contains("TablePrefix"));
     }
+
+    [Fact]
+    public void GroupName_DefaultsToNull()
+    {
+        var opts = new PostgreSqlStoreOptions();
+        Assert.Null(opts.GroupName);
+    }
+
+    [Fact]
+    public void SharedSchemaName_DefaultsToNull()
+    {
+        var opts = new PostgreSqlStoreOptions();
+        Assert.Null(opts.SharedSchemaName);
+    }
+
+    [Fact]
+    public void OutboxTableName_WhenNoPrefix_DefaultsToOutbox()
+    {
+        var opts = new PostgreSqlStoreOptions();
+        Assert.Equal("outbox", opts.GetOutboxTableName());
+    }
+
+    [Fact]
+    public void OutboxTableName_WhenPrefix_DerivesPrefixedName()
+    {
+        var opts = new PostgreSqlStoreOptions { TablePrefix = "orders_" };
+        Assert.Equal("orders_outbox", opts.GetOutboxTableName());
+    }
+
+    [Fact]
+    public void GetSharedSchemaName_WhenNull_FallsBackToSchemaName()
+    {
+        var opts = new PostgreSqlStoreOptions { SchemaName = "custom" };
+        Assert.Equal("custom", opts.GetSharedSchemaName());
+    }
+
+    [Fact]
+    public void GetSharedSchemaName_WhenSet_ReturnsExplicitValue()
+    {
+        var opts = new PostgreSqlStoreOptions { SchemaName = "custom", SharedSchemaName = "shared" };
+        Assert.Equal("shared", opts.GetSharedSchemaName());
+    }
 }

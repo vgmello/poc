@@ -11,8 +11,8 @@ internal sealed class SqlServerQueries
     public string TvpType { get; }
 
     // Store queries
-    public string RegisterProducer { get; }
-    public string UnregisterProducer { get; }
+    public string RegisterPublisher { get; }
+    public string UnregisterPublisher { get; }
     public string LeaseBatch { get; }
     public string DeletePublished { get; }
     public string ReleaseLeaseWithRetry { get; }
@@ -32,37 +32,39 @@ internal sealed class SqlServerQueries
     public string DeadLetterPurge { get; }
     public string DeadLetterPurgeAll { get; }
 
-    public SqlServerQueries(string schemaName, string tablePrefix)
+    public SqlServerQueries(string schemaName, string tablePrefix, string sharedSchemaName, string outboxTableName)
     {
         var s = schemaName;
         var p = tablePrefix;
         var outboxTable = $"{s}.{p}Outbox";
         var deadLetterTable = $"{s}.{p}OutboxDeadLetter";
-        var producersTable = $"{s}.{p}OutboxProducers";
-        var partitionsTable = $"{s}.{p}OutboxPartitions";
+        var publishersTable = $"{sharedSchemaName}.OutboxPublishers";
+        var partitionsTable = $"{sharedSchemaName}.OutboxPartitions";
         TvpType = $"{s}.{p}SequenceNumberList";
 
-        RegisterProducer = $"""
-                            MERGE {producersTable} WITH (HOLDLOCK) AS target
-                            USING (SELECT @ProducerId AS ProducerId, @HostName AS HostName) AS source
-                                ON target.ProducerId = source.ProducerId
+        RegisterPublisher = $"""
+                            MERGE {publishersTable} WITH (HOLDLOCK) AS target
+                            USING (SELECT @PublisherId AS PublisherId, @OutboxTableName AS OutboxTableName, @HostName AS HostName) AS source
+                                ON target.OutboxTableName = source.OutboxTableName AND target.PublisherId = source.PublisherId
                             WHEN MATCHED THEN
                                 UPDATE SET LastHeartbeatUtc = SYSUTCDATETIME(),
                                            HostName         = source.HostName
                             WHEN NOT MATCHED THEN
-                                INSERT (ProducerId, RegisteredAtUtc, LastHeartbeatUtc, HostName)
-                                VALUES (source.ProducerId, SYSUTCDATETIME(), SYSUTCDATETIME(), source.HostName);
+                                INSERT (PublisherId, OutboxTableName, RegisteredAtUtc, LastHeartbeatUtc, HostName)
+                                VALUES (source.PublisherId, source.OutboxTableName, SYSUTCDATETIME(), SYSUTCDATETIME(), source.HostName);
                             """;
 
-        UnregisterProducer = $"""
+        UnregisterPublisher = $"""
                               UPDATE {partitionsTable}
-                              SET    OwnerProducerId = NULL,
+                              SET    OwnerPublisherId = NULL,
                                      OwnedSinceUtc  = NULL,
                                      GraceExpiresUtc = NULL
-                              WHERE  OwnerProducerId = @ProducerId;
+                              WHERE  OwnerPublisherId = @PublisherId
+                                AND  OutboxTableName = @OutboxTableName;
 
-                              DELETE FROM {producersTable}
-                              WHERE  ProducerId = @ProducerId;
+                              DELETE FROM {publishersTable}
+                              WHERE  PublisherId = @PublisherId
+                                AND  OutboxTableName = @OutboxTableName;
                               """;
 
         LeaseBatch = $"""
@@ -84,7 +86,8 @@ internal sealed class SqlServerQueries
                               o.CreatedAtUtc
                           FROM {outboxTable} o WITH (ROWLOCK, READPAST)
                           INNER JOIN {partitionsTable} op
-                              ON  op.OwnerProducerId = @PublisherId
+                              ON  op.OutboxTableName = @OutboxTableName
+                              AND op.OwnerPublisherId = @PublisherId
                               AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
                               AND (ABS(CAST(CHECKSUM(o.PartitionKey) AS BIGINT)) % @TotalPartitions) = op.PartitionId
                           WHERE (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
@@ -155,42 +158,47 @@ internal sealed class SqlServerQueries
                       """;
 
         Heartbeat = $"""
-                     UPDATE {producersTable}
+                     UPDATE {publishersTable}
                      SET    LastHeartbeatUtc = SYSUTCDATETIME()
-                     WHERE  ProducerId = @ProducerId;
+                     WHERE  PublisherId = @PublisherId
+                       AND  OutboxTableName = @OutboxTableName;
 
                      UPDATE {partitionsTable}
                      SET    GraceExpiresUtc = NULL
-                     WHERE  OwnerProducerId = @ProducerId
+                     WHERE  OwnerPublisherId = @PublisherId
+                       AND  OutboxTableName = @OutboxTableName
                        AND  GraceExpiresUtc IS NOT NULL;
                      """;
 
-        GetTotalPartitions = $"SELECT COUNT(*) FROM {partitionsTable};";
+        GetTotalPartitions = $"SELECT COUNT(*) FROM {partitionsTable} WHERE OutboxTableName = @OutboxTableName;";
 
         GetOwnedPartitions = $"""
                               SELECT PartitionId
                               FROM   {partitionsTable}
-                              WHERE  OwnerProducerId = @ProducerId;
+                              WHERE  OwnerPublisherId = @PublisherId
+                                AND  OutboxTableName = @OutboxTableName;
                               """;
 
         Rebalance = $"""
                      DECLARE @TotalPartitions   INT;
-                     DECLARE @ActiveProducers   INT;
+                     DECLARE @ActivePublishers   INT;
                      DECLARE @FairShare         INT;
                      DECLARE @CurrentlyOwned    INT;
                      DECLARE @ToAcquire         INT;
 
-                     SELECT @TotalPartitions = COUNT(*) FROM {partitionsTable};
+                     SELECT @TotalPartitions = COUNT(*) FROM {partitionsTable} WHERE OutboxTableName = @OutboxTableName;
 
-                     SELECT @ActiveProducers = COUNT(*)
-                     FROM {producersTable}
-                     WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME());
+                     SELECT @ActivePublishers = COUNT(*)
+                     FROM {publishersTable}
+                     WHERE OutboxTableName = @OutboxTableName
+                       AND LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME());
 
-                     SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActiveProducers, 0));
+                     SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActivePublishers, 0));
 
                      SELECT @CurrentlyOwned = COUNT(*)
                      FROM {partitionsTable}
-                     WHERE OwnerProducerId = @ProducerId;
+                     WHERE OwnerPublisherId = @PublisherId
+                       AND OutboxTableName = @OutboxTableName;
 
                      SET @ToAcquire = @FairShare - @CurrentlyOwned;
 
@@ -198,25 +206,29 @@ internal sealed class SqlServerQueries
                      BEGIN
                          UPDATE {partitionsTable}
                          SET    GraceExpiresUtc = DATEADD(SECOND, @PartitionGracePeriodSeconds, SYSUTCDATETIME())
-                         WHERE  OwnerProducerId <> @ProducerId
-                           AND  OwnerProducerId IS NOT NULL
+                         WHERE  OwnerPublisherId <> @PublisherId
+                           AND  OwnerPublisherId IS NOT NULL
                            AND  GraceExpiresUtc IS NULL
-                           AND  OwnerProducerId NOT IN
+                           AND  OutboxTableName = @OutboxTableName
+                           AND  OwnerPublisherId NOT IN
                                 (
-                                    SELECT ProducerId
-                                    FROM   {producersTable}
-                                    WHERE  LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
+                                    SELECT PublisherId
+                                    FROM   {publishersTable}
+                                    WHERE  OutboxTableName = @OutboxTableName
+                                      AND  LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
                                 );
 
                          UPDATE op
-                         SET    OwnerProducerId = @ProducerId,
+                         SET    OwnerPublisherId = @PublisherId,
                                 OwnedSinceUtc   = SYSUTCDATETIME(),
                                 GraceExpiresUtc = NULL
                          FROM   {partitionsTable} op WITH (UPDLOCK, READPAST)
-                         WHERE  op.PartitionId IN (
+                         WHERE  op.OutboxTableName = @OutboxTableName
+                           AND  op.PartitionId IN (
                                     SELECT TOP (@ToAcquire) PartitionId
                                     FROM   {partitionsTable} WITH (UPDLOCK, READPAST)
-                                    WHERE  (OwnerProducerId IS NULL
+                                    WHERE  OutboxTableName = @OutboxTableName
+                                      AND  (OwnerPublisherId IS NULL
                                             OR GraceExpiresUtc < SYSUTCDATETIME())
                                     ORDER BY PartitionId
                                 );
@@ -224,21 +236,24 @@ internal sealed class SqlServerQueries
 
                      SELECT @CurrentlyOwned = COUNT(*)
                      FROM {partitionsTable}
-                     WHERE OwnerProducerId = @ProducerId;
+                     WHERE OwnerPublisherId = @PublisherId
+                       AND OutboxTableName = @OutboxTableName;
 
                      IF @CurrentlyOwned > @FairShare
                      BEGIN
                          DECLARE @ToRelease INT = @CurrentlyOwned - @FairShare;
 
                          UPDATE op
-                         SET    OwnerProducerId = NULL,
+                         SET    OwnerPublisherId = NULL,
                                 OwnedSinceUtc  = NULL,
                                 GraceExpiresUtc = NULL
                          FROM   {partitionsTable} op
-                         WHERE  op.PartitionId IN (
+                         WHERE  op.OutboxTableName = @OutboxTableName
+                           AND  op.PartitionId IN (
                                     SELECT TOP (@ToRelease) PartitionId
                                     FROM   {partitionsTable}
-                                    WHERE  OwnerProducerId = @ProducerId
+                                    WHERE  OwnerPublisherId = @PublisherId
+                                      AND  OutboxTableName = @OutboxTableName
                                     ORDER BY PartitionId DESC
                                 );
                      END;
@@ -246,36 +261,40 @@ internal sealed class SqlServerQueries
 
         ClaimOrphanPartitions = $"""
                                  DECLARE @TotalPartitions   INT;
-                                 DECLARE @ActiveProducers   INT;
+                                 DECLARE @ActivePublishers   INT;
                                  DECLARE @FairShare         INT;
                                  DECLARE @CurrentlyOwned    INT;
                                  DECLARE @ToAcquire         INT;
 
-                                 SELECT @TotalPartitions = COUNT(*) FROM {partitionsTable};
+                                 SELECT @TotalPartitions = COUNT(*) FROM {partitionsTable} WHERE OutboxTableName = @OutboxTableName;
 
-                                 SELECT @ActiveProducers = COUNT(*)
-                                 FROM {producersTable}
-                                 WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME());
+                                 SELECT @ActivePublishers = COUNT(*)
+                                 FROM {publishersTable}
+                                 WHERE OutboxTableName = @OutboxTableName
+                                   AND LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME());
 
-                                 SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActiveProducers, 0));
+                                 SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActivePublishers, 0));
 
                                  SELECT @CurrentlyOwned = COUNT(*)
                                  FROM {partitionsTable}
-                                 WHERE OwnerProducerId = @ProducerId;
+                                 WHERE OwnerPublisherId = @PublisherId
+                                   AND OutboxTableName = @OutboxTableName;
 
                                  SET @ToAcquire = @FairShare - @CurrentlyOwned;
 
                                  IF @ToAcquire > 0
                                  BEGIN
                                      UPDATE op
-                                     SET    OwnerProducerId = @ProducerId,
+                                     SET    OwnerPublisherId = @PublisherId,
                                             OwnedSinceUtc   = SYSUTCDATETIME(),
                                             GraceExpiresUtc = NULL
                                      FROM   {partitionsTable} op WITH (UPDLOCK, READPAST)
-                                     WHERE  op.PartitionId IN (
+                                     WHERE  op.OutboxTableName = @OutboxTableName
+                                       AND  op.PartitionId IN (
                                                 SELECT TOP (@ToAcquire) PartitionId
                                                 FROM   {partitionsTable} WITH (UPDLOCK, READPAST)
-                                                WHERE  OwnerProducerId IS NULL
+                                                WHERE  OutboxTableName = @OutboxTableName
+                                                  AND  OwnerPublisherId IS NULL
                                                 ORDER BY PartitionId
                                             );
                                  END;
@@ -304,9 +323,10 @@ internal sealed class SqlServerQueries
                               AND (o.LeaseOwner IS NULL
                                    OR o.LeasedUntilUtc < DATEADD(SECOND, -@LeaseDurationSeconds, SYSUTCDATETIME())
                                    OR o.LeaseOwner NOT IN (
-                                       SELECT ProducerId
-                                       FROM {producersTable}
-                                       WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
+                                       SELECT PublisherId
+                                       FROM {publishersTable}
+                                       WHERE OutboxTableName = @OutboxTableName
+                                         AND LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
                                    ));
                             """;
 

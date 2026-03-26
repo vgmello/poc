@@ -104,9 +104,9 @@ public class BrokerDownTests
             var pending = await OutboxTestHelper.GetOutboxCountAsync(_infra.ConnectionString);
             Assert.True(pending > 0, "Messages should accumulate");
 
-            // Producers should still be registered (heartbeat works)
-            var producers = await OutboxTestHelper.GetProducerIdsAsync(_infra.ConnectionString);
-            Assert.Single(producers);
+            // Publishers should still be registered (heartbeat works)
+            var publishers = await OutboxTestHelper.GetPublisherIdsAsync(_infra.ConnectionString);
+            Assert.Single(publishers);
 
             // Restore broker
             transport.SetFailing(false);

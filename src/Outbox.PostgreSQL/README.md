@@ -29,8 +29,8 @@ Four tables, three indexes, two diagnostic views, and a 32-partition seed:
 |---|---|
 | `outbox` | Primary event buffer with lease columns |
 | `outbox_dead_letter` | Messages past `MaxRetryCount` |
-| `outbox_producers` | Heartbeat registry |
-| `outbox_partitions` | Partition-to-producer ownership map |
+| `outbox_publishers` | Heartbeat registry |
+| `outbox_partitions` | Partition-to-publisher ownership map |
 
 ### Key columns on `outbox`
 
@@ -77,11 +77,11 @@ All mutating operations check `lease_owner = @publisher_id` to prevent zombie pu
 ### Rebalance
 
 Three-step transaction:
-1. Mark stale producers' partitions with a grace period
+1. Mark stale publishers' partitions with a grace period
 2. Claim unowned or grace-expired partitions up to the fair share
 3. Release excess partitions
 
-Uses `FOR UPDATE SKIP LOCKED` throughout to prevent concurrent producers from double-claiming.
+Uses `FOR UPDATE SKIP LOCKED` throughout to prevent concurrent publishers from double-claiming.
 
 ### Transient error handling
 

@@ -65,9 +65,9 @@ public class DatabaseDownTests
             Assert.True(consumed.Count >= 30,
                 $"Expected at least 30 messages consumed, got {consumed.Count}");
 
-            // Verify producer is still registered
-            var producers = await OutboxTestHelper.GetProducerIdsAsync(_infra.ConnectionString);
-            Assert.Single(producers);
+            // Verify publisher is still registered
+            var publishers = await OutboxTestHelper.GetPublisherIdsAsync(_infra.ConnectionString);
+            Assert.Single(publishers);
         }
         finally
         {

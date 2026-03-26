@@ -17,8 +17,8 @@ The contract between the publisher engine and any database backend. Every method
 
 | Method | Purpose |
 |---|---|
-| `RegisterProducerAsync` | Register this publisher instance, returns a `producerId` |
-| `UnregisterProducerAsync` | Remove registration and release partition ownership |
+| `RegisterPublisherAsync` | Register this publisher instance, returns a `publisherId` |
+| `UnregisterPublisherAsync` | Remove registration and release partition ownership |
 | `LeaseBatchAsync` | Claim a batch of messages from owned partitions |
 | `DeletePublishedAsync` | Remove successfully sent messages (checks `lease_owner`) |
 | `ReleaseLeaseAsync` | Clear lease, optionally increment `retry_count` |
@@ -116,7 +116,7 @@ A sealed `BackgroundService` that runs five concurrent loops:
 | Loop | Interval | Purpose |
 |---|---|---|
 | Publish | Adaptive (100ms–5s) | Lease → Send → Delete core path |
-| Heartbeat | 10s | Keep producer alive, clear grace periods |
+| Heartbeat | 10s | Keep publisher alive, clear grace periods |
 | Rebalance | 30s | Fair-share partition distribution |
 | Orphan sweep | 60s | Claim unowned partitions |
 | Dead-letter sweep | 60s | Quarantine exhausted-retry messages |

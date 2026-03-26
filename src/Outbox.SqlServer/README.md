@@ -29,8 +29,8 @@ Four tables, a TVP type, three indexes, two diagnostic views, and a 32-partition
 |---|---|
 | `dbo.Outbox` | Primary event buffer with lease columns |
 | `dbo.OutboxDeadLetter` | Messages past `MaxRetryCount` |
-| `dbo.OutboxProducers` | Heartbeat registry |
-| `dbo.OutboxPartitions` | Partition-to-producer ownership map |
+| `dbo.OutboxPublishers` | Heartbeat registry |
+| `dbo.OutboxPartitions` | Partition-to-publisher ownership map |
 | `dbo.SequenceNumberList` (TVP) | Table-valued parameter for batch operations |
 
 ### Key columns on `Outbox`
@@ -79,7 +79,7 @@ All mutating operations use a `SequenceNumberList` TVP join and check `LeaseOwne
 
 Single transactional T-SQL batch:
 1. Compute fair share (`CEILING(total / active)`)
-2. Mark stale producers' partitions with grace period
+2. Mark stale publishers' partitions with grace period
 3. Claim unowned or grace-expired partitions up to fair share
 4. Release excess partitions
 

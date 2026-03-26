@@ -1,9 +1,8 @@
 // Copyright (c) OrgName. All rights reserved.
 
 using System.Diagnostics.Metrics;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
@@ -28,7 +27,6 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     private readonly IOutboxTransport _transport;
     private readonly IOutboxEventHandler _eventHandler;
     private readonly IOptionsMonitor<OutboxPublisherOptions> _optionsMonitor;
-    private readonly ILogger<OutboxPublisherService> _logger;
     private readonly OutboxInstrumentation _instrumentation;
     private readonly OutboxHealthState _healthState;
     private readonly IHostApplicationLifetime _appLifetime;
@@ -39,7 +37,6 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         _store = Substitute.For<IOutboxStore>();
         _transport = Substitute.For<IOutboxTransport>();
         _eventHandler = Substitute.For<IOutboxEventHandler>();
-        _logger = NullLogger<OutboxPublisherService>.Instance;
         _instrumentation = new OutboxInstrumentation(new TestMeterFactory());
         _healthState = new OutboxHealthState();
         _appLifetime = Substitute.For<IHostApplicationLifetime>();
@@ -60,6 +57,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         _optionsMonitor = Substitute.For<IOptionsMonitor<OutboxPublisherOptions>>();
         _optionsMonitor.CurrentValue.Returns(_options);
+        _optionsMonitor.Get(Arg.Any<string>()).Returns(_options);
     }
 
     public void Dispose()
@@ -68,10 +66,18 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private OutboxPublisherService CreateService() =>
-        new(_store, _transport, _eventHandler, _optionsMonitor, _logger,
-            _instrumentation, _healthState, _appLifetime,
-            Array.Empty<IOutboxMessageInterceptor>());
+    private OutboxPublisherService CreateService()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton(_store);
+        services.AddSingleton(_transport);
+        services.AddSingleton(_eventHandler);
+        services.AddSingleton(_instrumentation);
+        services.AddSingleton(_healthState);
+        services.AddLogging();
+        var sp = services.BuildServiceProvider();
+        return new OutboxPublisherService(sp, _optionsMonitor, _appLifetime);
+    }
 
     private static OutboxMessage MakeMessage(
         long seq, string topic = "orders", string key = "key-1", int retryCount = 0) =>
@@ -79,10 +85,10 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             retryCount, DateTimeOffset.UtcNow);
 
     [Fact]
-    public async Task RegistersAndUnregistersProducer()
+    public async Task RegistersAndUnregistersPublisher()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         // Return empty batches so publish loop just polls
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -102,15 +108,15 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         await service.StopAsync(CancellationToken.None);
 
-        await _store.Received(1).RegisterProducerAsync(Arg.Any<CancellationToken>());
-        await _store.Received(1).UnregisterProducerAsync("producer-1", Arg.Any<CancellationToken>());
+        await _store.Received(1).RegisterPublisherAsync(Arg.Any<CancellationToken>());
+        await _store.Received(1).UnregisterPublisherAsync("publisher-1", Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task PublishLoop_LeasesAndPublishesBatch()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
@@ -144,7 +150,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             Arg.Any<CancellationToken>());
 
         await _store.Received(1).DeletePublishedAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Is<IReadOnlyList<long>>(s => s.Count == 2),
             Arg.Any<CancellationToken>());
 
@@ -155,8 +161,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     [Fact]
     public async Task PublishLoop_OnTransportFailure_ReleasesLeaseWithRetryIncrement()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
@@ -187,7 +193,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         // BUG-2 fix: ReleaseLeaseAsync should be called with incrementRetry: true
         await _store.Received().ReleaseLeaseAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Is<IReadOnlyList<long>>(s => s.Count == 2),
             true, // incrementRetry
             Arg.Any<CancellationToken>());
@@ -199,8 +205,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     [Fact]
     public async Task PublishLoop_PoisonMessages_AreDeadLettered()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         // Poison message: RetryCount >= MaxRetryCount (5)
         var poisonMessage = MakeMessage(1, retryCount: 5);
@@ -240,8 +246,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     [Fact]
     public async Task PublishLoop_GroupsByTopicAndPartitionKey()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[]
         {
@@ -283,8 +289,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     [Fact]
     public async Task PublishLoop_CircuitOpen_ReleasesLeaseWithCancellationTokenNone()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         // Need enough batches: CircuitBreakerFailureThreshold (3) failures to open,
         // plus at least one more batch where IsOpen returns true.
@@ -319,7 +325,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         // The circuit-open release should use CancellationToken.None (not a linked token)
         await _store.Received().ReleaseLeaseAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Any<IReadOnlyList<long>>(),
             false, // incrementRetry: false for circuit-open
             CancellationToken.None);
@@ -328,8 +334,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     [Fact]
     public async Task PublishLoop_PartialSend_WhenReleaseAlsoFails_FinallyBlockReleasesLeases()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2), MakeMessage(3) };
         var callCount = 0;
@@ -376,7 +382,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // With the old code, unprocessedSequences was emptied at line 402-403, so the
         // finally block's call would have 0 sequences. With the fix, all 3 remain.
         await _store.Received().ReleaseLeaseAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Is<IReadOnlyList<long>>(s => s.Count == 3 && s.Contains(1L) && s.Contains(2L) && s.Contains(3L)),
             false, // incrementRetry: false (finally block uses false)
             CancellationToken.None);
@@ -385,8 +391,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     [Fact]
     public async Task HealthState_ReportsLoopRunning()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(Array.Empty<OutboxMessage>());
 
@@ -421,8 +427,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         _options.DeadLetterSweepIntervalMs = 50;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
 
@@ -441,8 +447,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         _options.OrphanSweepIntervalMs = 50;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
 
@@ -452,7 +458,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await Task.Delay(400);
         await service.StopAsync(CancellationToken.None);
 
-        await _store.Received().ClaimOrphanPartitionsAsync("producer-1", Arg.Any<CancellationToken>());
+        await _store.Received().ClaimOrphanPartitionsAsync("publisher-1", Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -460,11 +466,11 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         _options.RebalanceIntervalMs = 50;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
-        _store.GetOwnedPartitionsAsync("producer-1", Arg.Any<CancellationToken>())
+        _store.GetOwnedPartitionsAsync("publisher-1", Arg.Any<CancellationToken>())
             .Returns([0, 1]);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
@@ -473,14 +479,14 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await Task.Delay(400);
         await service.StopAsync(CancellationToken.None);
 
-        await _store.Received().RebalanceAsync("producer-1", Arg.Any<CancellationToken>());
+        await _store.Received().RebalanceAsync("publisher-1", Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task PublishLoop_DeleteFails_ReleasesLeaseWithoutRetryIncrement()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
@@ -515,7 +521,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await service.StopAsync(CancellationToken.None);
 
         await _store.Received().ReleaseLeaseAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Any<IReadOnlyList<long>>(),
             false, // incrementRetry: false — transport succeeded
             Arg.Any<CancellationToken>());
@@ -526,8 +532,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         _options.HeartbeatIntervalMs = 50;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
         _store.GetPendingCountAsync(Arg.Any<CancellationToken>()).Returns(42L);
@@ -538,15 +544,15 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await Task.Delay(400);
         await service.StopAsync(CancellationToken.None);
 
-        await _store.Received().HeartbeatAsync("producer-1", Arg.Any<CancellationToken>());
+        await _store.Received().HeartbeatAsync("publisher-1", Arg.Any<CancellationToken>());
         Assert.NotEqual(DateTimeOffset.MinValue, _healthState.LastHeartbeatUtc);
     }
 
     [Fact]
     public async Task PublishLoop_PartialSend_DeletesSucceededAndReleasesFailedWithRetry()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2), MakeMessage(3) };
         var callCount = 0;
@@ -582,13 +588,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         // Succeeded message should be deleted
         await _store.Received().DeletePublishedAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Is<IReadOnlyList<long>>(s => s.Count == 1 && s.Contains(1L)),
             CancellationToken.None);
 
         // Failed messages should be released with incrementRetry: true
         await _store.Received().ReleaseLeaseAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Is<IReadOnlyList<long>>(s => s.Count == 2 && s.Contains(2L) && s.Contains(3L)),
             true,
             CancellationToken.None);
@@ -597,8 +603,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     [Fact]
     public async Task PublishLoop_PartialSend_RecordsCircuitBreakerFailure()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
@@ -642,10 +648,10 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task PublishLoop_RegisterProducerFails_ServiceCancels_DoesNotUnregister()
+    public async Task PublishLoop_RegisterPublisherFails_ServiceCancels_DoesNotUnregister()
     {
-        // RegisterProducerAsync always throws — service should exit without calling Unregister
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
+        // RegisterPublisherAsync always throws — service should exit without calling Unregister
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("DB unavailable"));
 
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -664,15 +670,15 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         await service.StopAsync(CancellationToken.None);
 
-        // Since registration always fails and cancellation happens quickly, no producer is registered
-        await _store.DidNotReceive().UnregisterProducerAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        // Since registration always fails and cancellation happens quickly, no publisher is registered
+        await _store.DidNotReceive().UnregisterPublisherAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task PublishLoop_OnTransportSuccess_CallsOnMessagePublishedForEachMessage()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
@@ -714,8 +720,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // the exception falls through to the generic catch which calls
         // ReleaseLeaseAsync(incrementRetry: true). This is wrong — transport
         // succeeded, so retry count must NOT be incremented.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
@@ -752,7 +758,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // Transport succeeded, so delete should have been attempted (handler threw BEFORE delete,
         // but with the fix, the handler exception is caught and delete proceeds)
         await _store.Received().DeletePublishedAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Any<IReadOnlyList<long>>(),
             Arg.Any<CancellationToken>());
 
@@ -770,8 +776,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // BUG 1 variant: OnCircuitBreakerStateChangedAsync throws after circuit
         // recovery (successful send). Same issue — falls to generic catch.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1) };
         var sendCallCount = 0;
@@ -811,7 +817,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         // The successful send should have triggered a delete, not a retry-incremented release
         await _store.Received().DeletePublishedAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Any<IReadOnlyList<long>>(),
             Arg.Any<CancellationToken>());
     }
@@ -826,8 +832,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // BUG 2: If OnMessageDeadLetteredAsync throws, the exception propagates
         // past the healthy message processing code, leaving healthy messages
         // leased but unprocessed until lease expiry.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         // Batch contains 1 poison message and 2 healthy messages
         var poisonMsg = MakeMessage(1, retryCount: 5);
@@ -881,8 +887,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // BUG 2 secondary check: Even if the transport doesn't get called for healthy messages,
         // they should at minimum be released (not stuck until lease expiry).
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var poisonMsg = MakeMessage(1, retryCount: 5);
         var healthyMsg = MakeMessage(2, retryCount: 0);
@@ -935,8 +941,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         _options.MinPollIntervalMs = 10;
         _options.MaxPollIntervalMs = 100;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         // Always return empty — forces poll interval to ramp up
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
@@ -971,8 +977,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         _options.MinPollIntervalMs = 10;
         _options.MaxPollIntervalMs = 80;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
@@ -1014,8 +1020,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // When messages are leased but all circuits are open, publishedAny stays false,
         // and the code applies adaptive backoff (lines 499-504).
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
@@ -1052,7 +1058,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // After threshold failures, circuit opens. Subsequent batches see circuit open
         // and ReleaseLeaseAsync with incrementRetry:false is called (circuit-open path).
         await _store.Received().ReleaseLeaseAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Any<IReadOnlyList<long>>(),
             false,
             CancellationToken.None);
@@ -1063,8 +1069,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // Exceptions from LeaseBatchAsync are caught by the outer catch in PublishLoopAsync.
         // The loop logs the error, delays MaxPollIntervalMs, then continues polling.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var leaseBatchCallCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
@@ -1121,8 +1127,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // An exception inside the publish loop itself (not transport) is caught by the outer
         // exception handler in PublishLoopAsync, which logs and delays before continuing.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
@@ -1161,8 +1167,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     public async Task PublishLoop_TransportSuccess_CircuitRecovery_RaisesStateChangedEvent()
     {
         // Trip the circuit breaker with failures, then succeed to trigger circuit close event.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1) };
         var sendCallCount = 0;
@@ -1215,8 +1221,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         _options.HeartbeatIntervalMs = 50;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
 
@@ -1231,17 +1237,17 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await service.StopAsync(CancellationToken.None);
 
         // Heartbeat still ran despite GetPendingCount failure
-        await _store.Received().HeartbeatAsync("producer-1", Arg.Any<CancellationToken>());
+        await _store.Received().HeartbeatAsync("publisher-1", Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task ExecuteAsync_RegisterProducerThrowsOCE_WhenTokenAlreadyCancelled_ExitsCleanly()
+    public async Task ExecuteAsync_RegisterPublisherThrowsOCE_WhenTokenAlreadyCancelled_ExitsCleanly()
     {
-        // Cover lines 63-65: OperationCanceledException during RegisterProducerAsync when
+        // Cover lines 63-65: OperationCanceledException during RegisterPublisherAsync when
         // stoppingToken is already cancelled. The when-filter requires IsCancellationRequested=true.
         using var cts = new CancellationTokenSource();
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
             .Returns<string>(ci =>
             {
                 // Cancel the token and then throw OCE — so the when-filter matches
@@ -1266,22 +1272,22 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await service.StopAsync(CancellationToken.None);
 
         // Unregister must NOT be called — we never successfully registered
-        await _store.DidNotReceive().UnregisterProducerAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _store.DidNotReceive().UnregisterPublisherAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task ExecuteAsync_RegisterProducerFailsOnceThenSucceeds_RetriesAndContinues()
+    public async Task ExecuteAsync_RegisterPublisherFailsOnceThenSucceeds_RetriesAndContinues()
     {
         // Cover lines 67-75: The exception retry path in ExecuteAsync.
         // First call throws, second succeeds.
         var callCount = 0;
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 if (Interlocked.Increment(ref callCount) == 1)
                     throw new InvalidOperationException("transient DB error");
 
-                return Task.FromResult("producer-retry");
+                return Task.FromResult("publisher-retry");
             });
 
         // Shorten the retry delay so the test doesn't hang: patch options to speed things up.
@@ -1304,19 +1310,19 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         await service.StopAsync(CancellationToken.None);
 
-        // RegisterProducerAsync was called at least twice (first failure + retry)
+        // RegisterPublisherAsync was called at least twice (first failure + retry)
         Assert.True(callCount >= 2, $"Expected at least 2 registration attempts, got {callCount}");
-        // Unregister was called with the successfully registered producer
-        await _store.Received(1).UnregisterProducerAsync("producer-retry", Arg.Any<CancellationToken>());
+        // Unregister was called with the successfully registered publisher
+        await _store.Received(1).UnregisterPublisherAsync("publisher-retry", Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task ExecuteAsync_RegisterProducerFailsAndCancellationDuringDelay_ExitsCleanly()
+    public async Task ExecuteAsync_RegisterPublisherFailsAndCancellationDuringDelay_ExitsCleanly()
     {
         // Cover line 74: OperationCanceledException in the Task.Delay retry-wait path.
         // Registration throws a non-OCE error. We cancel immediately so the Task.Delay
         // inside the retry loop gets an OCE.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("DB down"));
 
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
@@ -1337,20 +1343,20 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await service.StopAsync(CancellationToken.None);
 
         // Never successfully registered, so Unregister must not be called
-        await _store.DidNotReceive().UnregisterProducerAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
-        // But RegisterProducer was attempted at least once
-        await _store.Received().RegisterProducerAsync(Arg.Any<CancellationToken>());
+        await _store.DidNotReceive().UnregisterPublisherAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        // But RegisterPublisher was attempted at least once
+        await _store.Received().RegisterPublisherAsync(Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task ExecuteAsync_UnregisterProducerFails_LogsWarningAndCompletes()
+    public async Task ExecuteAsync_UnregisterPublisherFails_LogsWarningAndCompletes()
     {
-        // Cover lines 98-101: UnregisterProducerAsync failure in the finally block.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        // Cover lines 98-101: UnregisterPublisherAsync failure in the finally block.
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
-        _store.UnregisterProducerAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _store.UnregisterPublisherAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("DB gone"));
 
         var service = CreateService();
@@ -1367,8 +1373,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // StopAsync should complete without throwing even though Unregister failed
         await service.StopAsync(CancellationToken.None);
 
-        await _store.Received(1).RegisterProducerAsync(Arg.Any<CancellationToken>());
-        await _store.Received(1).UnregisterProducerAsync("producer-1", Arg.Any<CancellationToken>());
+        await _store.Received(1).RegisterPublisherAsync(Arg.Any<CancellationToken>());
+        await _store.Received(1).UnregisterPublisherAsync("publisher-1", Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -1376,8 +1382,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // Cover lines 354-357: transport throws OperationCanceledException when ct is already
         // cancelled (graceful shutdown in progress). The catch block breaks instead of rethrowing.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1) };
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
@@ -1425,8 +1431,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // Cover line 510-512: the outer OCE handler in PublishLoopAsync.
         // This happens when LeaseBatchAsync itself throws an OCE while cancellation is in progress.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var firstCall = true;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
@@ -1475,8 +1481,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // Cover lines 521-523: cancellation in the Task.Delay inside the outer
         // error handler. This happens when an unexpected error occurs in the loop,
         // and then cancellation fires during the subsequent error-delay.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
@@ -1509,8 +1515,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // Cover lines 457-471: General transport exception handler calls OnPublishFailedAsync
         // and optionally OnCircuitBreakerStateChangedAsync when circuit opens.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
@@ -1560,8 +1566,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // Cover lines 449-455: Transport failure where ReleaseLeaseAsync also fails.
         // The finally block should then try to release unprocessedSequences.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
@@ -1617,8 +1623,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // Cover lines 346-357: After transport succeeds, DeletePublishedAsync fails,
         // then the inner ReleaseLeaseAsync also fails — the finally block should NOT
         // release (because sequences were already removed from unprocessedSequences on transport success).
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
@@ -1662,10 +1668,10 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         // Delete was attempted
         await _store.Received().DeletePublishedAsync(
-            "producer-1", Arg.Any<IReadOnlyList<long>>(), Arg.Any<CancellationToken>());
+            "publisher-1", Arg.Any<IReadOnlyList<long>>(), Arg.Any<CancellationToken>());
         // Release was attempted (with incrementRetry: false)
         await _store.Received().ReleaseLeaseAsync(
-            "producer-1", Arg.Any<IReadOnlyList<long>>(), false, Arg.Any<CancellationToken>());
+            "publisher-1", Arg.Any<IReadOnlyList<long>>(), false, Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -1673,8 +1679,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // Cover lines 421-431: PartialSendException path where circuit breaker opens
         // (stateChanged=true), triggering both SetCircuitOpen and OnCircuitBreakerStateChangedAsync.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
@@ -1723,8 +1729,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // Cover lines 554-557: HeartbeatLoopAsync general error handler block.
         _options.HeartbeatIntervalMs = 50;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
 
@@ -1739,7 +1745,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await service.StopAsync(CancellationToken.None);
 
         // Heartbeat was attempted (and failed), service continued running
-        await _store.Received().HeartbeatAsync("producer-1", Arg.Any<CancellationToken>());
+        await _store.Received().HeartbeatAsync("publisher-1", Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -1748,8 +1754,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // Cover lines 576-579: RebalanceLoopAsync general error handler block.
         _options.RebalanceIntervalMs = 50;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
 
@@ -1763,7 +1769,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await Task.Delay(350);
         await service.StopAsync(CancellationToken.None);
 
-        await _store.Received().RebalanceAsync("producer-1", Arg.Any<CancellationToken>());
+        await _store.Received().RebalanceAsync("publisher-1", Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -1772,8 +1778,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // Cover lines 596-599: OrphanSweepLoopAsync general error handler block.
         _options.OrphanSweepIntervalMs = 50;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
 
@@ -1787,7 +1793,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await Task.Delay(350);
         await service.StopAsync(CancellationToken.None);
 
-        await _store.Received().ClaimOrphanPartitionsAsync("producer-1", Arg.Any<CancellationToken>());
+        await _store.Received().ClaimOrphanPartitionsAsync("publisher-1", Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -1796,8 +1802,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // Cover lines 616-619: DeadLetterSweepLoopAsync general error handler block.
         _options.DeadLetterSweepIntervalMs = 50;
 
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
 
@@ -1823,8 +1829,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         //   3. ReleaseLeaseAsync for succeeded messages SUCCEEDS (inner try block executes lines 389-391)
         // The sequences should be removed from unprocessedSequences, so the finally block
         // does NOT include them in its fallback release.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         var messages = new[] { MakeMessage(1), MakeMessage(2) };
         var callCount = 0;
@@ -1870,13 +1876,13 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         // Delete was attempted for succeeded sequence
         await _store.Received().DeletePublishedAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Is<IReadOnlyList<long>>(s => s.Contains(1L)),
             Arg.Any<CancellationToken>());
 
         // Release was attempted for succeeded sequence (incrementRetry:false since transport succeeded)
         await _store.Received().ReleaseLeaseAsync(
-            "producer-1",
+            "publisher-1",
             Arg.Is<IReadOnlyList<long>>(s => s.Contains(1L)),
             false,
             CancellationToken.None);
@@ -1890,8 +1896,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         // The heartbeat loop exits after 3 consecutive failures (throws), which causes
         // RunLoopsWithRestartAsync to cancel all loops and restart. After 5 such restarts,
         // StopApplication is called.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         // Publish loop returns empty batches (doesn't crash on its own)
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
@@ -1929,8 +1935,8 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     {
         // When HeartbeatAsync fails 3 consecutive times, the heartbeat loop should throw
         // to trigger RunLoopsWithRestartAsync, preventing stale-heartbeat dual ownership.
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>())
-            .Returns("producer-1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
+            .Returns("publisher-1");
 
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(),
                 Arg.Any<CancellationToken>())
@@ -1938,7 +1944,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
         // Heartbeat fails persistently
         _store.HeartbeatAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .ThrowsAsync(new InvalidOperationException("producer row deleted"));
+            .ThrowsAsync(new InvalidOperationException("publisher row deleted"));
 
         _options.HeartbeatIntervalMs = 10;
 

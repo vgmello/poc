@@ -37,8 +37,8 @@ public class MultiPublisherRebalanceTests
             return owners.Values.Count(v => v != null) == 32;
         }, TimeSpan.FromSeconds(15), message: "A should own all 32 partitions");
 
-        var producers = await OutboxTestHelper.GetProducerIdsAsync(_infra.ConnectionString);
-        _output.WriteLine($"A owns 32 partitions. ProducerId: {producers[0]}");
+        var publishers = await OutboxTestHelper.GetPublisherIdsAsync(_infra.ConnectionString);
+        _output.WriteLine($"A owns 32 partitions. PublisherId: {publishers[0]}");
 
         // Start publisher B
         var (hostB, _) = OutboxTestHelper.BuildPublisherHost(

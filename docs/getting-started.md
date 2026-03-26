@@ -128,7 +128,7 @@ psql -d myapp -f src/Outbox.PostgreSQL/db_scripts/install.sql
 sqlcmd -d myapp -i src/Outbox.SqlServer/db_scripts/install.sql
 ```
 
-This creates four tables (`outbox`, `outbox_dead_letter`, `outbox_producers`, `outbox_partitions`), indexes, diagnostic views, and seeds 32 partitions.
+This creates four tables (`outbox`, `outbox_dead_letter`, `outbox_publishers`, `outbox_partitions`), indexes, diagnostic views, and seeds 32 partitions.
 
 ## Writing messages to the outbox
 

@@ -167,7 +167,7 @@ public static class SqlServerTestHelper
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync();
         await using var cmd = new SqlCommand(
-            "SELECT PartitionId, OwnerProducerId FROM dbo.OutboxPartitions ORDER BY PartitionId", conn);
+            "SELECT PartitionId, OwnerPublisherId FROM dbo.OutboxPartitions ORDER BY PartitionId", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
 
         while (await reader.ReadAsync())
@@ -178,12 +178,12 @@ public static class SqlServerTestHelper
         return map;
     }
 
-    public static async Task<List<string>> GetProducerIdsAsync(string connectionString)
+    public static async Task<List<string>> GetPublisherIdsAsync(string connectionString)
     {
         var ids = new List<string>();
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync();
-        await using var cmd = new SqlCommand("SELECT ProducerId FROM dbo.OutboxProducers", conn);
+        await using var cmd = new SqlCommand("SELECT PublisherId FROM dbo.OutboxPublishers", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
 
         while (await reader.ReadAsync())
@@ -206,8 +206,8 @@ public static class SqlServerTestHelper
         await using var cmd = new SqlCommand(@"
             DELETE FROM dbo.Outbox;
             DELETE FROM dbo.OutboxDeadLetter;
-            DELETE FROM dbo.OutboxProducers;
-            UPDATE dbo.OutboxPartitions SET OwnerProducerId = NULL, OwnedSinceUtc = NULL, GraceExpiresUtc = NULL;",
+            DELETE FROM dbo.OutboxPublishers;
+            UPDATE dbo.OutboxPartitions SET OwnerPublisherId = NULL, OwnedSinceUtc = NULL, GraceExpiresUtc = NULL;",
             conn);
         await cmd.ExecuteNonQueryAsync();
     }

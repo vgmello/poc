@@ -39,36 +39,36 @@ public class ProcessKillTests
             return owners.Values.Any(v => v != null);
         }, TimeSpan.FromSeconds(10), message: "Publisher A should claim partitions");
 
-        var producerIdA = (await OutboxTestHelper.GetProducerIdsAsync(_infra.ConnectionString)).First();
-        _output.WriteLine($"Publisher A registered as {producerIdA}");
+        var publisherIdA = (await OutboxTestHelper.GetPublisherIdsAsync(_infra.ConnectionString)).First();
+        _output.WriteLine($"Publisher A registered as {publisherIdA}");
 
         // Insert messages and let A process some
         await OutboxTestHelper.InsertMessagesAsync(_infra.ConnectionString, 50, topic, "key-1");
         await Task.Delay(TimeSpan.FromSeconds(3));
 
-        // Simulate SIGKILL: stop A gracefully (which unregisters), then re-insert stale producer
+        // Simulate SIGKILL: stop A gracefully (which unregisters), then re-insert stale publisher
         await hostA.StopAsync();
         hostA.Dispose();
 
-        // Re-create the stale producer row and assign partitions (simulating no cleanup)
+        // Re-create the stale publisher row and assign partitions (simulating no cleanup)
         await using (var conn = new NpgsqlConnection(_infra.ConnectionString))
         {
             await conn.OpenAsync();
 
-            // Re-insert stale producer with old heartbeat
+            // Re-insert stale publisher with old heartbeat
             await using var insertCmd = new NpgsqlCommand(@"
-                INSERT INTO outbox_producers (producer_id, registered_at_utc, last_heartbeat_utc, host_name)
+                INSERT INTO outbox_publishers (publisher_id, registered_at_utc, last_heartbeat_utc, host_name)
                 VALUES (@id, clock_timestamp() - interval '5 minutes', clock_timestamp() - interval '5 minutes', 'dead-host')
-                ON CONFLICT (producer_id) DO UPDATE SET last_heartbeat_utc = clock_timestamp() - interval '5 minutes'",
+                ON CONFLICT (publisher_id) DO UPDATE SET last_heartbeat_utc = clock_timestamp() - interval '5 minutes'",
                 conn);
-            insertCmd.Parameters.AddWithValue("@id", producerIdA);
+            insertCmd.Parameters.AddWithValue("@id", publisherIdA);
             await insertCmd.ExecuteNonQueryAsync();
 
-            // Assign half the partitions to the dead producer
+            // Assign half the partitions to the dead publisher
             await using var assignCmd = new NpgsqlCommand(@"
-                UPDATE outbox_partitions SET owner_producer_id = @id, owned_since_utc = clock_timestamp()
+                UPDATE outbox_partitions SET owner_publisher_id = @id, owned_since_utc = clock_timestamp()
                 WHERE partition_id < 16", conn);
-            assignCmd.Parameters.AddWithValue("@id", producerIdA);
+            assignCmd.Parameters.AddWithValue("@id", publisherIdA);
             await assignCmd.ExecuteNonQueryAsync();
         }
 
@@ -90,12 +90,12 @@ public class ProcessKillTests
             await OutboxTestHelper.WaitUntilAsync(async () =>
             {
                 var owners = await OutboxTestHelper.GetPartitionOwnersAsync(_infra.ConnectionString);
-                var producerB = (await OutboxTestHelper.GetProducerIdsAsync(_infra.ConnectionString))
-                    .FirstOrDefault(id => id != producerIdA);
+                var publisherB = (await OutboxTestHelper.GetPublisherIdsAsync(_infra.ConnectionString))
+                    .FirstOrDefault(id => id != publisherIdA);
 
-                if (producerB == null) return false;
+                if (publisherB == null) return false;
 
-                return owners.Values.Count(v => v == producerB) > 16;
+                return owners.Values.Count(v => v == publisherB) > 16;
             }, TimeSpan.FromSeconds(30), message: "Publisher B should claim A's orphaned partitions");
 
             // Wait for all messages to drain
@@ -159,26 +159,26 @@ public class ProcessKillTests
             $"Retry counts before kill: {string.Join(", ", retryCountsBeforeKill.Select(r => $"seq={r.Seq}:retry={r.RetryCount}"))}");
 
         // Simulate SIGKILL: stop A gracefully (we can't truly SIGKILL in a test),
-        // then re-create stale producer state to simulate the effect of an abrupt kill.
+        // then re-create stale publisher state to simulate the effect of an abrupt kill.
         await hostA.StopAsync();
         hostA.Dispose();
 
-        var producerIdA = "dead-producer-sigkill";
+        var publisherIdA = "dead-publisher-sigkill";
 
         await using (var conn = new NpgsqlConnection(_infra.ConnectionString))
         {
             await conn.OpenAsync();
 
-            // Re-insert stale producer with old heartbeat (simulating no cleanup)
+            // Re-insert stale publisher with old heartbeat (simulating no cleanup)
             await using var insertCmd = new NpgsqlCommand(@"
-                INSERT INTO outbox_producers (producer_id, registered_at_utc, last_heartbeat_utc, host_name)
+                INSERT INTO outbox_publishers (publisher_id, registered_at_utc, last_heartbeat_utc, host_name)
                 VALUES (@id, clock_timestamp() - interval '5 minutes', clock_timestamp() - interval '5 minutes', 'dead-host')
-                ON CONFLICT (producer_id) DO UPDATE SET last_heartbeat_utc = clock_timestamp() - interval '5 minutes'",
+                ON CONFLICT (publisher_id) DO UPDATE SET last_heartbeat_utc = clock_timestamp() - interval '5 minutes'",
                 conn);
-            insertCmd.Parameters.AddWithValue("@id", producerIdA);
+            insertCmd.Parameters.AddWithValue("@id", publisherIdA);
             await insertCmd.ExecuteNonQueryAsync();
 
-            // Re-insert messages that would have been leased by the dead producer
+            // Re-insert messages that would have been leased by the dead publisher
             // (simulating messages left behind after SIGKILL)
             await using var resetCmd = new NpgsqlCommand(@"
                 UPDATE outbox
@@ -186,7 +186,7 @@ public class ProcessKillTests
                     leased_until_utc = clock_timestamp() + interval '5 seconds'
                 WHERE lease_owner IS NULL",
                 conn);
-            resetCmd.Parameters.AddWithValue("@id", producerIdA);
+            resetCmd.Parameters.AddWithValue("@id", publisherIdA);
             await resetCmd.ExecuteNonQueryAsync();
         }
 

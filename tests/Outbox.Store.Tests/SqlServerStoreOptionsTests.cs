@@ -122,4 +122,46 @@ public class SqlServerStoreOptionsTests
         Assert.NotEmpty(results);
         Assert.Contains(results, r => r.MemberNames.Contains("TablePrefix"));
     }
+
+    [Fact]
+    public void GroupName_DefaultsToNull()
+    {
+        var opts = new SqlServerStoreOptions();
+        Assert.Null(opts.GroupName);
+    }
+
+    [Fact]
+    public void SharedSchemaName_DefaultsToNull()
+    {
+        var opts = new SqlServerStoreOptions();
+        Assert.Null(opts.SharedSchemaName);
+    }
+
+    [Fact]
+    public void OutboxTableName_WhenNoPrefix_DefaultsToOutbox()
+    {
+        var opts = new SqlServerStoreOptions();
+        Assert.Equal("Outbox", opts.GetOutboxTableName());
+    }
+
+    [Fact]
+    public void OutboxTableName_WhenPrefix_DerivesPrefixedName()
+    {
+        var opts = new SqlServerStoreOptions { TablePrefix = "Orders_" };
+        Assert.Equal("Orders_Outbox", opts.GetOutboxTableName());
+    }
+
+    [Fact]
+    public void GetSharedSchemaName_WhenNull_FallsBackToSchemaName()
+    {
+        var opts = new SqlServerStoreOptions { SchemaName = "custom" };
+        Assert.Equal("custom", opts.GetSharedSchemaName());
+    }
+
+    [Fact]
+    public void GetSharedSchemaName_WhenSet_ReturnsExplicitValue()
+    {
+        var opts = new SqlServerStoreOptions { SchemaName = "custom", SharedSchemaName = "shared" };
+        Assert.Equal("shared", opts.GetSharedSchemaName());
+    }
 }

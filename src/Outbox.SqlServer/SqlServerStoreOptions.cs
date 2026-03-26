@@ -24,4 +24,14 @@ public sealed class SqlServerStoreOptions
 
     [Range(1, int.MaxValue)]
     public int TransientRetryBackoffMs { get; set; } = 1000;
+
+    public string? GroupName { get; set; }
+
+    [RegularExpression(@"^[a-zA-Z_][a-zA-Z0-9_]*$",
+        ErrorMessage = "SharedSchemaName must match pattern [a-zA-Z_][a-zA-Z0-9_]*.")]
+    public string? SharedSchemaName { get; set; }
+
+    public string GetOutboxTableName() => $"{TablePrefix}Outbox";
+
+    public string GetSharedSchemaName() => SharedSchemaName ?? SchemaName;
 }

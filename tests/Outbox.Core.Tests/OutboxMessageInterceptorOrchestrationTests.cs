@@ -1,8 +1,8 @@
 // Copyright (c) OrgName. All rights reserved.
 
 using System.Text;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
 using Outbox.Core.Abstractions;
@@ -45,6 +45,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
 
         _optionsMonitor = Substitute.For<IOptionsMonitor<OutboxPublisherOptions>>();
         _optionsMonitor.CurrentValue.Returns(_options);
+        _optionsMonitor.Get(Arg.Any<string>()).Returns(_options);
     }
 
     public void Dispose()
@@ -54,11 +55,23 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
     }
 
     private OutboxPublisherService CreateService(
-        IReadOnlyList<IOutboxMessageInterceptor>? interceptors = null) =>
-        new(_store, _transport, _eventHandler, _optionsMonitor,
-            NullLogger<OutboxPublisherService>.Instance,
-            _instrumentation, _healthState, _appLifetime,
-            interceptors ?? Array.Empty<IOutboxMessageInterceptor>());
+        IReadOnlyList<IOutboxMessageInterceptor>? interceptors = null)
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton(_store);
+        services.AddSingleton(_transport);
+        services.AddSingleton(_eventHandler);
+        services.AddSingleton(_instrumentation);
+        services.AddSingleton(_healthState);
+        services.AddLogging();
+        if (interceptors is not null)
+        {
+            foreach (var interceptor in interceptors)
+                services.AddSingleton(interceptor);
+        }
+        var sp = services.BuildServiceProvider();
+        return new OutboxPublisherService(sp, _optionsMonitor, _appLifetime);
+    }
 
     private static OutboxMessage MakeMessage(long seq, string topic = "orders", string key = "key-1") =>
         new(seq, topic, key, "OrderCreated", null, Encoding.UTF8.GetBytes("{}"),
@@ -67,7 +80,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
     [Fact]
     public async Task NoInterceptors_MessagePassedUnchanged()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -93,7 +106,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
     [Fact]
     public async Task Interceptor_TransformsPayload_TransportReceivesTransformedMessage()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -125,7 +138,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
     [Fact]
     public async Task Interceptor_AppliesToReturnsFalse_MessagePassedUnchanged()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -158,7 +171,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
     [Fact]
     public async Task MultipleInterceptors_RunInOrder_SecondSeesMutationsFromFirst()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -209,7 +222,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
     [Fact]
     public async Task Interceptor_Throws_GroupReleasedWithRetryIncrement()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
         _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -246,7 +259,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
     [Fact]
     public async Task EventHandler_ReceivesOriginalMessage_NotIntercepted()
     {
-        _store.RegisterProducerAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var originalPayload = Encoding.UTF8.GetBytes("original");
         var messages = new[]
         {

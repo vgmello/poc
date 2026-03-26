@@ -203,12 +203,12 @@ public static class OutboxTestHelper
         return results;
     }
 
-    public static async Task<List<string>> GetProducerIdsAsync(string connectionString)
+    public static async Task<List<string>> GetPublisherIdsAsync(string connectionString)
     {
         var ids = new List<string>();
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
-        await using var cmd = new NpgsqlCommand("SELECT producer_id FROM outbox_producers", conn);
+        await using var cmd = new NpgsqlCommand("SELECT publisher_id FROM outbox_publishers", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
 
         while (await reader.ReadAsync())
@@ -225,7 +225,7 @@ public static class OutboxTestHelper
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
         await using var cmd = new NpgsqlCommand(
-            "SELECT partition_id, owner_producer_id FROM outbox_partitions ORDER BY partition_id", conn);
+            "SELECT partition_id, owner_publisher_id FROM outbox_partitions ORDER BY partition_id", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
 
         while (await reader.ReadAsync())
@@ -245,8 +245,8 @@ public static class OutboxTestHelper
         await using var conn = new NpgsqlConnection(connectionString);
         await conn.OpenAsync();
         await using var cmd = new NpgsqlCommand(@"
-            TRUNCATE outbox, outbox_dead_letter, outbox_producers;
-            UPDATE outbox_partitions SET owner_producer_id = NULL, owned_since_utc = NULL, grace_expires_utc = NULL;",
+            TRUNCATE outbox, outbox_dead_letter, outbox_publishers;
+            UPDATE outbox_partitions SET owner_publisher_id = NULL, owned_since_utc = NULL, grace_expires_utc = NULL;",
             conn);
         await cmd.ExecuteNonQueryAsync();
     }

@@ -7,7 +7,7 @@ A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and st
 ## Key Architecture
 
 - `OutboxPublisherService` (BackgroundService) runs 5 parallel loops: publish, heartbeat, rebalance, orphan sweep, dead-letter sweep
-- Messages are partitioned by `hash(partition_key) % total_partitions`, each partition owned by one producer
+- Messages are partitioned by `hash(partition_key) % total_partitions`, each partition owned by one publisher
 - Circuit breaker per topic prevents retry-count burn during broker outages
 - Leases with timeout prevent duplicate processing across publishers
 

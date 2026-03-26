@@ -89,13 +89,13 @@ This document defines all failure/error scenarios that must be validated through
 
 - Application cannot write new messages during DB outage (application transaction also fails — separate concern)
 - After long outage, partition ownership may be in limbo until grace period + rebalance completes (~2 minutes)
-- Dead producer rows accumulate in `outbox_producers` table
+- Dead publisher rows accumulate in `outbox_publishers` table
 
 **Runbook actions:**
 
 - Monitor error logs from all loops
-- After recovery, verify partition distribution: `SELECT partition_id, owner_producer_id FROM outbox_partitions`
-- Clean up stale producer rows: `DELETE FROM outbox_producers WHERE last_heartbeat_utc < NOW() - INTERVAL '1 hour'`
+- After recovery, verify partition distribution: `SELECT partition_id, owner_publisher_id FROM outbox_partitions`
+- Clean up stale publisher rows: `DELETE FROM outbox_publishers WHERE last_heartbeat_utc < NOW() - INTERVAL '1 hour'`
 
 ---
 
@@ -112,8 +112,8 @@ This document defines all failure/error scenarios that must be validated through
 **Test steps:**
 
 1. Verify both publishers are actively publishing (check consumer for messages from both)
-2. **SIGKILL publisher A** (`kill -9 <pid>`) — no graceful shutdown, no `UnregisterProducerAsync`
-3. **Assert:** Publisher A's row remains in `outbox_producers` table (not cleaned up)
+2. **SIGKILL publisher A** (`kill -9 <pid>`) — no graceful shutdown, no `UnregisterPublisherAsync`
+3. **Assert:** Publisher A's row remains in `outbox_publishers` table (not cleaned up)
 4. Wait `HeartbeatTimeoutSeconds` (30s) — publisher B detects A's stale heartbeat
 5. **Assert:** Publisher B's rebalance marks A's partitions with grace period
 6. Wait `PartitionGracePeriodSeconds` (60s) — grace period expires
@@ -133,8 +133,8 @@ This document defines all failure/error scenarios that must be validated through
 
 **Runbook actions:**
 
-- Verify dead producer's partitions were redistributed: `SELECT * FROM outbox_partitions WHERE owner_producer_id = '<dead-id>'`
-- Clean up dead producer: `DELETE FROM outbox_producers WHERE producer_id = '<dead-id>'`
+- Verify dead publisher's partitions were redistributed: `SELECT * FROM outbox_partitions WHERE owner_publisher_id = '<dead-id>'`
+- Clean up dead publisher: `DELETE FROM outbox_publishers WHERE publisher_id = '<dead-id>'`
 - Monitor for duplicate messages downstream
 
 ---
@@ -154,7 +154,7 @@ This document defines all failure/error scenarios that must be validated through
 1. Wait for publisher to begin processing (at least one batch leased)
 2. **Send SIGTERM** (graceful shutdown via `StopAsync`)
 3. **Assert:** The `PublishLoopAsync` `finally` block releases in-flight leased messages via `ReleaseLeaseAsync(..., incrementRetry: false, CancellationToken.None)` (leased_until_utc = NULL)
-4. **Assert:** `UnregisterProducerAsync` is called (releases partition ownership, not message leases — that happened in step 3)
+4. **Assert:** `UnregisterPublisherAsync` is called (releases partition ownership, not message leases — that happened in step 3)
 5. Immediately start a new publisher instance
 6. **Assert:** The new publisher can lease and process the previously in-flight messages within seconds (not waiting 120s for lease expiry)
 7. **Assert:** All messages eventually published
@@ -304,7 +304,7 @@ This document defines all failure/error scenarios that must be validated through
 2. **Assert:** Restarts increase: 1, 2, 3, 4, 5
 3. **Assert:** Backoff delays double: 2s, 4s, 8s, 16s, 32s
 4. **Assert:** After 5 consecutive restarts, `IHostApplicationLifetime.StopApplication()` is called
-5. **Assert:** Publisher shuts down cleanly (unregisters producer)
+5. **Assert:** Publisher shuts down cleanly (unregisters publisher)
 6. **Assert:** Health check reported `Unhealthy` before shutdown
 
 ---
@@ -482,7 +482,7 @@ The following scenarios are covered by unit tests in `OutboxPublisherServiceTest
 
 ### Cleanup Between Tests
 
-- Truncate `outbox`, `outbox_dead_letter`, `outbox_producers`, `outbox_partitions` tables
+- Truncate `outbox`, `outbox_dead_letter`, `outbox_publishers`, `outbox_partitions` tables
 - Re-seed partitions (32 rows)
 - Purge broker topics or use unique topic names per test
 - Kill all publisher instances

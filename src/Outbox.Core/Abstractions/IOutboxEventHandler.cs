@@ -21,6 +21,6 @@ public interface IOutboxEventHandler
         Task.CompletedTask;
 
     Task OnRebalanceAsync(
-        string producerId, IReadOnlyList<int> ownedPartitions, CancellationToken ct) =>
+        string publisherId, IReadOnlyList<int> ownedPartitions, CancellationToken ct) =>
         Task.CompletedTask;
 }

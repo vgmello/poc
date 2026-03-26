@@ -5,8 +5,8 @@ namespace Outbox.PostgreSQL;
 internal sealed class PostgreSqlQueries
 {
     // Store queries
-    public string RegisterProducer { get; }
-    public string UnregisterProducer { get; }
+    public string RegisterPublisher { get; }
+    public string UnregisterPublisher { get; }
     public string LeaseBatch { get; }
     public string DeletePublished { get; }
     public string ReleaseLeaseWithRetry { get; }
@@ -28,38 +28,44 @@ internal sealed class PostgreSqlQueries
     public string DeadLetterPurge { get; }
     public string DeadLetterPurgeAll { get; }
 
-    public PostgreSqlQueries(string schemaName, string tablePrefix)
+    public PostgreSqlQueries(string schemaName, string tablePrefix, string sharedSchemaName, string outboxTableName)
     {
+        // Data tables — per group, prefixed
         var outboxTable = $"{schemaName}.{tablePrefix}outbox";
         var deadLetterTable = $"{schemaName}.{tablePrefix}outbox_dead_letter";
-        var producersTable = $"{schemaName}.{tablePrefix}outbox_producers";
-        var partitionsTable = $"{schemaName}.{tablePrefix}outbox_partitions";
+
+        // Infrastructure tables — shared, never prefixed
+        var publishersTable = $"{sharedSchemaName}.outbox_publishers";
+        var partitionsTable = $"{sharedSchemaName}.outbox_partitions";
 
         // ---- Store queries ----
 
-        RegisterProducer = $@"
-INSERT INTO {producersTable} (producer_id, registered_at_utc, last_heartbeat_utc, host_name)
-VALUES (@producer_id, clock_timestamp(), clock_timestamp(), @host_name)
-ON CONFLICT (producer_id) DO UPDATE
+        RegisterPublisher = $@"
+INSERT INTO {publishersTable} (publisher_id, outbox_table_name, registered_at_utc, last_heartbeat_utc, host_name)
+VALUES (@publisher_id, @outbox_table_name, clock_timestamp(), clock_timestamp(), @host_name)
+ON CONFLICT (outbox_table_name, publisher_id) DO UPDATE
 SET last_heartbeat_utc = clock_timestamp(),
     host_name          = EXCLUDED.host_name;";
 
-        UnregisterProducer = $@"
+        UnregisterPublisher = $@"
 UPDATE {partitionsTable}
-SET    owner_producer_id = NULL,
+SET    owner_publisher_id = NULL,
        owned_since_utc   = NULL,
        grace_expires_utc = NULL
-WHERE  owner_producer_id = @producer_id;
+WHERE  owner_publisher_id = @publisher_id
+  AND  outbox_table_name = @outbox_table_name;
 
-DELETE FROM {producersTable}
-WHERE  producer_id = @producer_id;";
+DELETE FROM {publishersTable}
+WHERE  publisher_id = @publisher_id
+  AND  outbox_table_name = @outbox_table_name;";
 
         LeaseBatch = $@"
 WITH batch AS (
     SELECT o.sequence_number
     FROM {outboxTable} o
     INNER JOIN {partitionsTable} op
-        ON  op.owner_producer_id = @publisher_id
+        ON  op.outbox_table_name = @outbox_table_name
+        AND op.owner_publisher_id = @publisher_id
         AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < clock_timestamp())
         AND ((hashtext(o.partition_key) & 2147483647) % @total_partitions) = op.partition_id
     WHERE (o.leased_until_utc IS NULL OR o.leased_until_utc < clock_timestamp())
@@ -123,126 +129,143 @@ SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
 FROM dead;";
 
         Heartbeat = $@"
-UPDATE {producersTable}
+UPDATE {publishersTable}
 SET    last_heartbeat_utc = clock_timestamp()
-WHERE  producer_id = @producer_id;
+WHERE  publisher_id = @publisher_id
+  AND  outbox_table_name = @outbox_table_name;
 
 UPDATE {partitionsTable}
 SET    grace_expires_utc = NULL
-WHERE  owner_producer_id = @producer_id
+WHERE  owner_publisher_id = @publisher_id
+  AND  outbox_table_name = @outbox_table_name
   AND  grace_expires_utc IS NOT NULL;";
 
-        GetTotalPartitions = $"SELECT COUNT(*) FROM {partitionsTable};";
+        GetTotalPartitions = $"SELECT COUNT(*) FROM {partitionsTable} WHERE outbox_table_name = @outbox_table_name;";
 
         GetOwnedPartitions = $@"
 SELECT partition_id
 FROM   {partitionsTable}
-WHERE  owner_producer_id = @producer_id;";
+WHERE  owner_publisher_id = @publisher_id
+  AND  outbox_table_name = @outbox_table_name;";
 
         RebalanceMarkStale = $@"
 UPDATE {partitionsTable}
 SET    grace_expires_utc = clock_timestamp() + make_interval(secs => @partition_grace_period_seconds)
-WHERE  owner_producer_id <> @producer_id
-  AND  owner_producer_id IS NOT NULL
+WHERE  owner_publisher_id <> @publisher_id
+  AND  owner_publisher_id IS NOT NULL
   AND  grace_expires_utc IS NULL
-  AND  owner_producer_id NOT IN (
-           SELECT producer_id
-           FROM   {producersTable}
-           WHERE  last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
+  AND  outbox_table_name = @outbox_table_name
+  AND  owner_publisher_id NOT IN (
+           SELECT publisher_id
+           FROM   {publishersTable}
+           WHERE  outbox_table_name = @outbox_table_name
+             AND  last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
        );";
 
         RebalanceClaim = $@"
 WITH counts AS (
     SELECT
-        (SELECT COUNT(*) FROM {partitionsTable}) AS total_partitions,
-        (SELECT COUNT(*) FROM {producersTable}
-         WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
+        (SELECT COUNT(*) FROM {partitionsTable} WHERE outbox_table_name = @outbox_table_name) AS total_partitions,
+        (SELECT COUNT(*) FROM {publishersTable}
+         WHERE outbox_table_name = @outbox_table_name
+           AND last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_publishers,
         (SELECT COUNT(*) FROM {partitionsTable}
-         WHERE owner_producer_id = @producer_id) AS currently_owned
+         WHERE outbox_table_name = @outbox_table_name
+           AND owner_publisher_id = @publisher_id) AS currently_owned
 ),
 fair AS (
     SELECT
-        CEIL(total_partitions::float / NULLIF(active_producers, 0))::int AS fair_share,
+        CEIL(total_partitions::float / NULLIF(active_publishers, 0))::int AS fair_share,
         currently_owned
     FROM counts
 ),
 to_claim AS (
     SELECT op.partition_id
     FROM {partitionsTable} op, fair f
-    WHERE (op.owner_producer_id IS NULL OR op.grace_expires_utc < clock_timestamp())
+    WHERE op.outbox_table_name = @outbox_table_name
+      AND (op.owner_publisher_id IS NULL OR op.grace_expires_utc < clock_timestamp())
       AND f.fair_share - f.currently_owned > 0
     ORDER BY op.partition_id
     LIMIT GREATEST(0, (SELECT f.fair_share - f.currently_owned FROM fair f))
     FOR UPDATE OF op SKIP LOCKED
 )
 UPDATE {partitionsTable}
-SET    owner_producer_id = @producer_id,
+SET    owner_publisher_id = @publisher_id,
        owned_since_utc   = clock_timestamp(),
        grace_expires_utc = NULL
 FROM   to_claim
-WHERE  {partitionsTable}.partition_id = to_claim.partition_id;";
+WHERE  {partitionsTable}.partition_id = to_claim.partition_id
+  AND  {partitionsTable}.outbox_table_name = @outbox_table_name;";
 
         RebalanceRelease = $@"
 WITH counts AS (
     SELECT
-        (SELECT COUNT(*) FROM {partitionsTable}) AS total_partitions,
-        (SELECT COUNT(*) FROM {producersTable}
-         WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
+        (SELECT COUNT(*) FROM {partitionsTable} WHERE outbox_table_name = @outbox_table_name) AS total_partitions,
+        (SELECT COUNT(*) FROM {publishersTable}
+         WHERE outbox_table_name = @outbox_table_name
+           AND last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_publishers,
         (SELECT COUNT(*) FROM {partitionsTable}
-         WHERE owner_producer_id = @producer_id) AS currently_owned
+         WHERE outbox_table_name = @outbox_table_name
+           AND owner_publisher_id = @publisher_id) AS currently_owned
 ),
 fair AS (
     SELECT
-        CEIL(total_partitions::float / NULLIF(active_producers, 0))::int AS fair_share,
+        CEIL(total_partitions::float / NULLIF(active_publishers, 0))::int AS fair_share,
         currently_owned
     FROM counts
 ),
 to_release AS (
     SELECT op.partition_id
     FROM {partitionsTable} op, fair f
-    WHERE op.owner_producer_id = @producer_id
+    WHERE op.outbox_table_name = @outbox_table_name
+      AND op.owner_publisher_id = @publisher_id
       AND f.currently_owned > f.fair_share
     ORDER BY op.partition_id DESC
     LIMIT GREATEST(0, (SELECT f.currently_owned - f.fair_share FROM fair f))
     FOR UPDATE OF op SKIP LOCKED
 )
 UPDATE {partitionsTable}
-SET    owner_producer_id = NULL,
+SET    owner_publisher_id = NULL,
        owned_since_utc   = NULL,
        grace_expires_utc = NULL
 FROM   to_release
-WHERE  {partitionsTable}.partition_id = to_release.partition_id;";
+WHERE  {partitionsTable}.partition_id = to_release.partition_id
+  AND  {partitionsTable}.outbox_table_name = @outbox_table_name;";
 
         ClaimOrphanPartitions = $@"
 WITH counts AS (
     SELECT
-        (SELECT COUNT(*) FROM {partitionsTable}) AS total_partitions,
-        (SELECT COUNT(*) FROM {producersTable}
-         WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_producers,
+        (SELECT COUNT(*) FROM {partitionsTable} WHERE outbox_table_name = @outbox_table_name) AS total_partitions,
+        (SELECT COUNT(*) FROM {publishersTable}
+         WHERE outbox_table_name = @outbox_table_name
+           AND last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)) AS active_publishers,
         (SELECT COUNT(*) FROM {partitionsTable}
-         WHERE owner_producer_id = @producer_id) AS currently_owned
+         WHERE outbox_table_name = @outbox_table_name
+           AND owner_publisher_id = @publisher_id) AS currently_owned
 ),
 fair AS (
     SELECT
-        CEIL(total_partitions::float / NULLIF(active_producers, 0))::int AS fair_share,
+        CEIL(total_partitions::float / NULLIF(active_publishers, 0))::int AS fair_share,
         currently_owned
     FROM counts
 ),
 to_claim AS (
     SELECT op.partition_id
     FROM {partitionsTable} op, fair f
-    WHERE op.owner_producer_id IS NULL
+    WHERE op.outbox_table_name = @outbox_table_name
+      AND op.owner_publisher_id IS NULL
       AND f.fair_share - f.currently_owned > 0
     ORDER BY op.partition_id
     LIMIT GREATEST(0, (SELECT f.fair_share - f.currently_owned FROM fair f))
     FOR UPDATE OF op SKIP LOCKED
 )
 UPDATE {partitionsTable}
-SET    owner_producer_id = @producer_id,
+SET    owner_publisher_id = @publisher_id,
        owned_since_utc   = clock_timestamp(),
        grace_expires_utc = NULL
 FROM   to_claim
-WHERE  {partitionsTable}.partition_id = to_claim.partition_id;";
+WHERE  {partitionsTable}.partition_id = to_claim.partition_id
+  AND  {partitionsTable}.outbox_table_name = @outbox_table_name;";
 
         SweepDeadLetters = $@"
 WITH dead AS (
@@ -255,9 +278,10 @@ WITH dead AS (
           AND (lease_owner IS NULL
                OR leased_until_utc < clock_timestamp() - make_interval(secs => @lease_duration_seconds)
                OR lease_owner NOT IN (
-                   SELECT producer_id
-                   FROM {producersTable}
-                   WHERE last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
+                   SELECT publisher_id
+                   FROM {publishersTable}
+                   WHERE outbox_table_name = @outbox_table_name
+                     AND last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
                ))
         FOR UPDATE SKIP LOCKED
     ) d

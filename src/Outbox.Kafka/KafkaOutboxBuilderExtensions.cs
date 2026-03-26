@@ -3,6 +3,7 @@
 using Confluent.Kafka;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Outbox.Core.Abstractions;
 using Outbox.Core.Builder;
@@ -12,34 +13,81 @@ namespace Outbox.Kafka;
 
 public static class KafkaOutboxBuilderExtensions
 {
+    private const string ConfigSection = "Outbox:Kafka";
+
     public static IKafkaOutboxBuilder UseKafka(
         this IOutboxBuilder builder,
         Action<KafkaTransportOptions>? configure = null)
     {
-        builder.Services.Configure<KafkaTransportOptions>(
-            builder.Configuration.GetSection("Outbox:Kafka"));
+        var groupName = builder.GroupName;
 
-        if (configure is not null)
-            builder.Services.Configure(configure);
-
-        builder.Services.TryAddSingleton<IProducer<string, byte[]>>(sp =>
+        if (groupName is not null)
         {
-            var opts = sp.GetRequiredService<IOptions<KafkaTransportOptions>>().Value;
-            var config = new ProducerConfig
+            builder.Services.Configure<KafkaTransportOptions>(groupName,
+                builder.Configuration.GetSection(ConfigSection));
+
+            if (configure is not null)
+                builder.Services.Configure(groupName, configure);
+
+            builder.Services.TryAddKeyedSingleton<IProducer<string, byte[]>>(groupName, (sp, _) =>
             {
-                BootstrapServers = opts.BootstrapServers,
-                Acks = Enum.Parse<Acks>(opts.Acks, ignoreCase: true),
-                EnableIdempotence = opts.EnableIdempotence,
-                MessageSendMaxRetries = opts.MessageSendMaxRetries,
-                RetryBackoffMs = opts.RetryBackoffMs,
-                LingerMs = opts.LingerMs,
-                MessageTimeoutMs = opts.MessageTimeoutMs
-            };
+                var opts = sp.GetRequiredService<IOptionsMonitor<KafkaTransportOptions>>().Get(groupName);
+                var config = new ProducerConfig
+                {
+                    BootstrapServers = opts.BootstrapServers,
+                    Acks = Enum.Parse<Acks>(opts.Acks, ignoreCase: true),
+                    EnableIdempotence = opts.EnableIdempotence,
+                    MessageSendMaxRetries = opts.MessageSendMaxRetries,
+                    RetryBackoffMs = opts.RetryBackoffMs,
+                    LingerMs = opts.LingerMs,
+                    MessageTimeoutMs = opts.MessageTimeoutMs
+                };
 
-            return new ProducerBuilder<string, byte[]>(config).Build();
-        });
+                return new ProducerBuilder<string, byte[]>(config).Build();
+            });
 
-        builder.Services.TryAddSingleton<IOutboxTransport, KafkaOutboxTransport>();
+            builder.Services.TryAddKeyedSingleton<IOutboxTransport>(groupName, (sp, _) =>
+            {
+                var opts = sp.GetRequiredService<IOptionsMonitor<KafkaTransportOptions>>().Get(groupName);
+                var producer = sp.GetRequiredKeyedService<IProducer<string, byte[]>>(groupName);
+                var logger = sp.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger<KafkaOutboxTransport>();
+                var interceptors = sp.GetKeyedServices<ITransportMessageInterceptor<Message<string, byte[]>>>(groupName);
+
+                return new KafkaOutboxTransport(
+                    producer,
+                    Options.Create(opts),
+                    logger,
+                    interceptors);
+            });
+        }
+        else
+        {
+            builder.Services.Configure<KafkaTransportOptions>(
+                builder.Configuration.GetSection(ConfigSection));
+
+            if (configure is not null)
+                builder.Services.Configure(configure);
+
+            builder.Services.TryAddSingleton<IProducer<string, byte[]>>(sp =>
+            {
+                var opts = sp.GetRequiredService<IOptions<KafkaTransportOptions>>().Value;
+                var config = new ProducerConfig
+                {
+                    BootstrapServers = opts.BootstrapServers,
+                    Acks = Enum.Parse<Acks>(opts.Acks, ignoreCase: true),
+                    EnableIdempotence = opts.EnableIdempotence,
+                    MessageSendMaxRetries = opts.MessageSendMaxRetries,
+                    RetryBackoffMs = opts.RetryBackoffMs,
+                    LingerMs = opts.LingerMs,
+                    MessageTimeoutMs = opts.MessageTimeoutMs
+                };
+
+                return new ProducerBuilder<string, byte[]>(config).Build();
+            });
+
+            builder.Services.TryAddSingleton<IOutboxTransport, KafkaOutboxTransport>();
+        }
 
         return new KafkaOutboxBuilder(builder);
     }
@@ -49,14 +97,45 @@ public static class KafkaOutboxBuilderExtensions
         Func<IServiceProvider, IProducer<string, byte[]>> producerFactory,
         Action<KafkaTransportOptions>? configure = null)
     {
-        builder.Services.Configure<KafkaTransportOptions>(
-            builder.Configuration.GetSection("Outbox:Kafka"));
+        var groupName = builder.GroupName;
 
-        if (configure is not null)
-            builder.Services.Configure(configure);
+        if (groupName is not null)
+        {
+            builder.Services.Configure<KafkaTransportOptions>(groupName,
+                builder.Configuration.GetSection(ConfigSection));
 
-        builder.Services.TryAddSingleton(producerFactory);
-        builder.Services.TryAddSingleton<IOutboxTransport, KafkaOutboxTransport>();
+            if (configure is not null)
+                builder.Services.Configure(groupName, configure);
+
+            builder.Services.TryAddKeyedSingleton<IProducer<string, byte[]>>(groupName,
+                (sp, _) => producerFactory(sp));
+
+            builder.Services.TryAddKeyedSingleton<IOutboxTransport>(groupName, (sp, _) =>
+            {
+                var opts = sp.GetRequiredService<IOptionsMonitor<KafkaTransportOptions>>().Get(groupName);
+                var producer = sp.GetRequiredKeyedService<IProducer<string, byte[]>>(groupName);
+                var logger = sp.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger<KafkaOutboxTransport>();
+                var interceptors = sp.GetKeyedServices<ITransportMessageInterceptor<Message<string, byte[]>>>(groupName);
+
+                return new KafkaOutboxTransport(
+                    producer,
+                    Options.Create(opts),
+                    logger,
+                    interceptors);
+            });
+        }
+        else
+        {
+            builder.Services.Configure<KafkaTransportOptions>(
+                builder.Configuration.GetSection(ConfigSection));
+
+            if (configure is not null)
+                builder.Services.Configure(configure);
+
+            builder.Services.TryAddSingleton(producerFactory);
+            builder.Services.TryAddSingleton<IOutboxTransport, KafkaOutboxTransport>();
+        }
 
         return new KafkaOutboxBuilder(builder);
     }
@@ -70,12 +149,16 @@ internal sealed class KafkaOutboxBuilder : IKafkaOutboxBuilder
 
     public IServiceCollection Services => _inner.Services;
     public Microsoft.Extensions.Configuration.IConfiguration Configuration => _inner.Configuration;
+    public string? GroupName => _inner.GroupName;
 
     public IKafkaOutboxBuilder AddTransportInterceptor<TInterceptor>()
         where TInterceptor : class, ITransportMessageInterceptor<Message<string, byte[]>>
     {
-        Services.TryAddEnumerable(
-            ServiceDescriptor.Singleton<ITransportMessageInterceptor<Message<string, byte[]>>, TInterceptor>());
+        if (GroupName is not null)
+            Services.AddKeyedSingleton<ITransportMessageInterceptor<Message<string, byte[]>>, TInterceptor>(GroupName);
+        else
+            Services.TryAddEnumerable(
+                ServiceDescriptor.Singleton<ITransportMessageInterceptor<Message<string, byte[]>>, TInterceptor>());
 
         return this;
     }
@@ -87,7 +170,11 @@ internal sealed class KafkaOutboxBuilder : IKafkaOutboxBuilder
     public IKafkaOutboxBuilder AddTransportInterceptor(
         Func<IServiceProvider, ITransportMessageInterceptor<Message<string, byte[]>>> factory)
     {
-        Services.AddSingleton(factory);
+        if (GroupName is not null)
+            Services.AddKeyedSingleton<ITransportMessageInterceptor<Message<string, byte[]>>>(
+                GroupName, (sp, _) => factory(sp));
+        else
+            Services.AddSingleton(factory);
 
         return this;
     }

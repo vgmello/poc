@@ -33,19 +33,19 @@ This document captures the critical invariants, behavioral requirements, and arc
 
 ### Partition ownership
 
-- Each partition MUST be owned by at most one active producer at any time.
-- The grace period (`PartitionGracePeriodSeconds`) MUST be longer than `LeaseDurationSeconds` to prevent two producers from processing the same partition simultaneously.
+- Each partition MUST be owned by at most one active publisher at any time.
+- The grace period (`PartitionGracePeriodSeconds`) MUST be longer than `LeaseDurationSeconds` to prevent two publishers from processing the same partition simultaneously.
 - Orphan partitions (owner is stale or NULL) MUST eventually be claimed via rebalance or orphan sweep.
 
 ### Graceful shutdown
 
 - On `StopAsync`, the publisher MUST release all in-flight leases (`incrementRetry: false`).
-- On `StopAsync`, the publisher MUST call `UnregisterProducerAsync` to release partitions.
+- On `StopAsync`, the publisher MUST call `UnregisterPublisherAsync` to release partitions.
 - The `finally` block in `ExecuteAsync` MUST use `CancellationToken.None` for cleanup operations.
 
 ### Startup resilience
 
-- `RegisterProducerAsync` MUST retry with exponential backoff. A transient DB failure at startup must NOT permanently kill the publisher.
+- `RegisterPublisherAsync` MUST retry with exponential backoff. A transient DB failure at startup must NOT permanently kill the publisher.
 - The publisher MUST be able to start and begin processing without any pre-existing data in the outbox table.
 
 ### Circuit breaker behavior
@@ -125,15 +125,15 @@ Any transport implementation MUST satisfy:
 
 Any store implementation MUST satisfy:
 
-1. **LeaseBatch:** MUST return messages ordered by `event_datetime_utc, event_ordinal`. MUST use row-level locking with skip-locked semantics. MUST only return messages for partitions owned by the requesting producer (with grace period check). MUST return `payload_content_type` alongside `headers`/`payload`. MUST deserialize `headers` from JSON text to `Dictionary<string, string>?`.
-2. **DeletePublished:** MUST check `lease_owner`. MUST NOT delete messages owned by another producer.
+1. **LeaseBatch:** MUST return messages ordered by `event_datetime_utc, event_ordinal`. MUST use row-level locking with skip-locked semantics. MUST only return messages for partitions owned by the requesting publisher (with grace period check). MUST return `payload_content_type` alongside `headers`/`payload`. MUST deserialize `headers` from JSON text to `Dictionary<string, string>?`.
+2. **DeletePublished:** MUST check `lease_owner`. MUST NOT delete messages owned by another publisher.
 3. **ReleaseLease:** MUST check `lease_owner`. `incrementRetry: true` MUST increment `retry_count`. `incrementRetry: false` MUST NOT.
 4. **DeadLetter:** MUST atomically delete from outbox and insert into dead_letter (CTE/OUTPUT INTO pattern). MUST check `lease_owner`. MUST carry `payload_content_type` through to the dead letter table.
 5. **Heartbeat:** MUST update `last_heartbeat_utc` AND clear `grace_expires_utc` on owned partitions in the SAME transaction. If either update fails, both must roll back to prevent stale heartbeat with cleared grace periods (or vice versa).
-6. **Rebalance:** MUST calculate fair share, mark stale producers' partitions with grace period, claim available partitions, release excess. MUST run in a transaction.
+6. **Rebalance:** MUST calculate fair share, mark stale publishers' partitions with grace period, claim available partitions, release excess. MUST run in a transaction.
 7. **Transient retry:** All store operations MUST go through `ExecuteWithRetryAsync` with exponential backoff + jitter. MUST detect transient errors (deadlocks, timeouts, connection failures).
 8. **Partition count caching:** The cached partition count MUST be refreshed at most once every 60 seconds. Reads and writes to the cache MUST use `Volatile.Read/Write` for cross-thread visibility without heavy locks.
-9. **Dead-letter sweep conditions:** `SweepDeadLettersAsync` MUST only dead-letter messages when: (a) `lease_owner IS NULL` (explicitly released), OR (b) lease expired beyond `LeaseDurationSeconds` (stale), OR (c) lease owner is not in the active producers table (dead producer). Messages actively leased by a live publisher MUST NOT be swept, even if `retry_count >= MaxRetryCount`.
+9. **Dead-letter sweep conditions:** `SweepDeadLettersAsync` MUST only dead-letter messages when: (a) `lease_owner IS NULL` (explicitly released), OR (b) lease expired beyond `LeaseDurationSeconds` (stale), OR (c) lease owner is not in the active publishers table (dead publisher). Messages actively leased by a live publisher MUST NOT be swept, even if `retry_count >= MaxRetryCount`.
 10. **Content type propagation:** All operations that move messages between tables (dead-letter, sweep, replay) MUST include `payload_content_type` in both the source SELECT and destination INSERT column lists. Content types default to `'application/json'` in the schema for backward compatibility with inserts that omit them.
 
 ---
@@ -143,7 +143,7 @@ Any store implementation MUST satisfy:
 | Relationship                                                | Requirement                                              | Why                                              |
 | ----------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------ |
 | `HeartbeatIntervalMs * 3 <= HeartbeatTimeoutSeconds * 1000` | Must tolerate at least 2 missed heartbeats (3 intervals) | Prevents false staleness                         |
-| `LeaseDurationSeconds < PartitionGracePeriodSeconds`        | Grace period must outlast leases                         | Prevents two producers processing same partition |
+| `LeaseDurationSeconds < PartitionGracePeriodSeconds`        | Grace period must outlast leases                         | Prevents two publishers processing same partition |
 | `CircuitBreakerOpenDurationSeconds > 0`                     | Must eventually probe                                    | Prevents permanent circuit open                  |
 | `MaxRetryCount > CircuitBreakerFailureThreshold`            | Retries must outlast circuit threshold                   | Prevents dead-lettering before circuit opens     |
 | `TransientRetryBackoffMs * 2^(MaxAttempts-1) > 20000`       | Retry budget must cover DB failover                      | Azure SQL failover takes 20-30s                  |
@@ -152,7 +152,7 @@ Any store implementation MUST satisfy:
 
 ## Anti-Patterns to Watch For
 
-1. **Using `ct` (linked token) for cleanup operations.** Always use `CancellationToken.None` for `ReleaseLeaseAsync`, `UnregisterProducerAsync`, and health state updates in failure paths.
+1. **Using `ct` (linked token) for cleanup operations.** Always use `CancellationToken.None` for `ReleaseLeaseAsync`, `UnregisterPublisherAsync`, and health state updates in failure paths.
 2. **Incrementing retry count after transport success.** If `SendAsync` succeeded, any subsequent failure (delete, event handler) must NOT increment retry count.
 3. **Tight loops without backoff.** Any loop that processes messages must have a delay when no progress is made (empty batch, all circuits open, all errors).
 4. **Blocking ThreadPool threads.** Synchronous I/O on ThreadPool threads can starve other async operations (heartbeat, rebalance). Use `TaskCreationOptions.LongRunning` for blocking work.

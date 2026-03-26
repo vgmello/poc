@@ -11,6 +11,7 @@ public interface IOutboxBuilder
 {
     IServiceCollection Services { get; }
     IConfiguration Configuration { get; }
+    string? GroupName { get; }
 
     IOutboxBuilder ConfigurePublisher(Action<OutboxPublisherOptions> configure);
 

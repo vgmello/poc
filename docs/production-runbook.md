@@ -41,7 +41,7 @@ Application Transaction
          ↓
 OutboxPublisherService (5 concurrent loops):
 ├── PublishLoop    — Lease → Send → Delete (core path)
-├── HeartbeatLoop  — Keep producer alive (10s)
+├── HeartbeatLoop  — Keep publisher alive (10s)
 ├── RebalanceLoop  — Redistribute partitions (30s)
 ├── OrphanSweep    — Claim unowned partitions (60s)
 └── DeadLetterSweep — Quarantine poison messages (60s)
@@ -58,7 +58,7 @@ Consumer
 | LeaseDurationSeconds | 45 | How long a lease is held |
 | MaxRetryCount | 5 | Retries before dead-lettering |
 | HeartbeatIntervalMs | 10,000 | Heartbeat frequency |
-| HeartbeatTimeoutSeconds | 30 | Stale producer detection |
+| HeartbeatTimeoutSeconds | 30 | Stale publisher detection |
 | PartitionGracePeriodSeconds | 60 | Safety window on partition handover |
 | CircuitBreakerFailureThreshold | 3 | Consecutive failures to open circuit |
 | CircuitBreakerOpenDurationSeconds | 30 | Time before half-open probe |
@@ -154,7 +154,7 @@ The health check at `/health` reports three states:
 2. HeartbeatLoop retries every 10s, PublishLoop backs off to `MaxPollIntervalMs` (5s)
 3. No messages are lost — they remain safely in the outbox table
 4. When DB recovers, all loops resume normal operation
-5. Producer re-establishes heartbeat, rebalance redistributes partitions if needed
+5. Publisher re-establishes heartbeat, rebalance redistributes partitions if needed
 
 **Auto-recovery:** YES — fully automatic when DB becomes reachable.
 
@@ -167,14 +167,14 @@ The health check at `/health` reports three states:
 - Monitor error log volume — each loop logs every 5-10s during outage
 - After recovery, verify partition distribution:
     ```sql
-    SELECT partition_id, owner_producer_id FROM outbox_partitions ORDER BY partition_id;
+    SELECT partition_id, owner_publisher_id FROM outbox_partitions ORDER BY partition_id;
     ```
-- Clean up stale producer rows:
+- Clean up stale publisher rows:
     ```sql
     -- PostgreSQL
-    DELETE FROM outbox_producers WHERE last_heartbeat_utc < clock_timestamp() - INTERVAL '1 hour';
+    DELETE FROM outbox_publishers WHERE last_heartbeat_utc < clock_timestamp() - INTERVAL '1 hour';
     -- SQL Server
-    DELETE FROM dbo.OutboxProducers WHERE LastHeartbeatUtc < DATEADD(HOUR, -1, SYSUTCDATETIME());
+    DELETE FROM dbo.OutboxPublishers WHERE LastHeartbeatUtc < DATEADD(HOUR, -1, SYSUTCDATETIME());
     ```
 - After long outage (> `PartitionGracePeriodSeconds`), expect full rebalance
 
@@ -185,17 +185,17 @@ The health check at `/health` reports three states:
 **Symptoms:**
 
 - Publisher process disappears suddenly
-- No `UnregisterProducerAsync` called — producer row remains in DB
+- No `UnregisterPublisherAsync` called — publisher row remains in DB
 - Leased messages remain locked until `LeaseDurationSeconds` expires
 - Surviving publishers detect stale heartbeat after `HeartbeatTimeoutSeconds` (30s)
 
 **What happens automatically:**
 
-1. Dead producer's heartbeat becomes stale
+1. Dead publisher's heartbeat becomes stale
 2. Surviving publishers detect staleness during rebalance loop (every 30s)
-3. Dead producer's partitions enter grace period (`PartitionGracePeriodSeconds` = 60s)
+3. Dead publisher's partitions enter grace period (`PartitionGracePeriodSeconds` = 60s)
 4. After grace period, surviving publishers claim orphaned partitions
-5. Dead producer's leases expire after `LeaseDurationSeconds` (45s)
+5. Dead publisher's leases expire after `LeaseDurationSeconds` (45s)
 6. Expired-lease messages are re-leased by surviving publishers with `retry_count` incremented
 7. All messages eventually published (some may be duplicated)
 
@@ -206,18 +206,18 @@ The health check at `/health` reports three states:
 
 **Operator actions:**
 
-- Verify dead producer's partitions were redistributed:
+- Verify dead publisher's partitions were redistributed:
     ```sql
-    SELECT * FROM outbox_partitions WHERE owner_producer_id = '<dead-producer-id>';
+    SELECT * FROM outbox_partitions WHERE owner_publisher_id = '<dead-publisher-id>';
     ```
-- Clean up dead producer row:
+- Clean up dead publisher row:
     ```sql
-    DELETE FROM outbox_producers WHERE producer_id = '<dead-producer-id>';
+    DELETE FROM outbox_publishers WHERE publisher_id = '<dead-publisher-id>';
     ```
 - Monitor for duplicate messages downstream
 - If multiple publishers die simultaneously, manually verify all 32 partitions are owned:
     ```sql
-    SELECT COUNT(*) FROM outbox_partitions WHERE owner_producer_id IS NULL;
+    SELECT COUNT(*) FROM outbox_partitions WHERE owner_publisher_id IS NULL;
     ```
 
 ---
@@ -227,14 +227,14 @@ The health check at `/health` reports three states:
 **Symptoms:**
 
 - Publisher stops processing (expected during deployment)
-- `UnregisterProducerAsync` called — producer row deleted, partitions released
+- `UnregisterPublisherAsync` called — publisher row deleted, partitions released
 
 **What happens automatically:**
 
 1. `CancellationToken` is triggered
 2. All loops receive cancellation and exit
 3. In-flight leases are released (leased_until_utc = NULL) — NOT waiting for lease expiry
-4. Producer unregistered from DB
+4. Publisher unregistered from DB
 5. Partitions immediately available for other publishers
 6. New publisher instance (from deployment) claims partitions on startup
 
@@ -410,11 +410,11 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 
 - Check partition ownership:
     ```sql
-    SELECT partition_id, owner_producer_id, grace_expires_utc FROM outbox_partitions ORDER BY partition_id;
+    SELECT partition_id, owner_publisher_id, grace_expires_utc FROM outbox_partitions ORDER BY partition_id;
     ```
 - Check for unowned partitions:
     ```sql
-    SELECT COUNT(*) FROM outbox_partitions WHERE owner_producer_id IS NULL;
+    SELECT COUNT(*) FROM outbox_partitions WHERE owner_publisher_id IS NULL;
     ```
 - Check for messages stuck on specific partitions:
     ```sql
@@ -438,8 +438,8 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 **What happens automatically:**
 
 1. Old instance gracefully shuts down, releases partitions
-2. New instance starts, registers producer, triggers rebalance
-3. Rebalance distributes partitions fairly across active producers
+2. New instance starts, registers publisher, triggers rebalance
+3. Rebalance distributes partitions fairly across active publishers
 4. Grace period prevents new owner from processing during handover window
 
 **Risk:** If deployment replaces all instances simultaneously, all partitions become unowned for up to `RebalanceIntervalMs + PartitionGracePeriodSeconds` (90s).
@@ -450,7 +450,7 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 - Wait at least `RebalanceIntervalMs` (30s) between instance restarts
 - After deployment, verify partition distribution:
     ```sql
-    SELECT owner_producer_id, COUNT(*) FROM outbox_partitions GROUP BY owner_producer_id;
+    SELECT owner_publisher_id, COUNT(*) FROM outbox_partitions GROUP BY owner_publisher_id;
     ```
 - Expected: roughly equal partition counts per publisher (ceil(32 / N))
 
@@ -670,10 +670,10 @@ UPDATE dbo.Outbox SET LeasedUntilUtc = NULL, LeaseOwner = NULL WHERE LeasedUntil
 
 ```sql
 -- PostgreSQL
-UPDATE outbox_partitions SET owner_producer_id = NULL, owned_since_utc = NULL, grace_expires_utc = NULL;
+UPDATE outbox_partitions SET owner_publisher_id = NULL, owned_since_utc = NULL, grace_expires_utc = NULL;
 
 -- SQL Server
-UPDATE dbo.OutboxPartitions SET OwnerProducerId = NULL, OwnedSinceUtc = NULL, GraceExpiresUtc = NULL;
+UPDATE dbo.OutboxPartitions SET OwnerPublisherId = NULL, OwnedSinceUtc = NULL, GraceExpiresUtc = NULL;
 ```
 
 The next rebalance cycle will reassign all partitions.
@@ -719,5 +719,5 @@ DELETE FROM dbo.OutboxDeadLetter WHERE DeadLetteredAtUtc < DATEADD(DAY, -30, SYS
 5. **Dead Letters Total** — `outbox.messages.dead_lettered` counter
 6. **Publish Duration p50/p95/p99** — `outbox.publish.duration` histogram
 7. **Poll Batch Size** — `outbox.poll.batch_size` histogram (0 = no work or partition issue)
-8. **Active Publishers** — count of `outbox_producers` rows with recent heartbeat
+8. **Active Publishers** — count of `outbox_publishers` rows with recent heartbeat
 9. **Partition Distribution** — partitions per publisher (should be roughly equal)

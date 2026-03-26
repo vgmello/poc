@@ -20,51 +20,53 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     private readonly IOptionsMonitor<OutboxPublisherOptions> _publisherOptions;
     private readonly SqlServerQueries _queries;
 
+    private readonly string _optionsName;
     private volatile int _cachedPartitionCount;
     private long _partitionCountRefreshedAtTicks;
 
     public SqlServerOutboxStore(
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         IServiceProvider serviceProvider,
-        IOptions<SqlServerStoreOptions> options,
-        IOptionsMonitor<OutboxPublisherOptions> publisherOptions)
+        IOptionsMonitor<SqlServerStoreOptions> optionsMonitor,
+        IOptionsMonitor<OutboxPublisherOptions> publisherOptions,
+        string? groupName = null)
     {
-        _options = options.Value;
+        _optionsName = groupName ?? Microsoft.Extensions.Options.Options.DefaultName;
+        _options = optionsMonitor.Get(_optionsName);
         _publisherOptions = publisherOptions;
         _db = new SqlServerDbHelper(connectionFactory, serviceProvider, _options);
-        _queries = new SqlServerQueries(_options.SchemaName, _options.TablePrefix);
+        _queries = new SqlServerQueries(
+            _options.SchemaName, _options.TablePrefix,
+            _options.GetSharedSchemaName(), _options.GetOutboxTableName());
 
         DapperConfiguration.EnsureInitialized();
     }
 
     // -------------------------------------------------------------------------
-    // Producer registration
+    // Publisher registration
     // -------------------------------------------------------------------------
 
-    public async Task<string> RegisterProducerAsync(CancellationToken ct)
+    public async Task<string> RegisterPublisherAsync(CancellationToken ct)
     {
-        var opts = _publisherOptions.CurrentValue;
-        var producerId = $"{opts.PublisherName}-{Guid.NewGuid():N}";
+        var opts = _publisherOptions.Get(_optionsName);
+        var publisherId = _options.GroupName is not null
+            ? $"{_options.GroupName}-{opts.PublisherName}-{Guid.NewGuid():N}"
+            : $"{opts.PublisherName}-{Guid.NewGuid():N}";
         var hostName = Environment.MachineName;
 
-        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
-        {
-            await conn.ExecuteAsync(new CommandDefinition(_queries.RegisterProducer,
-                new { ProducerId = producerId, HostName = hostName },
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: cancel)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        await _db.ExecuteAsync(_queries.RegisterPublisher,
+            new { PublisherId = publisherId, HostName = hostName, OutboxTableName = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
 
-        return producerId;
+        return publisherId;
     }
 
-    public async Task UnregisterProducerAsync(string producerId, CancellationToken ct)
+    public async Task UnregisterPublisherAsync(string publisherId, CancellationToken ct)
     {
         await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             await using var tx = await conn.BeginTransactionAsync(cancel).ConfigureAwait(false);
-            await conn.ExecuteAsync(new CommandDefinition(_queries.UnregisterProducer,
-                new { ProducerId = producerId },
+            await conn.ExecuteAsync(new CommandDefinition(_queries.UnregisterPublisher,
+                new { PublisherId = publisherId, OutboxTableName = _options.GetOutboxTableName() },
                 transaction: tx,
                 commandTimeout: _options.CommandTimeoutSeconds,
                 cancellationToken: cancel)).ConfigureAwait(false);
@@ -77,7 +79,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     // -------------------------------------------------------------------------
 
     public async Task<IReadOnlyList<OutboxMessage>> LeaseBatchAsync(
-        string producerId, int batchSize, int leaseDurationSeconds,
+        string publisherId, int batchSize, int leaseDurationSeconds,
         int maxRetryCount, CancellationToken ct)
     {
         var totalPartitions = await GetCachedPartitionCountAsync(ct).ConfigureAwait(false);
@@ -85,24 +87,18 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         if (totalPartitions == 0)
             return Array.Empty<OutboxMessage>();
 
-        IEnumerable<OutboxMessage>? rows = null;
+        var rows = await _db.QueryAsync<OutboxMessage>(_queries.LeaseBatch,
+            new
+            {
+                BatchSize = batchSize,
+                LeaseDurationSeconds = leaseDurationSeconds,
+                PublisherId = publisherId,
+                TotalPartitions = totalPartitions,
+                MaxRetryCount = maxRetryCount,
+                OutboxTableName = _options.GetOutboxTableName()
+            }, ct).ConfigureAwait(false);
 
-        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
-        {
-            rows = await conn.QueryAsync<OutboxMessage>(new CommandDefinition(_queries.LeaseBatch,
-                new
-                {
-                    BatchSize = batchSize,
-                    LeaseDurationSeconds = leaseDurationSeconds,
-                    PublisherId = producerId,
-                    TotalPartitions = totalPartitions,
-                    MaxRetryCount = maxRetryCount
-                },
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: cancel)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
-
-        return rows?.AsList() ?? [];
+        return rows.AsList();
     }
 
     // -------------------------------------------------------------------------
@@ -110,68 +106,53 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     // -------------------------------------------------------------------------
 
     public async Task DeletePublishedAsync(
-        string producerId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
+        string publisherId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
     {
         if (sequenceNumbers.Count == 0) return;
 
-        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
-        {
-            var parameters = new DynamicParameters(new { PublisherId = producerId });
-            parameters.Add("@PublishedIds",
-                SqlServerDbHelper.CreateSequenceNumberTable(sequenceNumbers).AsTableValuedParameter(_queries.TvpType));
-            await conn.ExecuteAsync(new CommandDefinition(_queries.DeletePublished, parameters,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: cancel)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        var parameters = new DynamicParameters(new { PublisherId = publisherId });
+        parameters.Add("@PublishedIds",
+            SqlServerDbHelper.CreateSequenceNumberTable(sequenceNumbers).AsTableValuedParameter(_queries.TvpType));
+        await _db.ExecuteAsync(_queries.DeletePublished, parameters, ct).ConfigureAwait(false);
     }
 
     public async Task ReleaseLeaseAsync(
-        string producerId, IReadOnlyList<long> sequenceNumbers,
+        string publisherId, IReadOnlyList<long> sequenceNumbers,
         bool incrementRetry, CancellationToken ct)
     {
         if (sequenceNumbers.Count == 0) return;
 
         var sql = incrementRetry ? _queries.ReleaseLeaseWithRetry : _queries.ReleaseLeaseNoRetry;
 
-        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
-        {
-            var parameters = new DynamicParameters(new { PublisherId = producerId });
-            parameters.Add("@Ids",
-                SqlServerDbHelper.CreateSequenceNumberTable(sequenceNumbers).AsTableValuedParameter(_queries.TvpType));
-            await conn.ExecuteAsync(new CommandDefinition(sql, parameters,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: cancel)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        var parameters = new DynamicParameters(new { PublisherId = publisherId });
+        parameters.Add("@Ids",
+            SqlServerDbHelper.CreateSequenceNumberTable(sequenceNumbers).AsTableValuedParameter(_queries.TvpType));
+        await _db.ExecuteAsync(sql, parameters, ct).ConfigureAwait(false);
     }
 
     public async Task DeadLetterAsync(
-        string producerId, IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
+        string publisherId, IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
     {
         if (sequenceNumbers.Count == 0) return;
 
-        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
-        {
-            var parameters = new DynamicParameters(new { PublisherId = producerId });
-            parameters.Add("@LastError", lastError, DbType.String, size: 2000);
-            parameters.Add("@Ids",
-                SqlServerDbHelper.CreateSequenceNumberTable(sequenceNumbers).AsTableValuedParameter(_queries.TvpType));
-            await conn.ExecuteAsync(new CommandDefinition(_queries.DeadLetter, parameters,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: cancel)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        var parameters = new DynamicParameters(new { PublisherId = publisherId });
+        parameters.Add("@LastError", lastError, DbType.String, size: 2000);
+        parameters.Add("@Ids",
+            SqlServerDbHelper.CreateSequenceNumberTable(sequenceNumbers).AsTableValuedParameter(_queries.TvpType));
+        await _db.ExecuteAsync(_queries.DeadLetter, parameters, ct).ConfigureAwait(false);
     }
 
     // -------------------------------------------------------------------------
     // Heartbeat
     // -------------------------------------------------------------------------
 
-    public async Task HeartbeatAsync(string producerId, CancellationToken ct)
+    public async Task HeartbeatAsync(string publisherId, CancellationToken ct)
     {
         await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             await using var tx = await conn.BeginTransactionAsync(cancel).ConfigureAwait(false);
             await conn.ExecuteAsync(new CommandDefinition(_queries.Heartbeat,
-                new { ProducerId = producerId },
+                new { PublisherId = publisherId, OutboxTableName = _options.GetOutboxTableName() },
                 transaction: tx,
                 commandTimeout: _options.CommandTimeoutSeconds,
                 cancellationToken: cancel)).ConfigureAwait(false);
@@ -201,35 +182,22 @@ public sealed class SqlServerOutboxStore : IOutboxStore
 
     public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)
     {
-        var result = 0;
-        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
-        {
-            result = await conn.ExecuteScalarAsync<int>(new CommandDefinition(_queries.GetTotalPartitions,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: cancel)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
-
-        return result;
+        return await _db.ScalarAsync<int>(_queries.GetTotalPartitions,
+            new { OutboxTableName = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<int>> GetOwnedPartitionsAsync(string producerId, CancellationToken ct)
+    public async Task<IReadOnlyList<int>> GetOwnedPartitionsAsync(string publisherId, CancellationToken ct)
     {
-        IEnumerable<int>? partitions = null;
-        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
-        {
-            partitions = await conn.QueryAsync<int>(new CommandDefinition(_queries.GetOwnedPartitions,
-                new { ProducerId = producerId },
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: cancel)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        var partitions = await _db.QueryAsync<int>(_queries.GetOwnedPartitions,
+            new { PublisherId = publisherId, OutboxTableName = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
 
-        return partitions?.AsList() ?? [];
+        return partitions.AsList();
     }
 
-    public async Task RebalanceAsync(string producerId, CancellationToken ct)
+    public async Task RebalanceAsync(string publisherId, CancellationToken ct)
     {
         // Snapshot options once to ensure consistent values across all steps within one transaction.
-        var opts = _publisherOptions.CurrentValue;
+        var opts = _publisherOptions.Get(_optionsName);
 
         await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
@@ -237,9 +205,10 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             await conn.ExecuteAsync(new CommandDefinition(_queries.Rebalance,
                 new
                 {
-                    ProducerId = producerId,
+                    PublisherId = publisherId,
                     HeartbeatTimeoutSeconds = opts.HeartbeatTimeoutSeconds,
-                    PartitionGracePeriodSeconds = opts.PartitionGracePeriodSeconds
+                    PartitionGracePeriodSeconds = opts.PartitionGracePeriodSeconds,
+                    OutboxTableName = _options.GetOutboxTableName()
                 },
                 transaction: tx,
                 commandTimeout: _options.CommandTimeoutSeconds,
@@ -248,9 +217,9 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         }, ct).ConfigureAwait(false);
     }
 
-    public async Task ClaimOrphanPartitionsAsync(string producerId, CancellationToken ct)
+    public async Task ClaimOrphanPartitionsAsync(string publisherId, CancellationToken ct)
     {
-        var opts = _publisherOptions.CurrentValue;
+        var opts = _publisherOptions.Get(_optionsName);
 
         await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
         {
@@ -258,8 +227,9 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             await conn.ExecuteAsync(new CommandDefinition(_queries.ClaimOrphanPartitions,
                 new
                 {
-                    ProducerId = producerId,
-                    HeartbeatTimeoutSeconds = opts.HeartbeatTimeoutSeconds
+                    PublisherId = publisherId,
+                    HeartbeatTimeoutSeconds = opts.HeartbeatTimeoutSeconds,
+                    OutboxTableName = _options.GetOutboxTableName()
                 },
                 transaction: tx,
                 commandTimeout: _options.CommandTimeoutSeconds,
@@ -274,33 +244,21 @@ public sealed class SqlServerOutboxStore : IOutboxStore
 
     public async Task SweepDeadLettersAsync(int maxRetryCount, CancellationToken ct)
     {
-        var opts = _publisherOptions.CurrentValue;
+        var opts = _publisherOptions.Get(_optionsName);
 
-        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
+        var parameters = new DynamicParameters(new
         {
-            var parameters = new DynamicParameters(new
-            {
-                MaxRetryCount = maxRetryCount,
-                HeartbeatTimeoutSeconds = opts.HeartbeatTimeoutSeconds,
-                LeaseDurationSeconds = opts.LeaseDurationSeconds
-            });
-            parameters.Add("@LastError", "Max retry count exceeded (background sweep)", DbType.String, size: 2000);
-            await conn.ExecuteAsync(new CommandDefinition(_queries.SweepDeadLetters, parameters,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: cancel)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+            MaxRetryCount = maxRetryCount,
+            HeartbeatTimeoutSeconds = opts.HeartbeatTimeoutSeconds,
+            LeaseDurationSeconds = opts.LeaseDurationSeconds,
+            OutboxTableName = _options.GetOutboxTableName()
+        });
+        parameters.Add("@LastError", "Max retry count exceeded (background sweep)", DbType.String, size: 2000);
+        await _db.ExecuteAsync(_queries.SweepDeadLetters, parameters, ct).ConfigureAwait(false);
     }
 
     public async Task<long> GetPendingCountAsync(CancellationToken ct)
     {
-        long result = 0;
-        await _db.ExecuteWithRetryAsync(async (conn, cancel) =>
-        {
-            result = await conn.ExecuteScalarAsync<long>(new CommandDefinition(_queries.GetPendingCount,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: cancel)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
-
-        return result;
+        return await _db.ScalarAsync<long>(_queries.GetPendingCount, null, ct).ConfigureAwait(false);
     }
 }

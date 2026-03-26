@@ -7,7 +7,7 @@ How `OutboxPublisherService` picks up messages, distributes work across instance
 ```mermaid
 flowchart TB
     subgraph STARTUP["Publisher startup"]
-        S1["Generate producerId\n{PublisherName}-{GUID}"] --> S2["Register in outbox_producers\n(exponential backoff)"]
+        S1["Generate publisherId\n{PublisherName}-{GUID}"] --> S2["Register in outbox_publishers\n(exponential backoff)"]
         S2 --> S3["Create TopicCircuitBreaker"]
         S3 --> LOOPS
     end
@@ -22,7 +22,7 @@ flowchart TB
 
             subgraph LEASE["Message selection (LeaseBatchAsync)"]
                 direction TB
-                L1["Filter: partition owned by this producer"]
+                L1["Filter: partition owned by this publisher"]
                 L1 --> L2["Filter: grace period expired or NULL"]
                 L2 --> L3["Filter: not currently leased\n(leased_until_utc expired or NULL)"]
                 L3 --> L4["Filter: retry_count < MaxRetryCount"]
@@ -68,7 +68,7 @@ flowchart TB
         subgraph REBALANCE["Loop 3: Rebalance\n(every 60s)"]
             direction TB
             R1["1. Mark stale partitions\nwith grace period"]
-            R1 --> R2["2. Claim fair share\nCEIL(partitions / producers)"]
+            R1 --> R2["2. Claim fair share\nCEIL(partitions / publishers)"]
             R2 --> R3["3. Release excess\npartitions"]
             R4["All 3 steps in single\ntransaction + SKIP LOCKED"]
         end
@@ -87,7 +87,7 @@ flowchart TB
         direction LR
         HA1["Message partition_key"] --> HA2["hash(key) % total_partitions"]
         HA2 --> HA3["PG: hashtext(key) & 0x7FFFFFFF\nSQL: ABS(CHECKSUM(key))"]
-        HA3 --> HA4["→ partition_id\n→ owned by ONE producer"]
+        HA3 --> HA4["→ partition_id\n→ owned by ONE publisher"]
     end
 
     subgraph TRANSPORT["Transport layer"]
@@ -113,7 +113,7 @@ flowchart TB
         direction TB
         OG1["Within same (topic, partitionKey):\nSTRICT ORDER guaranteed"]
         OG2["Across different partitionKeys:\nNO ordering guarantee"]
-        OG3["Partition affinity:\nlease duration < grace period\n= no overlap between producers"]
+        OG3["Partition affinity:\nlease duration < grace period\n= no overlap between publishers"]
     end
 
     HASH -.-> LEASE
@@ -125,11 +125,11 @@ flowchart TB
 
 ### Startup
 
-Each publisher generates a unique producer ID (`{PublisherName}-{GUID}`), registers itself in the `outbox_producers` table with exponential backoff, and spins up five parallel loops tied to a shared `CancellationToken`.
+Each publisher generates a unique publisher ID (`{PublisherName}-{GUID}`), registers itself in the `outbox_publishers` table with exponential backoff, and spins up five parallel loops tied to a shared `CancellationToken`.
 
 ### Partition hashing and ownership
 
-Messages map to partitions via `hash(partition_key) % total_partitions`. Each partition is owned by exactly one producer at a time—this is what enables parallel publishing without ordering conflicts.
+Messages map to partitions via `hash(partition_key) % total_partitions`. Each partition is owned by exactly one publisher at a time—this is what enables parallel publishing without ordering conflicts.
 
 - **PostgreSQL:** `(hashtext(key) & 0x7FFFFFFF) % total_partitions`
 - **SQL Server:** `ABS(CAST(CHECKSUM(key) AS BIGINT)) % total_partitions`
@@ -149,7 +149,7 @@ Messages map to partitions via `hash(partition_key) % total_partitions`. Each pa
 
 - **Row-level locking** (`FOR UPDATE SKIP LOCKED` / `ROWLOCK, READPAST`) prevents duplicate leasing
 - **Lease ownership checks** on all delete/release/dead-letter operations
-- **Partition affinity** ensures one producer per partition (`lease duration < grace period`)
+- **Partition affinity** ensures one publisher per partition (`lease duration < grace period`)
 - **Ordering** within `(topic, partitionKey)` is strict (`ORDER BY event_datetime_utc, event_ordinal`)
 
 ### Background loops
@@ -189,7 +189,7 @@ The primary event buffer. Messages are inserted here inside the same transaction
 | `event_ordinal` | `SMALLINT` | Tiebreaker for same-timestamp events (default 0) |
 | `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)` | MIME type (default `application/json`) |
 | `leased_until_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Lease expiry (NULL = unleased) |
-| `lease_owner` | `VARCHAR(128)` / `NVARCHAR(128)` | Producer ID holding the lease (NULL = unleased) |
+| `lease_owner` | `VARCHAR(128)` / `NVARCHAR(128)` | Publisher ID holding the lease (NULL = unleased) |
 | `retry_count` | `INT` | Delivery attempts (default 0) |
 
 **Indexes:**
@@ -227,41 +227,41 @@ Archive for messages that exceeded `MaxRetryCount`. Messages arrive here via two
 
 The move from `outbox` to `outbox_dead_letter` is atomic—a single CTE/OUTPUT deletes from one and inserts into the other in the same transaction.
 
-### outbox_producers
+### outbox_publishers
 
 Heartbeat registry of active publisher instances. Enables failure detection and partition rebalancing.
 
 | Column | Type (PG / SQL Server) | Description |
 |--------|----------------------|-------------|
-| `producer_id` | `VARCHAR(128)` / `NVARCHAR(128)` | PK, format: `{PublisherName}-{GUID}` |
+| `publisher_id` | `VARCHAR(128)` / `NVARCHAR(128)` | PK, format: `{PublisherName}-{GUID}` |
 | `registered_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | First registration time |
 | `last_heartbeat_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Last heartbeat (default `NOW()`) |
 | `host_name` | `VARCHAR(256)` / `NVARCHAR(256)` | Machine name (nullable) |
 
-A producer is considered **stale** when `NOW() - last_heartbeat_utc > HeartbeatTimeoutSeconds`. Stale producers' partitions enter a grace period before being reclaimed.
+A publisher is considered **stale** when `NOW() - last_heartbeat_utc > HeartbeatTimeoutSeconds`. Stale publishers' partitions enter a grace period before being reclaimed.
 
-On graceful shutdown, `UnregisterProducerAsync` releases all owned partitions and deletes the producer row.
+On graceful shutdown, `UnregisterPublisherAsync` releases all owned partitions and deletes the publisher row.
 
 ### outbox_partitions
 
-Partition ownership ledger. Maps logical partitions (0–31 by default) to active producers for work distribution.
+Partition ownership ledger. Maps logical partitions (0–31 by default) to active publishers for work distribution.
 
 | Column | Type (PG / SQL Server) | Description |
 |--------|----------------------|-------------|
 | `partition_id` | `INT` | PK, seeded at install (0 to N-1) |
-| `owner_producer_id` | `VARCHAR(128)` / `NVARCHAR(128)` | FK to `outbox_producers` (nullable) |
+| `owner_publisher_id` | `VARCHAR(128)` / `NVARCHAR(128)` | FK to `outbox_publishers` (nullable) |
 | `owned_since_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | When ownership was acquired (nullable) |
 | `grace_expires_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Grace period expiry (nullable) |
 
 **Partition states:**
 
-| State | `owner_producer_id` | `grace_expires_utc` | Meaning |
+| State | `owner_publisher_id` | `grace_expires_utc` | Meaning |
 |-------|---------------------|---------------------|---------|
-| Unowned | `NULL` | `NULL` | Claimable by any producer |
-| Owned | `<producer_id>` | `NULL` | Only this producer processes its messages |
-| In grace | `<stale_producer_id>` | Future timestamp | Original owner may still be processing; claimable after expiry |
+| Unowned | `NULL` | `NULL` | Claimable by any publisher |
+| Owned | `<publisher_id>` | `NULL` | Only this publisher processes its messages |
+| In grace | `<stale_publisher_id>` | Future timestamp | Original owner may still be processing; claimable after expiry |
 
-**Critical invariant:** `LeaseDurationSeconds < PartitionGracePeriodSeconds`. This ensures that by the time a grace period expires, any outstanding lease from the original owner has also expired—preventing two producers from processing the same partition simultaneously.
+**Critical invariant:** `LeaseDurationSeconds < PartitionGracePeriodSeconds`. This ensures that by the time a grace period expires, any outstanding lease from the original owner has also expired—preventing two publishers from processing the same partition simultaneously.
 
 ### Diagnostic views
 
@@ -286,10 +286,10 @@ flowchart LR
     PUB -->|"retry >= max\n→ DeadLetterAsync\n(atomic CTE)"| DL[(outbox_dead_letter)]
     OUTBOX -->|"Dead-letter sweep\n(atomic CTE)"| DL
 
-    PROD[(outbox_producers)] -->|"HeartbeatAsync"| PROD
+    PROD[(outbox_publishers)] -->|"HeartbeatAsync"| PROD
     PROD -->|"Stale detection\n→ RebalanceAsync"| PART[(outbox_partitions)]
     PART -->|"Owned partition IDs\nfilter LeaseBatchAsync"| OUTBOX
 
-    PUB -->|"RegisterProducerAsync"| PROD
-    PUB -->|"UnregisterProducerAsync\n(shutdown)"| PROD
+    PUB -->|"RegisterPublisherAsync"| PROD
+    PUB -->|"UnregisterPublisherAsync\n(shutdown)"| PROD
 ```

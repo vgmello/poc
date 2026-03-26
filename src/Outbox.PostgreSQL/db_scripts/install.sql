@@ -1,7 +1,7 @@
 -- =============================================================================
 -- Outbox Library — PostgreSQL Schema Installation
 -- =============================================================================
--- Tables: outbox, outbox_dead_letter, outbox_producers, outbox_partitions
+-- Tables: outbox, outbox_dead_letter, outbox_publishers, outbox_partitions
 -- Indexes: partial/covering indexes for efficient polling
 -- Seeds: 32 partitions
 -- =============================================================================
@@ -52,16 +52,17 @@ CREATE TABLE IF NOT EXISTS outbox_dead_letter
 );
 
 -- ---------------------------------------------------------------------------
--- outbox_producers — heartbeat registry for active publisher instances
+-- outbox_publishers — heartbeat registry for active publisher instances
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS outbox_producers
+CREATE TABLE IF NOT EXISTS outbox_publishers
 (
-    producer_id        VARCHAR(128)   NOT NULL,
+    outbox_table_name  VARCHAR(256)   NOT NULL,
+    publisher_id       VARCHAR(128)   NOT NULL,
     registered_at_utc  TIMESTAMPTZ(3) NOT NULL DEFAULT clock_timestamp(),
     last_heartbeat_utc TIMESTAMPTZ(3) NOT NULL DEFAULT clock_timestamp(),
     host_name          VARCHAR(256)   NULL,
 
-    CONSTRAINT pk_outbox_producers PRIMARY KEY (producer_id)
+    CONSTRAINT pk_outbox_publishers PRIMARY KEY (outbox_table_name, publisher_id)
 );
 
 -- ---------------------------------------------------------------------------
@@ -69,12 +70,13 @@ CREATE TABLE IF NOT EXISTS outbox_producers
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS outbox_partitions
 (
-    partition_id      INT            NOT NULL,
-    owner_producer_id VARCHAR(128)   NULL,
-    owned_since_utc   TIMESTAMPTZ(3) NULL,
-    grace_expires_utc TIMESTAMPTZ(3) NULL,
+    outbox_table_name    VARCHAR(256)   NOT NULL,
+    partition_id         INT            NOT NULL,
+    owner_publisher_id   VARCHAR(128)   NULL,
+    owned_since_utc      TIMESTAMPTZ(3) NULL,
+    grace_expires_utc    TIMESTAMPTZ(3) NULL,
 
-    CONSTRAINT pk_outbox_partitions PRIMARY KEY (partition_id)
+    CONSTRAINT pk_outbox_partitions PRIMARY KEY (outbox_table_name, partition_id)
 );
 
 -- ---------------------------------------------------------------------------
@@ -129,7 +131,7 @@ FROM outbox_dead_letter;
 -- ---------------------------------------------------------------------------
 -- Seed 32 partitions (idempotent)
 -- ---------------------------------------------------------------------------
-INSERT INTO outbox_partitions (partition_id, owner_producer_id, owned_since_utc, grace_expires_utc)
-SELECT g, NULL, NULL, NULL
+INSERT INTO outbox_partitions (outbox_table_name, partition_id, owner_publisher_id, owned_since_utc, grace_expires_utc)
+SELECT 'outbox', g, NULL, NULL, NULL
 FROM generate_series(0, 31) AS g
-ON CONFLICT (partition_id) DO NOTHING;
+ON CONFLICT (outbox_table_name, partition_id) DO NOTHING;

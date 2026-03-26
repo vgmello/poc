@@ -9,6 +9,8 @@ public sealed class OutboxPublisherOptions : IValidatableObject
     [Required]
     public string PublisherName { get; set; } = "outbox-publisher";
 
+    public string? GroupName { get; set; }
+
     [Range(1, int.MaxValue)]
     public int BatchSize { get; set; } = 100;
 

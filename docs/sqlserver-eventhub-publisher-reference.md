@@ -8,7 +8,7 @@ Before diving in, here are the options that drive the timings referenced through
 
 | Option | Default | Used by |
 |--------|---------|---------|
-| `PublisherName` | `outbox-publisher` | Producer ID generation |
+| `PublisherName` | `outbox-publisher` | Publisher ID generation |
 | `BatchSize` | 100 | Lease query `TOP` |
 | `LeaseDurationSeconds` | 45 | Lease expiry on messages |
 | `MaxRetryCount` | 5 | Poison threshold |
@@ -41,38 +41,38 @@ SQL Server store options:
 | `TransientRetryMaxAttempts` | 6 | Retry count for transient SQL errors |
 | `TransientRetryBackoffMs` | 1,000 | Base backoff between retries |
 
-All table names below assume the defaults (`dbo.Outbox`, `dbo.OutboxProducers`, etc.). If you set `SchemaName` or `TablePrefix`, the actual names change accordingly.
+All table names below assume the defaults (`dbo.Outbox`, `dbo.OutboxPublishers`, etc.). If you set `SchemaName` or `TablePrefix`, the actual names change accordingly.
 
 ---
 
 ## Phase 1: startup and registration
 
-When the `OutboxPublisherService` starts, it generates a producer ID and registers itself in SQL Server.
+When the `OutboxPublisherService` starts, it generates a publisher ID and registers itself in SQL Server.
 
-### 1.1 Generate producer ID
+### 1.1 Generate publisher ID
 
 Format: `{PublisherName}-{Guid:N}`
 
 Example: `outbox-publisher-a1b2c3d4e5f6789012345678abcdef01`
 
-### 1.2 Register producer
+### 1.2 Register publisher
 
-The publisher inserts (or updates) its row in the producers table using a `MERGE` with `HOLDLOCK` to handle restarts safely:
+The publisher inserts (or updates) its row in the publishers table using a `MERGE` with `HOLDLOCK` to handle restarts safely:
 
 ```sql
-MERGE dbo.OutboxProducers WITH (HOLDLOCK) AS target
-USING (SELECT @ProducerId AS ProducerId, @HostName AS HostName) AS source
-    ON target.ProducerId = source.ProducerId
+MERGE dbo.OutboxPublishers WITH (HOLDLOCK) AS target
+USING (SELECT @PublisherId AS PublisherId, @HostName AS HostName) AS source
+    ON target.PublisherId = source.PublisherId
 WHEN MATCHED THEN
     UPDATE SET LastHeartbeatUtc = SYSUTCDATETIME(),
                HostName         = source.HostName
 WHEN NOT MATCHED THEN
-    INSERT (ProducerId, RegisteredAtUtc, LastHeartbeatUtc, HostName)
-    VALUES (source.ProducerId, SYSUTCDATETIME(), SYSUTCDATETIME(), source.HostName);
+    INSERT (PublisherId, RegisteredAtUtc, LastHeartbeatUtc, HostName)
+    VALUES (source.PublisherId, SYSUTCDATETIME(), SYSUTCDATETIME(), source.HostName);
 ```
 
 **Parameters:**
-- `@ProducerId` — the generated producer ID
+- `@PublisherId` — the generated publisher ID
 - `@HostName` — `Environment.MachineName`
 
 If registration fails (database unavailable, network issues), the publisher retries with exponential backoff: `2s → 4s → 8s → ...` capped at 60s. It keeps retrying until it succeeds or the host shuts down.
@@ -115,7 +115,7 @@ WITH Batch AS
         o.LeasedUntilUtc, o.LeaseOwner, o.RetryCount, o.CreatedAtUtc
     FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
     INNER JOIN dbo.OutboxPartitions op
-        ON  op.OwnerProducerId = @PublisherId
+        ON  op.OwnerPublisherId = @PublisherId
         AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
         AND (ABS(CAST(CHECKSUM(o.PartitionKey) AS BIGINT)) % @TotalPartitions) = op.PartitionId
     WHERE (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
@@ -137,7 +137,7 @@ OUTPUT inserted.SequenceNumber, inserted.TopicName, inserted.PartitionKey,
 **Parameters:**
 - `@BatchSize` — max messages to lease (default 100)
 - `@LeaseDurationSeconds` — how long the lease lasts (default 45)
-- `@PublisherId` — this producer's ID
+- `@PublisherId` — this publisher's ID
 - `@TotalPartitions` — cached partition count
 - `@MaxRetryCount` — poison threshold (default 5)
 
@@ -146,7 +146,7 @@ OUTPUT inserted.SequenceNumber, inserted.TopicName, inserted.PartitionKey,
 | Filter | Purpose |
 |--------|---------|
 | `ROWLOCK, READPAST` | Row-level locking; skip rows locked by other transactions |
-| `op.OwnerProducerId = @PublisherId` | Only lease from partitions this producer owns |
+| `op.OwnerPublisherId = @PublisherId` | Only lease from partitions this publisher owns |
 | `op.GraceExpiresUtc IS NULL OR < NOW` | Don't lease from partitions still in grace period |
 | `ABS(CHECKSUM(PartitionKey)) % Total = PartitionId` | Hash-based partition assignment |
 | `LeasedUntilUtc IS NULL OR < NOW` | Only unleased or expired-lease messages |
@@ -284,22 +284,22 @@ If the loop is cancelled mid-flight (shutdown), a `finally` block releases any l
 
 ## Phase 3: heartbeat loop
 
-Runs every `HeartbeatIntervalMs` (default 10s). Keeps this producer's registration alive.
+Runs every `HeartbeatIntervalMs` (default 10s). Keeps this publisher's registration alive.
 
 ### 3.1 Update heartbeat
 
 ```sql
-UPDATE dbo.OutboxProducers
+UPDATE dbo.OutboxPublishers
 SET    LastHeartbeatUtc = SYSUTCDATETIME()
-WHERE  ProducerId = @ProducerId;
+WHERE  PublisherId = @PublisherId;
 
 UPDATE dbo.OutboxPartitions
 SET    GraceExpiresUtc = NULL
-WHERE  OwnerProducerId = @ProducerId
+WHERE  OwnerPublisherId = @PublisherId
   AND  GraceExpiresUtc IS NOT NULL;
 ```
 
-Both statements run in a single transaction. The second statement clears any grace period on partitions this producer owns—proving it's still alive and actively processing.
+Both statements run in a single transaction. The second statement clears any grace period on partitions this publisher owns—proving it's still alive and actively processing.
 
 ### 3.2 Update pending count metric
 
@@ -314,13 +314,13 @@ This is best-effort—failures are logged at `Debug` level and don't affect the 
 
 ### 3.3 Failure handling
 
-If the heartbeat fails three consecutive times, the loop exits. This triggers the restart mechanism—all loops are cancelled and restarted. The rationale: if you can't heartbeat, other producers will think you're dead and start claiming your partitions. Restarting ensures a clean slate.
+If the heartbeat fails three consecutive times, the loop exits. This triggers the restart mechanism—all loops are cancelled and restarted. The rationale: if you can't heartbeat, other publishers will think you're dead and start claiming your partitions. Restarting ensures a clean slate.
 
 ---
 
 ## Phase 4: rebalance loop
 
-Runs every `RebalanceIntervalMs` (default 30s). Distributes partitions fairly across all live producers.
+Runs every `RebalanceIntervalMs` (default 30s). Distributes partitions fairly across all live publishers.
 
 ### 4.1 Rebalance query
 
@@ -328,7 +328,7 @@ The entire rebalance runs as a single transaction:
 
 ```sql
 DECLARE @TotalPartitions   INT;
-DECLARE @ActiveProducers   INT;
+DECLARE @ActivePublishers   INT;
 DECLARE @FairShare         INT;
 DECLARE @CurrentlyOwned    INT;
 DECLARE @ToAcquire         INT;
@@ -336,47 +336,47 @@ DECLARE @ToAcquire         INT;
 -- Count total partitions
 SELECT @TotalPartitions = COUNT(*) FROM dbo.OutboxPartitions;
 
--- Count live producers (heartbeat within threshold)
-SELECT @ActiveProducers = COUNT(*)
-FROM dbo.OutboxProducers
+-- Count live publishers (heartbeat within threshold)
+SELECT @ActivePublishers = COUNT(*)
+FROM dbo.OutboxPublishers
 WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME());
 
--- Fair share = ceil(partitions / producers)
-SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActiveProducers, 0));
+-- Fair share = ceil(partitions / publishers)
+SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActivePublishers, 0));
 
--- How many does this producer own?
+-- How many does this publisher own?
 SELECT @CurrentlyOwned = COUNT(*)
 FROM dbo.OutboxPartitions
-WHERE OwnerProducerId = @ProducerId;
+WHERE OwnerPublisherId = @PublisherId;
 
 SET @ToAcquire = @FairShare - @CurrentlyOwned;
 
 -- If under fair share, acquire more
 IF @ToAcquire > 0
 BEGIN
-    -- Mark stale producers' partitions with grace period
+    -- Mark stale publishers' partitions with grace period
     UPDATE dbo.OutboxPartitions
     SET    GraceExpiresUtc = DATEADD(SECOND, @PartitionGracePeriodSeconds, SYSUTCDATETIME())
-    WHERE  OwnerProducerId <> @ProducerId
-      AND  OwnerProducerId IS NOT NULL
+    WHERE  OwnerPublisherId <> @PublisherId
+      AND  OwnerPublisherId IS NOT NULL
       AND  GraceExpiresUtc IS NULL
-      AND  OwnerProducerId NOT IN
+      AND  OwnerPublisherId NOT IN
            (
-               SELECT ProducerId
-               FROM   dbo.OutboxProducers
+               SELECT PublisherId
+               FROM   dbo.OutboxPublishers
                WHERE  LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
            );
 
     -- Claim unowned or grace-expired partitions
     UPDATE op
-    SET    OwnerProducerId = @ProducerId,
+    SET    OwnerPublisherId = @PublisherId,
            OwnedSinceUtc   = SYSUTCDATETIME(),
            GraceExpiresUtc = NULL
     FROM   dbo.OutboxPartitions op WITH (UPDLOCK, READPAST)
     WHERE  op.PartitionId IN (
                SELECT TOP (@ToAcquire) PartitionId
                FROM   dbo.OutboxPartitions WITH (UPDLOCK, READPAST)
-               WHERE  (OwnerProducerId IS NULL
+               WHERE  (OwnerPublisherId IS NULL
                        OR GraceExpiresUtc < SYSUTCDATETIME())
                ORDER BY PartitionId
            );
@@ -385,38 +385,38 @@ END;
 -- If over fair share, release excess (highest partition IDs first)
 SELECT @CurrentlyOwned = COUNT(*)
 FROM dbo.OutboxPartitions
-WHERE OwnerProducerId = @ProducerId;
+WHERE OwnerPublisherId = @PublisherId;
 
 IF @CurrentlyOwned > @FairShare
 BEGIN
     DECLARE @ToRelease INT = @CurrentlyOwned - @FairShare;
 
     UPDATE op
-    SET    OwnerProducerId = NULL,
+    SET    OwnerPublisherId = NULL,
            OwnedSinceUtc  = NULL,
            GraceExpiresUtc = NULL
     FROM   dbo.OutboxPartitions op
     WHERE  op.PartitionId IN (
                SELECT TOP (@ToRelease) PartitionId
                FROM   dbo.OutboxPartitions
-               WHERE  OwnerProducerId = @ProducerId
+               WHERE  OwnerPublisherId = @PublisherId
                ORDER BY PartitionId DESC
            );
 END;
 ```
 
 **Parameters:**
-- `@ProducerId` — this producer's ID
+- `@PublisherId` — this publisher's ID
 - `@HeartbeatTimeoutSeconds` — staleness threshold (default 30)
 - `@PartitionGracePeriodSeconds` — safety window before takeover (default 60)
 
 **How it works, step by step:**
 
-1. Calculate **fair share** — `CEIL(total partitions / active producers)`. With 32 partitions and 2 producers, each gets 16.
-2. If this producer is **under** its fair share:
-   - Mark stale producers' partitions with a grace expiry (the grace period gives the original owner time to finish in-flight work)
+1. Calculate **fair share** — `CEIL(total partitions / active publishers)`. With 32 partitions and 2 publishers, each gets 16.
+2. If this publisher is **under** its fair share:
+   - Mark stale publishers' partitions with a grace expiry (the grace period gives the original owner time to finish in-flight work)
    - Claim partitions that are unowned or past their grace expiry, using `UPDLOCK, READPAST` to avoid contention
-3. If this producer is **over** its fair share (another producer came online), release excess partitions starting from the highest partition IDs.
+3. If this publisher is **over** its fair share (another publisher came online), release excess partitions starting from the highest partition IDs.
 
 ### 4.2 Post-rebalance callback
 
@@ -425,7 +425,7 @@ After the rebalance query, the publisher fetches its owned partitions:
 ```sql
 SELECT PartitionId
 FROM   dbo.OutboxPartitions
-WHERE  OwnerProducerId = @ProducerId;
+WHERE  OwnerPublisherId = @PublisherId;
 ```
 
 And fires `IOutboxEventHandler.OnRebalanceAsync` with the result.
@@ -434,40 +434,40 @@ And fires `IOutboxEventHandler.OnRebalanceAsync` with the result.
 
 ## Phase 5: orphan sweep loop
 
-Runs every `OrphanSweepIntervalMs` (default 60s). Claims partitions that have no owner—typically left behind when a producer dies without graceful shutdown.
+Runs every `OrphanSweepIntervalMs` (default 60s). Claims partitions that have no owner—typically left behind when a publisher dies without graceful shutdown.
 
 ```sql
 DECLARE @TotalPartitions   INT;
-DECLARE @ActiveProducers   INT;
+DECLARE @ActivePublishers   INT;
 DECLARE @FairShare         INT;
 DECLARE @CurrentlyOwned    INT;
 DECLARE @ToAcquire         INT;
 
 SELECT @TotalPartitions = COUNT(*) FROM dbo.OutboxPartitions;
 
-SELECT @ActiveProducers = COUNT(*)
-FROM dbo.OutboxProducers
+SELECT @ActivePublishers = COUNT(*)
+FROM dbo.OutboxPublishers
 WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME());
 
-SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActiveProducers, 0));
+SET @FairShare = CEILING(CAST(@TotalPartitions AS FLOAT) / NULLIF(@ActivePublishers, 0));
 
 SELECT @CurrentlyOwned = COUNT(*)
 FROM dbo.OutboxPartitions
-WHERE OwnerProducerId = @ProducerId;
+WHERE OwnerPublisherId = @PublisherId;
 
 SET @ToAcquire = @FairShare - @CurrentlyOwned;
 
 IF @ToAcquire > 0
 BEGIN
     UPDATE op
-    SET    OwnerProducerId = @ProducerId,
+    SET    OwnerPublisherId = @PublisherId,
            OwnedSinceUtc   = SYSUTCDATETIME(),
            GraceExpiresUtc = NULL
     FROM   dbo.OutboxPartitions op WITH (UPDLOCK, READPAST)
     WHERE  op.PartitionId IN (
                SELECT TOP (@ToAcquire) PartitionId
                FROM   dbo.OutboxPartitions WITH (UPDLOCK, READPAST)
-               WHERE  OwnerProducerId IS NULL
+               WHERE  OwnerPublisherId IS NULL
                ORDER BY PartitionId
            );
 END;
@@ -500,8 +500,8 @@ WHERE o.RetryCount >= @MaxRetryCount
   AND (o.LeaseOwner IS NULL
        OR o.LeasedUntilUtc < DATEADD(SECOND, -@LeaseDurationSeconds, SYSUTCDATETIME())
        OR o.LeaseOwner NOT IN (
-           SELECT ProducerId
-           FROM dbo.OutboxProducers
+           SELECT PublisherId
+           FROM dbo.OutboxPublishers
            WHERE LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
        ));
 ```
@@ -519,7 +519,7 @@ WHERE o.RetryCount >= @MaxRetryCount
 3. **And** one of:
    - `LeaseOwner IS NULL` — explicitly released
    - Lease has been expired for longer than `LeaseDurationSeconds` — owner had time to clean up but didn't
-   - Owner is a dead producer (stale heartbeat)
+   - Owner is a dead publisher (stale heartbeat)
 
 The `DELETE...OUTPUT INTO` is atomic—the message is moved from `Outbox` to `OutboxDeadLetter` in a single statement.
 
@@ -548,7 +548,7 @@ WHERE o.LeaseOwner = @PublisherId;
 ```
 
 **Parameters:**
-- `@PublisherId` — this producer's ID
+- `@PublisherId` — this publisher's ID
 - `@Ids` — table-valued parameter (`dbo.SequenceNumberList`) containing the poison message sequence numbers
 - `@LastError` — `"Max retry count exceeded"`
 
@@ -564,22 +564,22 @@ When the host signals cancellation:
 
 The linked `CancellationTokenSource` is cancelled. Each loop catches `OperationCanceledException` and exits cleanly. The publish loop's `finally` block releases any in-flight leases without retry increment.
 
-### 8.2 Unregister producer
+### 8.2 Unregister publisher
 
 ```sql
 UPDATE dbo.OutboxPartitions
-SET    OwnerProducerId = NULL,
+SET    OwnerPublisherId = NULL,
        OwnedSinceUtc  = NULL,
        GraceExpiresUtc = NULL
-WHERE  OwnerProducerId = @ProducerId;
+WHERE  OwnerPublisherId = @PublisherId;
 
-DELETE FROM dbo.OutboxProducers
-WHERE  ProducerId = @ProducerId;
+DELETE FROM dbo.OutboxPublishers
+WHERE  PublisherId = @PublisherId;
 ```
 
-Both statements run in a single transaction. This releases all owned partitions immediately (no grace period needed—the producer is done) and removes the producer registration. Uses `CancellationToken.None` to ensure it completes.
+Both statements run in a single transaction. This releases all owned partitions immediately (no grace period needed—the publisher is done) and removes the publisher registration. Uses `CancellationToken.None` to ensure it completes.
 
-If unregistration fails, it's logged as a warning. The orphan sweep and rebalance loops on other producers will eventually reclaim the partitions after the heartbeat times out.
+If unregistration fails, it's logged as a warning. The orphan sweep and rebalance loops on other publishers will eventually reclaim the partitions after the heartbeat times out.
 
 ---
 
@@ -612,7 +612,7 @@ Used by `DeletePublishedAsync`, `ReleaseLeaseAsync`, and `DeadLetterAsync` for t
 A typical lifecycle with one publisher and 32 partitions:
 
 ```
-t=0s     RegisterProducerAsync (MERGE into OutboxProducers)
+t=0s     RegisterPublisherAsync (MERGE into OutboxPublishers)
          Launch 5 parallel loops
          ├── Publish loop starts polling (100ms intervals)
          ├── Heartbeat loop starts (10s intervals)
@@ -624,7 +624,7 @@ t=0.1s   LeaseBatchAsync → 0 messages (no partitions owned yet)
          Poll interval backs off to 200ms
 
 t=30s    RebalanceAsync runs
-         - 32 partitions / 1 producer = 32 fair share
+         - 32 partitions / 1 publisher = 32 fair share
          - Claims all 32 unowned partitions
 
 t=30.1s  LeaseBatchAsync → up to 100 messages
@@ -637,12 +637,12 @@ t=30s    HeartbeatAsync
 
 t=60s    OrphanSweepAsync (no orphans—all owned)
          DeadLetterSweepAsync (sweeps any missed poison messages)
-         RebalanceAsync (no change—still 1 producer)
+         RebalanceAsync (no change—still 1 publisher)
 
 --- Publisher B comes online ---
 
 t=90s    RebalanceAsync on Publisher A
-         - 32 partitions / 2 producers = 16 fair share
+         - 32 partitions / 2 publishers = 16 fair share
          - Publisher A owns 32, releases 16 (highest IDs)
 
          RebalanceAsync on Publisher B
@@ -650,9 +650,9 @@ t=90s    RebalanceAsync on Publisher A
 
 --- Publisher A shuts down ---
 
-t=???    UnregisterProducerAsync
-         - Releases all 16 partitions (OwnerProducerId = NULL)
-         - Deletes from OutboxProducers
+t=???    UnregisterPublisherAsync
+         - Releases all 16 partitions (OwnerPublisherId = NULL)
+         - Deletes from OutboxPublishers
 
          Publisher B's next OrphanSweepAsync or RebalanceAsync
          - Claims the 16 orphaned partitions
@@ -664,15 +664,15 @@ t=???    UnregisterProducerAsync
 
 | Query | Loop | Frequency | Uses transaction? |
 |-------|------|-----------|-------------------|
-| `MERGE OutboxProducers` | Startup | Once | No |
+| `MERGE OutboxPublishers` | Startup | Once | No |
 | `SELECT COUNT(*) FROM OutboxPartitions` | Publish | Cached (60s refresh) | No |
 | `UPDATE Outbox SET LeasedUntilUtc...` (CTE batch) | Publish | Every poll (100ms–5s) | No (single statement) |
 | `DELETE Outbox INNER JOIN @PublishedIds` | Publish | After each successful send | No |
 | `UPDATE Outbox SET LeasedUntilUtc = NULL` | Publish | On failure/circuit-open/cancellation | No |
 | `DELETE Outbox OUTPUT INTO OutboxDeadLetter` (by IDs) | Publish | When poison messages found | No |
-| `UPDATE OutboxProducers SET LastHeartbeatUtc` | Heartbeat | Every 10s | Yes |
+| `UPDATE OutboxPublishers SET LastHeartbeatUtc` | Heartbeat | Every 10s | Yes |
 | `SELECT COUNT_BIG(*) FROM Outbox` | Heartbeat | Every 10s | No |
 | Rebalance (multi-step) | Rebalance | Every 30s | Yes |
 | Orphan claim (multi-step) | Orphan sweep | Every 60s | Yes |
 | `DELETE Outbox OUTPUT INTO OutboxDeadLetter` (by threshold) | Dead-letter sweep | Every 60s | No (single statement) |
-| `UPDATE OutboxPartitions ... DELETE OutboxProducers` | Shutdown | Once | Yes |
+| `UPDATE OutboxPartitions ... DELETE OutboxPublishers` | Shutdown | Once | Yes |

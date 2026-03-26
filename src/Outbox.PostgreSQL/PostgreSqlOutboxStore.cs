@@ -18,50 +18,52 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     private readonly IOptionsMonitor<OutboxPublisherOptions> _publisherOptions;
     private readonly PostgreSqlQueries _queries;
 
+    private readonly string _optionsName;
     private volatile int _cachedPartitionCount;
     private long _partitionCountRefreshedAtTicks;
 
     public PostgreSqlOutboxStore(
         Func<IServiceProvider, CancellationToken, Task<DbConnection>> connectionFactory,
         IServiceProvider serviceProvider,
-        IOptions<PostgreSqlStoreOptions> options,
-        IOptionsMonitor<OutboxPublisherOptions> publisherOptions)
+        IOptionsMonitor<PostgreSqlStoreOptions> optionsMonitor,
+        IOptionsMonitor<OutboxPublisherOptions> publisherOptions,
+        string? groupName = null)
     {
-        _options = options.Value;
+        _optionsName = groupName ?? Options.DefaultName;
+        _options = optionsMonitor.Get(_optionsName);
         _publisherOptions = publisherOptions;
         _db = new PostgreSqlDbHelper(connectionFactory, serviceProvider, _options);
-        _queries = new PostgreSqlQueries(_options.SchemaName, _options.TablePrefix);
+        _queries = new PostgreSqlQueries(
+            _options.SchemaName, _options.TablePrefix,
+            _options.GetSharedSchemaName(), _options.GetOutboxTableName());
         DapperConfiguration.EnsureInitialized();
     }
 
     // -------------------------------------------------------------------------
-    // Producer lifecycle
+    // Publisher lifecycle
     // -------------------------------------------------------------------------
 
-    public async Task<string> RegisterProducerAsync(CancellationToken ct)
+    public async Task<string> RegisterPublisherAsync(CancellationToken ct)
     {
-        var opts = _publisherOptions.CurrentValue;
-        var producerId = $"{opts.PublisherName}-{Guid.NewGuid():N}";
+        var opts = _publisherOptions.Get(_optionsName);
+        var publisherId = _options.GroupName is not null
+            ? $"{_options.GroupName}-{opts.PublisherName}-{Guid.NewGuid():N}"
+            : $"{opts.PublisherName}-{Guid.NewGuid():N}";
         var hostName = Environment.MachineName;
 
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
-        {
-            await conn.ExecuteAsync(new CommandDefinition(_queries.RegisterProducer,
-                new { producer_id = producerId, host_name = hostName },
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        await _db.ExecuteAsync(_queries.RegisterPublisher,
+            new { publisher_id = publisherId, host_name = hostName, outbox_table_name = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
 
-        return producerId;
+        return publisherId;
     }
 
-    public async Task UnregisterProducerAsync(string producerId, CancellationToken ct)
+    public async Task UnregisterPublisherAsync(string publisherId, CancellationToken ct)
     {
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
             await using var tx = await ((NpgsqlConnection)conn).BeginTransactionAsync(token).ConfigureAwait(false);
-            await conn.ExecuteAsync(new CommandDefinition(_queries.UnregisterProducer,
-                new { producer_id = producerId },
+            await conn.ExecuteAsync(new CommandDefinition(_queries.UnregisterPublisher,
+                new { publisher_id = publisherId, outbox_table_name = _options.GetOutboxTableName() },
                 transaction: tx,
                 commandTimeout: _options.CommandTimeoutSeconds,
                 cancellationToken: token)).ConfigureAwait(false);
@@ -74,7 +76,7 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     // -------------------------------------------------------------------------
 
     public async Task<IReadOnlyList<OutboxMessage>> LeaseBatchAsync(
-        string producerId, int batchSize, int leaseDurationSeconds,
+        string publisherId, int batchSize, int leaseDurationSeconds,
         int maxRetryCount, CancellationToken ct)
     {
         var totalPartitions = await GetCachedPartitionCountAsync(ct).ConfigureAwait(false);
@@ -82,80 +84,59 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
         if (totalPartitions == 0)
             return Array.Empty<OutboxMessage>();
 
-        IEnumerable<OutboxMessage>? rows = null;
+        var rows = await _db.QueryAsync<OutboxMessage>(_queries.LeaseBatch,
+            new
+            {
+                batch_size = batchSize,
+                lease_duration_seconds = (double)leaseDurationSeconds,
+                publisher_id = publisherId,
+                total_partitions = totalPartitions,
+                max_retry_count = maxRetryCount,
+                outbox_table_name = _options.GetOutboxTableName()
+            }, ct).ConfigureAwait(false);
 
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
-        {
-            rows = await conn.QueryAsync<OutboxMessage>(new CommandDefinition(_queries.LeaseBatch,
-                new
-                {
-                    batch_size = batchSize,
-                    lease_duration_seconds = (double)leaseDurationSeconds,
-                    publisher_id = producerId,
-                    total_partitions = totalPartitions,
-                    max_retry_count = maxRetryCount
-                },
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
-
-        return rows?.AsList() ?? [];
+        return rows.AsList();
     }
 
     public async Task DeletePublishedAsync(
-        string producerId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
+        string publisherId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
     {
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
-        {
-            var parameters = new DynamicParameters(new { publisher_id = producerId });
-            parameters.Add("@published_ids", new BigintArrayParam(sequenceNumbers));
-            await conn.ExecuteAsync(new CommandDefinition(_queries.DeletePublished, parameters,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        var parameters = new DynamicParameters(new { publisher_id = publisherId });
+        parameters.Add("@published_ids", new BigintArrayParam(sequenceNumbers));
+        await _db.ExecuteAsync(_queries.DeletePublished, parameters, ct).ConfigureAwait(false);
     }
 
     public async Task ReleaseLeaseAsync(
-        string producerId, IReadOnlyList<long> sequenceNumbers,
+        string publisherId, IReadOnlyList<long> sequenceNumbers,
         bool incrementRetry, CancellationToken ct)
     {
         var sql = incrementRetry ? _queries.ReleaseLeaseWithRetry : _queries.ReleaseLeaseNoRetry;
 
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
-        {
-            var parameters = new DynamicParameters(new { publisher_id = producerId });
-            parameters.Add("@ids", new BigintArrayParam(sequenceNumbers));
-            await conn.ExecuteAsync(new CommandDefinition(sql, parameters,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        var parameters = new DynamicParameters(new { publisher_id = publisherId });
+        parameters.Add("@ids", new BigintArrayParam(sequenceNumbers));
+        await _db.ExecuteAsync(sql, parameters, ct).ConfigureAwait(false);
     }
 
     public async Task DeadLetterAsync(
-        string producerId, IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
+        string publisherId, IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
     {
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
-        {
-            var parameters = new DynamicParameters(new { publisher_id = producerId });
-            parameters.Add("@ids", new BigintArrayParam(sequenceNumbers));
-            parameters.Add("@last_error", lastError, DbType.String, size: 2000);
-            await conn.ExecuteAsync(new CommandDefinition(_queries.DeadLetter, parameters,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        var parameters = new DynamicParameters(new { publisher_id = publisherId });
+        parameters.Add("@ids", new BigintArrayParam(sequenceNumbers));
+        parameters.Add("@last_error", lastError, DbType.String, size: 2000);
+        await _db.ExecuteAsync(_queries.DeadLetter, parameters, ct).ConfigureAwait(false);
     }
 
     // -------------------------------------------------------------------------
     // Heartbeat and partition management
     // -------------------------------------------------------------------------
 
-    public async Task HeartbeatAsync(string producerId, CancellationToken ct)
+    public async Task HeartbeatAsync(string publisherId, CancellationToken ct)
     {
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
             await using var tx = await ((NpgsqlConnection)conn).BeginTransactionAsync(token).ConfigureAwait(false);
             await conn.ExecuteAsync(new CommandDefinition(_queries.Heartbeat,
-                new { producer_id = producerId },
+                new { publisher_id = publisherId, outbox_table_name = _options.GetOutboxTableName() },
                 transaction: tx,
                 commandTimeout: _options.CommandTimeoutSeconds,
                 cancellationToken: token)).ConfigureAwait(false);
@@ -181,47 +162,35 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
 
     public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)
     {
-        var result = 0;
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
-        {
-            result = await conn.ExecuteScalarAsync<int>(new CommandDefinition(_queries.GetTotalPartitions,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
-
-        return result;
+        return await _db.ScalarAsync<int>(_queries.GetTotalPartitions,
+            new { outbox_table_name = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<int>> GetOwnedPartitionsAsync(string producerId, CancellationToken ct)
+    public async Task<IReadOnlyList<int>> GetOwnedPartitionsAsync(string publisherId, CancellationToken ct)
     {
-        IEnumerable<int>? partitions = null;
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
-        {
-            partitions = await conn.QueryAsync<int>(new CommandDefinition(_queries.GetOwnedPartitions,
-                new { producer_id = producerId },
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        var partitions = await _db.QueryAsync<int>(_queries.GetOwnedPartitions,
+            new { publisher_id = publisherId, outbox_table_name = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
 
-        return partitions?.AsList() ?? [];
+        return partitions.AsList();
     }
 
-    public async Task RebalanceAsync(string producerId, CancellationToken ct)
+    public async Task RebalanceAsync(string publisherId, CancellationToken ct)
     {
         // Snapshot options once to ensure consistent values across all steps within one transaction.
-        var opts = _publisherOptions.CurrentValue;
+        var opts = _publisherOptions.Get(_optionsName);
 
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
             await using var tx = await ((NpgsqlConnection)conn).BeginTransactionAsync(token).ConfigureAwait(false);
 
-            // Step 1: Mark stale producers' partitions as entering grace period
+            // Step 1: Mark stale publishers' partitions as entering grace period
             await conn.ExecuteAsync(new CommandDefinition(_queries.RebalanceMarkStale,
                 new
                 {
-                    producer_id = producerId,
+                    publisher_id = publisherId,
                     heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds,
-                    partition_grace_period_seconds = (double)opts.PartitionGracePeriodSeconds
+                    partition_grace_period_seconds = (double)opts.PartitionGracePeriodSeconds,
+                    outbox_table_name = _options.GetOutboxTableName()
                 },
                 transaction: tx,
                 commandTimeout: _options.CommandTimeoutSeconds,
@@ -231,8 +200,9 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
             await conn.ExecuteAsync(new CommandDefinition(_queries.RebalanceClaim,
                 new
                 {
-                    producer_id = producerId,
-                    heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds
+                    publisher_id = publisherId,
+                    heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds,
+                    outbox_table_name = _options.GetOutboxTableName()
                 },
                 transaction: tx,
                 commandTimeout: _options.CommandTimeoutSeconds,
@@ -242,8 +212,9 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
             await conn.ExecuteAsync(new CommandDefinition(_queries.RebalanceRelease,
                 new
                 {
-                    producer_id = producerId,
-                    heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds
+                    publisher_id = publisherId,
+                    heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds,
+                    outbox_table_name = _options.GetOutboxTableName()
                 },
                 transaction: tx,
                 commandTimeout: _options.CommandTimeoutSeconds,
@@ -253,56 +224,40 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
         }, ct).ConfigureAwait(false);
     }
 
-    public async Task ClaimOrphanPartitionsAsync(string producerId, CancellationToken ct)
+    public async Task ClaimOrphanPartitionsAsync(string publisherId, CancellationToken ct)
     {
-        var opts = _publisherOptions.CurrentValue;
+        var opts = _publisherOptions.Get(_optionsName);
 
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
-        {
-            await conn.ExecuteAsync(new CommandDefinition(_queries.ClaimOrphanPartitions,
-                new
-                {
-                    producer_id = producerId,
-                    heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds
-                },
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+        await _db.ExecuteAsync(_queries.ClaimOrphanPartitions,
+            new
+            {
+                publisher_id = publisherId,
+                heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds,
+                outbox_table_name = _options.GetOutboxTableName()
+            }, ct).ConfigureAwait(false);
     }
 
     public async Task SweepDeadLettersAsync(int maxRetryCount, CancellationToken ct)
     {
-        var opts = _publisherOptions.CurrentValue;
+        var opts = _publisherOptions.Get(_optionsName);
         // Only sweep messages whose lease_owner is NULL (explicitly released),
-        // whose owner is a dead producer (stale heartbeat), or whose lease has been
+        // whose owner is a dead publisher (stale heartbeat), or whose lease has been
         // expired for longer than LeaseDurationSeconds (publisher had ample time to
         // delete but didn't — covers the case where DeadLetterAsync itself failed).
 
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
+        var parameters = new DynamicParameters(new
         {
-            var parameters = new DynamicParameters(new
-            {
-                max_retry_count = maxRetryCount,
-                heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds,
-                lease_duration_seconds = (double)opts.LeaseDurationSeconds
-            });
-            parameters.Add("@last_error", "Max retry count exceeded (background sweep)", DbType.String, size: 2000);
-            await conn.ExecuteAsync(new CommandDefinition(_queries.SweepDeadLetters, parameters,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+            max_retry_count = maxRetryCount,
+            heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds,
+            lease_duration_seconds = (double)opts.LeaseDurationSeconds,
+            outbox_table_name = _options.GetOutboxTableName()
+        });
+        parameters.Add("@last_error", "Max retry count exceeded (background sweep)", DbType.String, size: 2000);
+        await _db.ExecuteAsync(_queries.SweepDeadLetters, parameters, ct).ConfigureAwait(false);
     }
 
     public async Task<long> GetPendingCountAsync(CancellationToken ct)
     {
-        long result = 0;
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
-        {
-            result = await conn.ExecuteScalarAsync<long>(new CommandDefinition(_queries.GetPendingCount,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
-
-        return result;
+        return await _db.ScalarAsync<long>(_queries.GetPendingCount, null, ct).ConfigureAwait(false);
     }
 }

@@ -61,18 +61,19 @@ END;
 GO
 
 -- ---------------------------------------------------------------------------
--- 1c. OutboxProducers — heartbeat registry for active publisher instances
+-- 1c. OutboxPublishers — heartbeat registry for active publisher instances
 -- ---------------------------------------------------------------------------
-IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.OutboxProducers') AND type = N'U')
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.OutboxPublishers') AND type = N'U')
 BEGIN
-    CREATE TABLE dbo.OutboxProducers
+    CREATE TABLE dbo.OutboxPublishers
     (
-        ProducerId        NVARCHAR(128)  NOT NULL,
+        OutboxTableName    NVARCHAR(256)  NOT NULL,
+        PublisherId        NVARCHAR(128)  NOT NULL,
         RegisteredAtUtc   DATETIME2(3)   NOT NULL  DEFAULT SYSUTCDATETIME(),
         LastHeartbeatUtc  DATETIME2(3)   NOT NULL  DEFAULT SYSUTCDATETIME(),
         HostName          NVARCHAR(256)  NULL,
 
-        CONSTRAINT PK_OutboxProducers PRIMARY KEY CLUSTERED (ProducerId)
+        CONSTRAINT PK_OutboxPublishers PRIMARY KEY CLUSTERED (OutboxTableName, PublisherId)
     );
 END;
 GO
@@ -84,12 +85,13 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.Outbo
 BEGIN
     CREATE TABLE dbo.OutboxPartitions
     (
+        OutboxTableName     NVARCHAR(256)  NOT NULL,
         PartitionId        INT            NOT NULL,
-        OwnerProducerId    NVARCHAR(128)  NULL,
+        OwnerPublisherId    NVARCHAR(128)  NULL,
         OwnedSinceUtc      DATETIME2(3)   NULL,
         GraceExpiresUtc    DATETIME2(3)   NULL,
 
-        CONSTRAINT PK_OutboxPartitions PRIMARY KEY CLUSTERED (PartitionId)
+        CONSTRAINT PK_OutboxPartitions PRIMARY KEY CLUSTERED (OutboxTableName, PartitionId)
     );
 END;
 GO
@@ -182,10 +184,10 @@ GO
 DECLARE @i INT = 0;
 WHILE @i < 32
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM dbo.OutboxPartitions WHERE PartitionId = @i)
+    IF NOT EXISTS (SELECT 1 FROM dbo.OutboxPartitions WHERE OutboxTableName = N'Outbox' AND PartitionId = @i)
     BEGIN
-        INSERT INTO dbo.OutboxPartitions (PartitionId, OwnerProducerId, OwnedSinceUtc, GraceExpiresUtc)
-        VALUES (@i, NULL, NULL, NULL);
+        INSERT INTO dbo.OutboxPartitions (OutboxTableName, PartitionId, OwnerPublisherId, OwnedSinceUtc, GraceExpiresUtc)
+        VALUES (N'Outbox', @i, NULL, NULL, NULL);
     END;
     SET @i = @i + 1;
 END;

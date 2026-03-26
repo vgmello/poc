@@ -34,6 +34,7 @@ public class OutboxHealthCheckTests
         var opts = options ?? SmallIntervalOptions();
         var monitor = Substitute.For<IOptionsMonitor<OutboxPublisherOptions>>();
         monitor.CurrentValue.Returns(opts);
+        monitor.Get(Arg.Any<string>()).Returns(opts);
 
         return new OutboxHealthCheck(state, monitor);
     }

@@ -1,6 +1,7 @@
 // Copyright (c) OrgName. All rights reserved.
 
 using System.Data.Common;
+using Dapper;
 using Npgsql;
 
 namespace Outbox.PostgreSQL;
@@ -61,6 +62,33 @@ internal sealed class PostgreSqlDbHelper
                 await Task.Delay(delay + jitter, ct).ConfigureAwait(false);
             }
         }
+    }
+
+    public Task<int> ExecuteAsync(string sql, object? parameters, CancellationToken ct) =>
+        CallAsync<int>(sql, parameters, static conn => conn.ExecuteAsync, ct);
+
+    public Task<IEnumerable<T>> QueryAsync<T>(string sql, object? parameters, CancellationToken ct) =>
+        CallAsync<IEnumerable<T>>(sql, parameters, static conn => conn.QueryAsync<T>, ct);
+
+    public Task<T> ScalarAsync<T>(string sql, object? parameters, CancellationToken ct) =>
+        CallAsync<T>(sql, parameters, static conn => cmd => conn.ExecuteScalarAsync<T>(cmd)!, ct);
+
+    private async Task<TResult> CallAsync<TResult>(
+        string sql,
+        object? parameters,
+        Func<DbConnection, Func<CommandDefinition, Task<TResult>>> dbFunction,
+        CancellationToken ct)
+    {
+        TResult? result = default;
+        await ExecuteWithRetryAsync(async (conn, token) =>
+        {
+            var command = new CommandDefinition(sql, parameters,
+                commandTimeout: _options.CommandTimeoutSeconds,
+                cancellationToken: token);
+            result = await dbFunction(conn)(command).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
+
+        return result!;
     }
 
     public static bool IsTransientNpgsqlError(NpgsqlException ex)
