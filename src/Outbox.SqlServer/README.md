@@ -7,16 +7,15 @@ SQL Server store for the outbox library. Implements `IOutboxStore` and `IDeadLet
 ```csharp
 services.AddOutbox(configuration, outbox =>
 {
-    outbox.UseSqlServer(
-        connectionFactory: async (sp, ct) =>
-        {
-            var conn = new SqlConnection(connectionString);
-            return conn;
-        },
-        configure: opts => opts.SchemaName = "events"
-    );
+    outbox.UseSqlServer();
     outbox.UseKafka();
 });
+```
+
+The connection string and other options are bound from `"Outbox:SqlServer"` in `IConfiguration`. You can also pass an options callback for programmatic overrides:
+
+```csharp
+outbox.UseSqlServer(opts => opts.SchemaName = "events");
 ```
 
 Run `db_scripts/install.sql` against your database to create the schema. The script is idempotent (`IF NOT EXISTS` guards throughout).
@@ -102,6 +101,7 @@ Bind from `"Outbox:SqlServer"` in `IConfiguration`.
 
 | Option | Default | Description |
 |---|---|---|
+| `ConnectionString` | null | SQL Server connection string |
 | `SchemaName` | `"dbo"` | SQL Server schema name |
 | `TablePrefix` | `""` | Prefix for all table names and TVP type |
 | `CommandTimeoutSeconds` | `30` | SQL command timeout |

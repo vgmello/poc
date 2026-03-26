@@ -7,16 +7,15 @@ PostgreSQL store for the outbox library. Implements `IOutboxStore` and `IDeadLet
 ```csharp
 services.AddOutbox(configuration, outbox =>
 {
-    outbox.UsePostgreSql(
-        connectionFactory: async (sp, ct) =>
-        {
-            var conn = new NpgsqlConnection(connectionString);
-            return conn;
-        },
-        configure: opts => opts.SchemaName = "events"
-    );
+    outbox.UsePostgreSql();
     outbox.UseKafka();
 });
+```
+
+The connection string and other options are bound from `"Outbox:PostgreSql"` in `IConfiguration`. You can also pass an options callback for programmatic overrides:
+
+```csharp
+outbox.UsePostgreSql(opts => opts.SchemaName = "events");
 ```
 
 Run `db_scripts/install.sql` against your database to create the schema. The script is idempotent.
@@ -95,6 +94,7 @@ Bind from `"Outbox:PostgreSql"` in `IConfiguration`.
 
 | Option | Default | Description |
 |---|---|---|
+| `ConnectionString` | null | PostgreSQL connection string |
 | `SchemaName` | `"public"` | PostgreSQL schema name |
 | `TablePrefix` | `""` | Prefix for all table names |
 | `CommandTimeoutSeconds` | `30` | SQL command timeout |

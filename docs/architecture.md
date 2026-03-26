@@ -140,20 +140,20 @@ If two groups point to the same outbox table, they share the same partition pool
 // Default — single outbox table, no group name
 services.AddOutbox(config, outbox =>
 {
-    outbox.UsePostgreSql(connectionFactory);
+    outbox.UsePostgreSql();
     outbox.UseKafka();
 });
 
 // Multiple groups — each with its own outbox + dead_letter table
 services.AddOutbox("orders", config, outbox =>
 {
-    outbox.UsePostgreSql(connectionFactory, o => o.TablePrefix = "orders_");
+    outbox.UsePostgreSql();
     outbox.UseKafka();
 });
 
 services.AddOutbox("notifications", config, outbox =>
 {
-    outbox.UsePostgreSql(connectionFactory, o => o.TablePrefix = "notifications_");
+    outbox.UsePostgreSql();
     outbox.UseKafka();
 });
 ```
@@ -342,6 +342,29 @@ All publisher options are in the `"Outbox:Publisher"` configuration section and 
 | `DeadLetterSweepIntervalMs`         | 60000   | Dead-letter sweep frequency            |
 | `CircuitBreakerFailureThreshold`    | 3       | Failures before circuit opens          |
 | `CircuitBreakerOpenDurationSeconds` | 30      | Open duration before half-open probe   |
+
+### Store options
+
+PostgreSQL options are in `"Outbox:PostgreSql"`, SQL Server options in `"Outbox:SqlServer"`.
+
+| Option                       | Default      | Store      | Description                       |
+| ---------------------------- | ------------ | ---------- | --------------------------------- |
+| `ConnectionString`           | null         | Both       | Database connection string        |
+| `SchemaName`                 | `"public"`/`"dbo"` | Both | Schema name                       |
+| `TablePrefix`                | `""`         | Both       | Prefix for all table names        |
+| `CommandTimeoutSeconds`      | 30           | Both       | SQL command timeout               |
+| `TransientRetryMaxAttempts`  | 6            | Both       | Max retry attempts                |
+| `TransientRetryBackoffMs`    | 1000         | Both       | Base backoff (ms)                 |
+
+### Group-scoped config paths
+
+When using publisher groups, config binds from group-scoped paths first with a fallback to the shared path. For a group named `"orders"`:
+
+- `Outbox:Orders:Publisher` overrides `Outbox:Publisher`
+- `Outbox:Orders:PostgreSql` overrides `Outbox:PostgreSql`
+- `Outbox:Orders:Kafka` overrides `Outbox:Kafka`
+
+This lets you set shared defaults at the top level and override per group—for example, giving one group a different `ConnectionString` or `PublishThreadCount`.
 
 ### Validation rules
 
