@@ -264,7 +264,7 @@ builder.Services.AddOutbox("orders", builder.Configuration, outbox =>
         var conn = new NpgsqlConnection(
             sp.GetRequiredService<IConfiguration>().GetConnectionString("OutboxDb"));
         return conn;
-    });
+    }, options => options.TablePrefix = "orders_");
     outbox.UseKafka();
 });
 
@@ -275,18 +275,14 @@ builder.Services.AddOutbox("notifications", builder.Configuration, outbox =>
         var conn = new NpgsqlConnection(
             sp.GetRequiredService<IConfiguration>().GetConnectionString("OutboxDb"));
         return conn;
-    });
+    }, options => options.TablePrefix = "notifications_");
     outbox.UseKafka();
 });
-
-// Set table prefixes so each group has isolated tables
-builder.Services.Configure<PostgreSqlStoreOptions>("orders", o => o.TablePrefix = "orders_");
-builder.Services.Configure<PostgreSqlStoreOptions>("notifications", o => o.TablePrefix = "notifications_");
 ```
 
 This creates `orders_outbox`, `orders_outbox_dead_letter` for the orders group and `notifications_outbox`, `notifications_outbox_dead_letter` for notifications. Run the install script once per prefix, adjusting table names accordingly.
 
-Override publisher settings per group the same way:
+Override publisher settings per group when needed:
 
 ```csharp
 builder.Services.Configure<OutboxPublisherOptions>("orders", o =>
@@ -294,6 +290,8 @@ builder.Services.Configure<OutboxPublisherOptions>("orders", o =>
     o.PublishThreadCount = 8; // high-throughput group
 });
 ```
+
+Store options can also be overridden the same way via `Configure<PostgreSqlStoreOptions>("groupName", ...)` or `Configure<SqlServerStoreOptions>("groupName", ...)`.
 
 Each group runs its own `OutboxPublisherService` instance with independent partition ownership, circuit breakers, and health state. The shared `Outbox:Publisher` and `Outbox:PostgreSql` config sections apply to all groups as a baseline.
 
