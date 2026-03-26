@@ -1,5 +1,6 @@
 // Copyright (c) OrgName. All rights reserved.
 
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -280,8 +281,8 @@ internal sealed class OutboxPublisherService : BackgroundService
 
                 // Track all leased sequences (poison + healthy) so the finally
                 // block can release any that aren't finalized on cancellation.
-                var unprocessedSequences = new HashSet<long>(
-                    batch.Select(m => m.SequenceNumber));
+                var unprocessedSequences = new ConcurrentDictionary<long, byte>(
+                    batch.Select(m => new KeyValuePair<long, byte>(m.SequenceNumber, 0)));
 
                 // Dead-letter poison messages (CancellationToken.None — must complete even during shutdown)
                 if (poison.Count > 0)
@@ -293,7 +294,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                         CancellationToken.None);
 
                     foreach (var sn in poison.Select(m => m.SequenceNumber))
-                        unprocessedSequences.Remove(sn);
+                        unprocessedSequences.TryRemove(sn, out _);
 
                     _instrumentation.MessagesDeadLettered.Add(poison.Count);
 
@@ -322,274 +323,19 @@ internal sealed class OutboxPublisherService : BackgroundService
 
                 try
                 {
-                    foreach (var group in groups)
-                    {
-                        var topicName = group.Key.TopicName;
-                        var partitionKey = group.Key.PartitionKey;
-                        var groupMessages = group.OrderBy(m => m.SequenceNumber).ToList();
-                        var sequenceNumbers = groupMessages.Select(m => m.SequenceNumber).ToList();
-
-                        if (circuitBreaker.IsOpen(topicName))
-                        {
-                            // Circuit open — release without incrementing retry count.
-                            await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
-                                incrementRetry: false, CancellationToken.None);
-                            foreach (var sn in sequenceNumbers)
-                                unprocessedSequences.Remove(sn);
-
-                            continue;
-                        }
-
-                        try
-                        {
-                            var publishSw = Stopwatch.StartNew();
-
-                            using var activity = _instrumentation.ActivitySource.StartActivity("outbox.publish");
-                            activity?.SetTag("messaging.destination.name", topicName);
-                            activity?.SetTag("messaging.batch.message_count", groupMessages.Count);
-
-                            var effectiveMessages = await ApplyInterceptorsAsync(groupMessages, ct);
-                            await _transport.SendAsync(topicName, partitionKey, effectiveMessages, ct);
-
-                            publishSw.Stop();
-                            _instrumentation.PublishDuration.Record(publishSw.Elapsed.TotalMilliseconds);
-
-                            // Transport succeeded — record success metrics before attempting delete.
-                            _instrumentation.MessagesPublished.Add(groupMessages.Count);
-                            _healthState.RecordSuccessfulPublish();
-                            publishedAny = true;
-
-                            foreach (var sn in sequenceNumbers)
-                                unprocessedSequences.Remove(sn);
-
-                            var (stateChanged, newState) = circuitBreaker.RecordSuccess(topicName);
-
-                            if (stateChanged)
-                            {
-                                _healthState.SetCircuitClosed(topicName);
-                                _instrumentation.CircuitBreakerStateChanges.Add(1);
-
-                                try
-                                {
-                                    await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
-                                }
-                                catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                                {
-                                    _logger.LogWarning(handlerEx,
-                                        "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
-                                        "circuit state is already updated, continuing", topicName);
-                                }
-                            }
-
-                            foreach (var msg in groupMessages)
-                            {
-                                try
-                                {
-                                    await _eventHandler.OnMessagePublishedAsync(msg, ct);
-                                }
-                                catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                                {
-                                    _logger.LogWarning(handlerEx,
-                                        "OnMessagePublishedAsync handler threw for message {Seq} on topic {Topic} — " +
-                                        "message fate is already finalized (transport succeeded), continuing",
-                                        msg.SequenceNumber, topicName);
-                                }
-                            }
-
-                            // Delete from outbox — separate try since transport already succeeded.
-                            try
-                            {
-                                await _store.DeletePublishedAsync(publisherId, sequenceNumbers, ct);
-                            }
-                            catch (Exception deleteEx)
-                            {
-                                _logger.LogWarning(deleteEx,
-                                    "Failed to delete {Count} published messages — they will be re-delivered on next poll",
-                                    sequenceNumbers.Count);
-
-                                // Release WITHOUT retry increment — transport succeeded.
-                                try
-                                {
-                                    await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
-                                        incrementRetry: false, CancellationToken.None);
-                                }
-                                catch (Exception releaseEx)
-                                {
-                                    _logger.LogWarning(releaseEx,
-                                        "Failed to release lease for {Count} published messages — leases will expire naturally",
-                                        sequenceNumbers.Count);
-                                }
-                            }
-                        }
-                        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                        {
-                            // Graceful shutdown — don't rethrow yet, let finally release leases.
-                            break;
-                        }
-                        catch (PartialSendException pex)
-                        {
-                            // Some messages were sent, others failed.
-                            _logger.LogWarning(pex.InnerException,
-                                "Partial send: {Succeeded} messages sent, {Failed} failed for topic {Topic}",
-                                pex.SucceededSequenceNumbers.Count, pex.FailedSequenceNumbers.Count, topicName);
-
-                            _instrumentation.PublishFailures.Add(1);
-                            publishedAny = true; // Some messages did get through
-
-                            // Delete the succeeded messages — they're already on the broker
-                            try
-                            {
-                                await _store.DeletePublishedAsync(publisherId, pex.SucceededSequenceNumbers, CancellationToken.None);
-                                _instrumentation.MessagesPublished.Add(pex.SucceededSequenceNumbers.Count);
-                                _healthState.RecordSuccessfulPublish();
-                                // Only remove from safety net after successful delete
-                                foreach (var sn in pex.SucceededSequenceNumbers)
-                                    unprocessedSequences.Remove(sn);
-                            }
-                            catch (Exception deleteEx)
-                            {
-                                _logger.LogWarning(deleteEx,
-                                    "Failed to delete {Count} partially-sent messages — they will be re-delivered",
-                                    pex.SucceededSequenceNumbers.Count);
-
-                                try
-                                {
-                                    await _store.ReleaseLeaseAsync(publisherId, pex.SucceededSequenceNumbers,
-                                        incrementRetry: false, CancellationToken.None);
-                                    // Only remove from safety net after successful release
-                                    foreach (var sn in pex.SucceededSequenceNumbers)
-                                        unprocessedSequences.Remove(sn);
-                                }
-                                catch (Exception releaseEx)
-                                {
-                                    _logger.LogWarning(releaseEx,
-                                        "Failed to release lease for {Count} partially-sent succeeded messages after delete failure — leases will expire naturally",
-                                        pex.SucceededSequenceNumbers.Count);
-                                    // Leave in unprocessedSequences — finally block will attempt release
-                                }
-                            }
-
-                            // Release the failed messages with retry increment
-                            try
-                            {
-                                await _store.ReleaseLeaseAsync(publisherId, pex.FailedSequenceNumbers,
-                                    incrementRetry: true, CancellationToken.None);
-                                // Only remove from safety net after successful release
-                                foreach (var sn in pex.FailedSequenceNumbers)
-                                    unprocessedSequences.Remove(sn);
-                            }
-                            catch (Exception releaseEx)
-                            {
-                                _logger.LogWarning(releaseEx,
-                                    "Failed to release lease for {Count} failed messages — they will expire after lease duration",
-                                    pex.FailedSequenceNumbers.Count);
-                                // Leave in unprocessedSequences — finally block will attempt release
-                            }
-
-                            // Record failure for circuit breaker (the send did partially fail)
-                            var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
-
-                            if (stateChanged)
-                            {
-                                _healthState.SetCircuitOpen(topicName);
-                                _instrumentation.CircuitBreakerStateChanges.Add(1);
-                            }
-
-                            try
-                            {
-                                await _eventHandler.OnPublishFailedAsync(groupMessages, pex, ct);
-                            }
-                            catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                            {
-                                _logger.LogWarning(handlerEx,
-                                    "OnPublishFailedAsync handler threw after partial send for topic {Topic} — " +
-                                    "message fates are already finalized, continuing", topicName);
-                            }
-
-                            if (stateChanged)
-                            {
-                                try
-                                {
-                                    await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
-                                }
-                                catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                                {
-                                    _logger.LogWarning(handlerEx,
-                                        "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
-                                        "circuit state is already updated, continuing", topicName);
-                                }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            // Transport failure — increment retry count.
-                            _logger.LogError(ex, "Failed to publish {Count} messages to topic {Topic}", groupMessages.Count, topicName);
-                            _instrumentation.PublishFailures.Add(1);
-
-                            // Use CancellationToken.None — this must complete even during shutdown
-                            // so the retry count is correctly incremented.
-                            try
-                            {
-                                await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
-                                    incrementRetry: true, CancellationToken.None);
-                                // Only remove from safety net after successful release
-                                foreach (var sn in sequenceNumbers)
-                                    unprocessedSequences.Remove(sn);
-                            }
-                            catch (Exception releaseEx)
-                            {
-                                _logger.LogWarning(releaseEx,
-                                    "Failed to release lease with retry increment for {Count} messages — they will expire after lease duration",
-                                    sequenceNumbers.Count);
-                                // Leave in unprocessedSequences — finally block will attempt release
-                            }
-
-                            var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
-
-                            // Update health state before event handler to avoid skipping on handler exception.
-                            if (stateChanged)
-                            {
-                                _healthState.SetCircuitOpen(topicName);
-                                _instrumentation.CircuitBreakerStateChanges.Add(1);
-                            }
-
-                            try
-                            {
-                                await _eventHandler.OnPublishFailedAsync(groupMessages, ex, ct);
-                            }
-                            catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                            {
-                                _logger.LogWarning(handlerEx,
-                                    "OnPublishFailedAsync handler threw after transport failure for topic {Topic} — " +
-                                    "message fates are already finalized, continuing", topicName);
-                            }
-
-                            if (stateChanged)
-                            {
-                                try
-                                {
-                                    await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
-                                }
-                                catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                                {
-                                    _logger.LogWarning(handlerEx,
-                                        "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
-                                        "circuit state is already updated, continuing", topicName);
-                                }
-                            }
-                        }
-                    }
+                    publishedAny = await ProcessGroupsAsync(
+                        publisherId, groups, circuitBreaker, unprocessedSequences, ct);
                 }
                 finally
                 {
                     // Release any leases not yet processed (e.g., on cancellation).
-                    if (unprocessedSequences.Count > 0)
+                    if (!unprocessedSequences.IsEmpty)
                     {
                         try
                         {
                             await _store.ReleaseLeaseAsync(
                                 publisherId,
-                                unprocessedSequences.ToList(),
+                                unprocessedSequences.Keys.ToList(),
                                 incrementRetry: false,
                                 CancellationToken.None);
                         }
@@ -634,6 +380,276 @@ internal sealed class OutboxPublisherService : BackgroundService
                 }
             }
         }
+    }
+
+    private async Task<bool> ProcessGroupsAsync(
+        string publisherId,
+        IReadOnlyList<IGrouping<(string TopicName, string PartitionKey), OutboxMessage>> groups,
+        TopicCircuitBreaker circuitBreaker,
+        ConcurrentDictionary<long, byte> unprocessedSequences,
+        CancellationToken ct)
+    {
+        var publishedAny = false;
+
+        foreach (var group in groups)
+        {
+            var topicName = group.Key.TopicName;
+            var partitionKey = group.Key.PartitionKey;
+            var groupMessages = group.OrderBy(m => m.SequenceNumber).ToList();
+            var sequenceNumbers = groupMessages.Select(m => m.SequenceNumber).ToList();
+
+            if (circuitBreaker.IsOpen(topicName))
+            {
+                // Circuit open — release without incrementing retry count.
+                await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
+                    incrementRetry: false, CancellationToken.None);
+                foreach (var sn in sequenceNumbers)
+                    unprocessedSequences.TryRemove(sn, out _);
+
+                continue;
+            }
+
+            try
+            {
+                var publishSw = Stopwatch.StartNew();
+
+                using var activity = _instrumentation.ActivitySource.StartActivity("outbox.publish");
+                activity?.SetTag("messaging.destination.name", topicName);
+                activity?.SetTag("messaging.batch.message_count", groupMessages.Count);
+
+                var effectiveMessages = await ApplyInterceptorsAsync(groupMessages, ct);
+                await _transport.SendAsync(topicName, partitionKey, effectiveMessages, ct);
+
+                publishSw.Stop();
+                _instrumentation.PublishDuration.Record(publishSw.Elapsed.TotalMilliseconds);
+
+                // Transport succeeded — record success metrics before attempting delete.
+                _instrumentation.MessagesPublished.Add(groupMessages.Count);
+                _healthState.RecordSuccessfulPublish();
+                publishedAny = true;
+
+                foreach (var sn in sequenceNumbers)
+                    unprocessedSequences.TryRemove(sn, out _);
+
+                var (stateChanged, newState) = circuitBreaker.RecordSuccess(topicName);
+
+                if (stateChanged)
+                {
+                    _healthState.SetCircuitClosed(topicName);
+                    _instrumentation.CircuitBreakerStateChanges.Add(1);
+
+                    try
+                    {
+                        await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
+                    }
+                    catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(handlerEx,
+                            "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
+                            "circuit state is already updated, continuing", topicName);
+                    }
+                }
+
+                foreach (var msg in groupMessages)
+                {
+                    try
+                    {
+                        await _eventHandler.OnMessagePublishedAsync(msg, ct);
+                    }
+                    catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(handlerEx,
+                            "OnMessagePublishedAsync handler threw for message {Seq} on topic {Topic} — " +
+                            "message fate is already finalized (transport succeeded), continuing",
+                            msg.SequenceNumber, topicName);
+                    }
+                }
+
+                // Delete from outbox — separate try since transport already succeeded.
+                try
+                {
+                    await _store.DeletePublishedAsync(publisherId, sequenceNumbers, ct);
+                }
+                catch (Exception deleteEx)
+                {
+                    _logger.LogWarning(deleteEx,
+                        "Failed to delete {Count} published messages — they will be re-delivered on next poll",
+                        sequenceNumbers.Count);
+
+                    // Release WITHOUT retry increment — transport succeeded.
+                    try
+                    {
+                        await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
+                            incrementRetry: false, CancellationToken.None);
+                    }
+                    catch (Exception releaseEx)
+                    {
+                        _logger.LogWarning(releaseEx,
+                            "Failed to release lease for {Count} published messages — leases will expire naturally",
+                            sequenceNumbers.Count);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Graceful shutdown — don't rethrow yet, let finally release leases.
+                break;
+            }
+            catch (PartialSendException pex)
+            {
+                // Some messages were sent, others failed.
+                _logger.LogWarning(pex.InnerException,
+                    "Partial send: {Succeeded} messages sent, {Failed} failed for topic {Topic}",
+                    pex.SucceededSequenceNumbers.Count, pex.FailedSequenceNumbers.Count, topicName);
+
+                _instrumentation.PublishFailures.Add(1);
+                publishedAny = true; // Some messages did get through
+
+                // Delete the succeeded messages — they're already on the broker
+                try
+                {
+                    await _store.DeletePublishedAsync(publisherId, pex.SucceededSequenceNumbers, CancellationToken.None);
+                    _instrumentation.MessagesPublished.Add(pex.SucceededSequenceNumbers.Count);
+                    _healthState.RecordSuccessfulPublish();
+                    // Only remove from safety net after successful delete
+                    foreach (var sn in pex.SucceededSequenceNumbers)
+                        unprocessedSequences.TryRemove(sn, out _);
+                }
+                catch (Exception deleteEx)
+                {
+                    _logger.LogWarning(deleteEx,
+                        "Failed to delete {Count} partially-sent messages — they will be re-delivered",
+                        pex.SucceededSequenceNumbers.Count);
+
+                    try
+                    {
+                        await _store.ReleaseLeaseAsync(publisherId, pex.SucceededSequenceNumbers,
+                            incrementRetry: false, CancellationToken.None);
+                        // Only remove from safety net after successful release
+                        foreach (var sn in pex.SucceededSequenceNumbers)
+                            unprocessedSequences.TryRemove(sn, out _);
+                    }
+                    catch (Exception releaseEx)
+                    {
+                        _logger.LogWarning(releaseEx,
+                            "Failed to release lease for {Count} partially-sent succeeded messages after delete failure — leases will expire naturally",
+                            pex.SucceededSequenceNumbers.Count);
+                        // Leave in unprocessedSequences — finally block will attempt release
+                    }
+                }
+
+                // Release the failed messages with retry increment
+                try
+                {
+                    await _store.ReleaseLeaseAsync(publisherId, pex.FailedSequenceNumbers,
+                        incrementRetry: true, CancellationToken.None);
+                    // Only remove from safety net after successful release
+                    foreach (var sn in pex.FailedSequenceNumbers)
+                        unprocessedSequences.TryRemove(sn, out _);
+                }
+                catch (Exception releaseEx)
+                {
+                    _logger.LogWarning(releaseEx,
+                        "Failed to release lease for {Count} failed messages — they will expire after lease duration",
+                        pex.FailedSequenceNumbers.Count);
+                    // Leave in unprocessedSequences — finally block will attempt release
+                }
+
+                // Record failure for circuit breaker (the send did partially fail)
+                var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
+
+                if (stateChanged)
+                {
+                    _healthState.SetCircuitOpen(topicName);
+                    _instrumentation.CircuitBreakerStateChanges.Add(1);
+                }
+
+                try
+                {
+                    await _eventHandler.OnPublishFailedAsync(groupMessages, pex, ct);
+                }
+                catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+                {
+                    _logger.LogWarning(handlerEx,
+                        "OnPublishFailedAsync handler threw after partial send for topic {Topic} — " +
+                        "message fates are already finalized, continuing", topicName);
+                }
+
+                if (stateChanged)
+                {
+                    try
+                    {
+                        await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
+                    }
+                    catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(handlerEx,
+                            "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
+                            "circuit state is already updated, continuing", topicName);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Transport failure — increment retry count.
+                _logger.LogError(ex, "Failed to publish {Count} messages to topic {Topic}", groupMessages.Count, topicName);
+                _instrumentation.PublishFailures.Add(1);
+
+                // Use CancellationToken.None — this must complete even during shutdown
+                // so the retry count is correctly incremented.
+                try
+                {
+                    await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
+                        incrementRetry: true, CancellationToken.None);
+                    // Only remove from safety net after successful release
+                    foreach (var sn in sequenceNumbers)
+                        unprocessedSequences.TryRemove(sn, out _);
+                }
+                catch (Exception releaseEx)
+                {
+                    _logger.LogWarning(releaseEx,
+                        "Failed to release lease with retry increment for {Count} messages — they will expire after lease duration",
+                        sequenceNumbers.Count);
+                    // Leave in unprocessedSequences — finally block will attempt release
+                }
+
+                var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
+
+                // Update health state before event handler to avoid skipping on handler exception.
+                if (stateChanged)
+                {
+                    _healthState.SetCircuitOpen(topicName);
+                    _instrumentation.CircuitBreakerStateChanges.Add(1);
+                }
+
+                try
+                {
+                    await _eventHandler.OnPublishFailedAsync(groupMessages, ex, ct);
+                }
+                catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+                {
+                    _logger.LogWarning(handlerEx,
+                        "OnPublishFailedAsync handler threw after transport failure for topic {Topic} — " +
+                        "message fates are already finalized, continuing", topicName);
+                }
+
+                if (stateChanged)
+                {
+                    try
+                    {
+                        await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
+                    }
+                    catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(handlerEx,
+                            "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
+                            "circuit state is already updated, continuing", topicName);
+                    }
+                }
+            }
+        }
+
+        return publishedAny;
     }
 
     private async Task HeartbeatLoopAsync(string publisherId, CancellationToken ct)
