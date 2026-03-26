@@ -60,7 +60,10 @@ public static class OutboxTestHelper
             {
                 services.AddOutbox(ctx.Configuration, outbox =>
                 {
-                    outbox.UsePostgreSql(connectionFactory.CreateConnectionAsync);
+                    outbox.UsePostgreSql(options =>
+                    {
+                        options.ConnectionFactory = connectionFactory.CreateConnectionAsync;
+                    });
                     outbox.ConfigurePublisher(o =>
                     {
                         FastTestOptions(o);

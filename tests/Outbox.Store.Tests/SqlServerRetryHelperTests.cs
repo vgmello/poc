@@ -60,7 +60,9 @@ public class SqlServerRetryHelperTests
             throw nonTransientEx;
         };
 
-        var helper = new SqlServerDbHelper(factory, serviceProvider, FastOptions(maxAttempts: 3));
+        var options = FastOptions(maxAttempts: 3);
+        options.ConnectionFactory = factory;
+        var helper = new SqlServerDbHelper(serviceProvider, options);
 
         var ex = await Assert.ThrowsAsync<SqlException>(() =>
             helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));
@@ -82,7 +84,9 @@ public class SqlServerRetryHelperTests
             throw CreateSqlException(1205); // deadlock — transient
         };
 
-        var helper = new SqlServerDbHelper(factory, serviceProvider, FastOptions(maxAttempts: 3));
+        var options = FastOptions(maxAttempts: 3);
+        options.ConnectionFactory = factory;
+        var helper = new SqlServerDbHelper(serviceProvider, options);
 
         var ex = await Assert.ThrowsAsync<SqlException>(() =>
             helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));
@@ -106,7 +110,9 @@ public class SqlServerRetryHelperTests
             throw CreateSqlException(40613); // Azure SQL unavailable — transient
         };
 
-        var helper = new SqlServerDbHelper(factory, serviceProvider, FastOptions(maxAttempts: 1));
+        var options = FastOptions(maxAttempts: 1);
+        options.ConnectionFactory = factory;
+        var helper = new SqlServerDbHelper(serviceProvider, options);
 
         var ex = await Assert.ThrowsAsync<SqlException>(() =>
             helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));

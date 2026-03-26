@@ -33,7 +33,9 @@ public class PostgreSqlRetryHelperTests
             return Task.FromResult(connection);
         };
 
-        var helper = new PostgreSqlDbHelper(factory, serviceProvider, FastOptions());
+        var options = FastOptions();
+        options.ConnectionFactory = factory;
+        var helper = new PostgreSqlDbHelper(serviceProvider, options);
 
         await helper.ExecuteWithRetryAsync(
             (conn, _) =>
@@ -71,7 +73,9 @@ public class PostgreSqlRetryHelperTests
             return Task.FromResult(goodConnection);
         };
 
-        var helper = new PostgreSqlDbHelper(factory, serviceProvider, FastOptions(maxAttempts: 3));
+        var options = FastOptions(maxAttempts: 3);
+        options.ConnectionFactory = factory;
+        var helper = new PostgreSqlDbHelper(serviceProvider, options);
 
         await helper.ExecuteWithRetryAsync(
             (conn, _) =>
@@ -100,7 +104,9 @@ public class PostgreSqlRetryHelperTests
             throw new PostgresException("persistent error", "ERROR", "ERROR", "40001");
         };
 
-        var helper = new PostgreSqlDbHelper(factory, serviceProvider, FastOptions(maxAttempts: 3));
+        var options = FastOptions(maxAttempts: 3);
+        options.ConnectionFactory = factory;
+        var helper = new PostgreSqlDbHelper(serviceProvider, options);
 
         var ex = await Assert.ThrowsAsync<PostgresException>(() =>
             helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));

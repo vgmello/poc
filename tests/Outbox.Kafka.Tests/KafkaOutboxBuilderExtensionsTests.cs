@@ -17,6 +17,7 @@ public class KafkaOutboxBuilderExtensionsTests
     {
         var services = new ServiceCollection();
         var config = new ConfigurationBuilder().Build();
+        services.AddSingleton<IConfiguration>(config);
 
         var mockProducer = Substitute.For<IProducer<string, byte[]>>();
 
@@ -42,6 +43,7 @@ public class KafkaOutboxBuilderExtensionsTests
     {
         var services = new ServiceCollection();
         var config = new ConfigurationBuilder().Build();
+        services.AddSingleton<IConfiguration>(config);
 
         var mockProducer = Substitute.For<IProducer<string, byte[]>>();
         var factoryInvoked = false;
@@ -73,6 +75,7 @@ public class KafkaOutboxBuilderExtensionsTests
     {
         var services = new ServiceCollection();
         var config = new ConfigurationBuilder().Build();
+        services.AddSingleton<IConfiguration>(config);
 
         var mockProducer = Substitute.For<IProducer<string, byte[]>>();
 
@@ -94,6 +97,7 @@ public class KafkaOutboxBuilderExtensionsTests
     {
         var services = new ServiceCollection();
         var config = new ConfigurationBuilder().Build();
+        services.AddSingleton<IConfiguration>(config);
 
         var mockProducer = Substitute.For<IProducer<string, byte[]>>();
 

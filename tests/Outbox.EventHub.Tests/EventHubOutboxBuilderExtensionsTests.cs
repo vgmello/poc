@@ -70,6 +70,7 @@ public class EventHubOutboxBuilderExtensionsTests
                     "Endpoint=sb://test.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=abc="
             })
             .Build();
+        services.AddSingleton<IConfiguration>(config);
 
         services.AddOutbox(config, outbox =>
         {
@@ -95,6 +96,7 @@ public class EventHubOutboxBuilderExtensionsTests
                     "Endpoint=sb://test.servicebus.windows.net/;SharedAccessKeyName=k;SharedAccessKey=abc="
             })
             .Build();
+        services.AddSingleton<IConfiguration>(config);
 
         services.AddOutbox(config, outbox =>
         {

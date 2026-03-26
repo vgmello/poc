@@ -63,7 +63,10 @@ public static class SqlServerTestHelper
             {
                 services.AddOutbox(ctx.Configuration, outbox =>
                 {
-                    outbox.UseSqlServer(connectionFactory.CreateConnectionAsync);
+                    outbox.UseSqlServer(options =>
+                    {
+                        options.ConnectionFactory = connectionFactory.CreateConnectionAsync;
+                    });
                     outbox.ConfigurePublisher(o =>
                     {
                         OutboxTestHelper.FastTestOptions(o);
