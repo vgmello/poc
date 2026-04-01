@@ -1,6 +1,5 @@
 // Copyright (c) OrgName. All rights reserved.
 
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -279,11 +278,6 @@ internal sealed class OutboxPublisherService : BackgroundService
                 var poison = batch.Where(m => m.RetryCount >= opts.MaxRetryCount).ToList();
                 var healthy = batch.Where(m => m.RetryCount < opts.MaxRetryCount).ToList();
 
-                // Track all leased sequences (poison + healthy) so the finally
-                // block can release any that aren't finalized on cancellation.
-                var unprocessedSequences = new ConcurrentDictionary<long, byte>(
-                    batch.Select(m => new KeyValuePair<long, byte>(m.SequenceNumber, 0)));
-
                 // Dead-letter poison messages (CancellationToken.None — must complete even during shutdown)
                 if (poison.Count > 0)
                 {
@@ -291,9 +285,6 @@ internal sealed class OutboxPublisherService : BackgroundService
                         poison.Select(m => m.SequenceNumber).ToList(),
                         "Max retry count exceeded",
                         CancellationToken.None);
-
-                    foreach (var sn in poison.Select(m => m.SequenceNumber))
-                        unprocessedSequences.TryRemove(sn, out _);
 
                     _instrumentation.MessagesDeadLettered.Add(poison.Count);
 
@@ -335,42 +326,35 @@ internal sealed class OutboxPublisherService : BackgroundService
 
                 var publishedAny = false;
 
+                // Launch workers concurrently
+                var workerTasks = workerGroups
+                    .Where(wg => wg.Count > 0)
+                    .Select(wg => ProcessGroupsAsync(
+                        wg, circuitBreaker, ct))
+                    .ToArray();
+
                 try
                 {
-                    // Launch workers concurrently
-                    var workerTasks = workerGroups
-                        .Where(wg => wg.Count > 0)
-                        .Select(wg => ProcessGroupsAsync(
-                            wg, circuitBreaker, unprocessedSequences, ct))
-                        .ToArray();
-
-                    try
+                    await Task.WhenAll(workerTasks);
+                }
+                catch
+                {
+                    // Log ALL faulted worker exceptions (Task.WhenAll only throws the first)
+                    foreach (var task in workerTasks.Where(t => t.IsFaulted))
                     {
-                        await Task.WhenAll(workerTasks);
-                    }
-                    catch
-                    {
-                        // Log ALL faulted worker exceptions (Task.WhenAll only throws the first)
-                        foreach (var task in workerTasks.Where(t => t.IsFaulted))
+                        foreach (var ex in task.Exception!.InnerExceptions)
                         {
-                            foreach (var ex in task.Exception!.InnerExceptions)
-                            {
-                                _logger.LogError(ex, "Publish worker faulted unexpectedly");
-                            }
+                            _logger.LogError(ex, "Publish worker faulted unexpectedly");
                         }
                     }
-
-                    // Aggregate publishedAny from all completed workers
-                    publishedAny = workerTasks
-                        .Where(t => t.IsCompletedSuccessfully)
-                        .Any(t => t.Result);
-                }
-                finally
-                {
-                    // No lease release needed — partition ownership replaces per-message leasing.
                 }
 
-                // If we leased messages but none were actually published (e.g., all circuits
+                // Aggregate publishedAny from all completed workers
+                publishedAny = workerTasks
+                    .Where(t => t.IsCompletedSuccessfully)
+                    .Any(t => t.Result);
+
+                // If no messages were actually published (e.g., all circuits
                 // open or all errored), apply adaptive backoff to avoid a hot loop.
                 if (!publishedAny && batch.Count > 0)
                 {
@@ -407,7 +391,6 @@ internal sealed class OutboxPublisherService : BackgroundService
     private async Task<bool> ProcessGroupsAsync(
         IReadOnlyList<IGrouping<(string TopicName, string PartitionKey), OutboxMessage>> groups,
         TopicCircuitBreaker circuitBreaker,
-        ConcurrentDictionary<long, byte> unprocessedSequences,
         CancellationToken ct)
     {
         var publishedAny = false;
@@ -422,9 +405,6 @@ internal sealed class OutboxPublisherService : BackgroundService
             if (circuitBreaker.IsOpen(topicName))
             {
                 // Circuit open — skip without incrementing retry count.
-                foreach (var sn in sequenceNumbers)
-                    unprocessedSequences.TryRemove(sn, out _);
-
                 continue;
             }
 
@@ -446,9 +426,6 @@ internal sealed class OutboxPublisherService : BackgroundService
                 _instrumentation.MessagesPublished.Add(groupMessages.Count);
                 _healthState.RecordSuccessfulPublish();
                 publishedAny = true;
-
-                foreach (var sn in sequenceNumbers)
-                    unprocessedSequences.TryRemove(sn, out _);
 
                 var (stateChanged, newState) = circuitBreaker.RecordSuccess(topicName);
 
@@ -498,7 +475,7 @@ internal sealed class OutboxPublisherService : BackgroundService
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                // Graceful shutdown — don't rethrow yet, let finally release leases.
+                // Graceful shutdown — exit the group processing loop.
                 break;
             }
             catch (PartialSendException pex)
@@ -517,32 +494,24 @@ internal sealed class OutboxPublisherService : BackgroundService
                     await _store.DeletePublishedAsync(pex.SucceededSequenceNumbers, CancellationToken.None);
                     _instrumentation.MessagesPublished.Add(pex.SucceededSequenceNumbers.Count);
                     _healthState.RecordSuccessfulPublish();
-                    foreach (var sn in pex.SucceededSequenceNumbers)
-                        unprocessedSequences.TryRemove(sn, out _);
                 }
                 catch (Exception deleteEx)
                 {
                     _logger.LogWarning(deleteEx,
                         "Failed to delete {Count} partially-sent messages — they will be re-delivered",
                         pex.SucceededSequenceNumbers.Count);
-                    foreach (var sn in pex.SucceededSequenceNumbers)
-                        unprocessedSequences.TryRemove(sn, out _);
                 }
 
                 // Increment retry count for failed messages
                 try
                 {
                     await _store.IncrementRetryCountAsync(pex.FailedSequenceNumbers, CancellationToken.None);
-                    foreach (var sn in pex.FailedSequenceNumbers)
-                        unprocessedSequences.TryRemove(sn, out _);
                 }
                 catch (Exception retryEx)
                 {
                     _logger.LogWarning(retryEx,
                         "Failed to increment retry count for {Count} failed messages",
                         pex.FailedSequenceNumbers.Count);
-                    foreach (var sn in pex.FailedSequenceNumbers)
-                        unprocessedSequences.TryRemove(sn, out _);
                 }
 
                 // Record failure for circuit breaker (the send did partially fail)
@@ -597,9 +566,6 @@ internal sealed class OutboxPublisherService : BackgroundService
                         "Failed to increment retry count for {Count} messages",
                         sequenceNumbers.Count);
                 }
-
-                foreach (var sn in sequenceNumbers)
-                    unprocessedSequences.TryRemove(sn, out _);
 
                 var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
 

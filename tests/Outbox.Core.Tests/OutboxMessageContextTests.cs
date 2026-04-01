@@ -36,7 +36,8 @@ public class OutboxMessageContextTests
         Assert.Equal(msg.RetryCount, ctx.RetryCount);
         Assert.Equal(msg.CreatedAtUtc, ctx.CreatedAtUtc);
         Assert.Same(msg.Payload, ctx.Payload);
-        Assert.Same(headers, ctx.Headers);
+        Assert.Equal(headers, ctx.Headers);
+        Assert.NotSame(headers, ctx.Headers); // Defensive clone prevents mutation leaking to original
         Assert.Equal("application/octet-stream", ctx.PayloadContentType);
     }
 

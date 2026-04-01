@@ -60,7 +60,7 @@ internal sealed class OutboxInstrumentation : IDisposable
 
         BatchSize = Meter.CreateHistogram<int>(
             "outbox.poll.batch_size",
-            description: "Number of messages leased per poll");
+            description: "Number of messages fetched per poll");
     }
 
     private long _pendingCount;

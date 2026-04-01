@@ -36,7 +36,7 @@ public sealed class OutboxMessageContext
     {
         _original = message;
         _payload = message.Payload;
-        Headers = message.Headers;
+        Headers = message.Headers is not null ? new Dictionary<string, string>(message.Headers) : null;
         PayloadContentType = message.PayloadContentType;
     }
 
