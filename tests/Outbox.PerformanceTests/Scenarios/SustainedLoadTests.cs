@@ -125,8 +125,6 @@ public class SustainedLoadTests
         // Verify at least some messages were published during the sustained run
         Assert.True(totalPublished > 0, "Expected at least one message to be published during sustained load test");
 
-#pragma warning disable S125 // Task 11 will add AddSustainedResult to PerformanceFixture
-        // _fixture.AddSustainedResult(result);
-#pragma warning restore S125
+        _fixture.AddSustainedResult(result);
     }
 }

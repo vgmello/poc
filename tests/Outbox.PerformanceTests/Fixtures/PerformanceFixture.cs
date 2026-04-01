@@ -5,6 +5,7 @@ using DotNet.Testcontainers.Containers;
 using DotNet.Testcontainers.Networks;
 using Microsoft.Data.SqlClient;
 using Npgsql;
+using Outbox.PerformanceTests.Helpers;
 using Testcontainers.PostgreSql;
 using Testcontainers.Redpanda;
 using Xunit;
@@ -33,6 +34,21 @@ public sealed class PerformanceFixture : IAsyncLifetime
     public string SqlServerConnectionString { get; private set; } = "";
     public string BootstrapServers => _redpanda.GetBootstrapAddress();
     public string EventHubConnectionString { get; private set; } = "";
+
+    // Results collected during test runs
+    private readonly List<BulkResult> _bulkResults = [];
+    private readonly List<SustainedResult> _sustainedResults = [];
+    private readonly object _resultsLock = new();
+
+    public void AddBulkResult(BulkResult result)
+    {
+        lock (_resultsLock) _bulkResults.Add(result);
+    }
+
+    public void AddSustainedResult(SustainedResult result)
+    {
+        lock (_resultsLock) _sustainedResults.Add(result);
+    }
 
     public async Task InitializeAsync()
     {
@@ -97,6 +113,21 @@ public sealed class PerformanceFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
+        // Write report before tearing down containers
+        List<BulkResult> bulkCopy;
+        List<SustainedResult> sustainedCopy;
+        lock (_resultsLock)
+        {
+            bulkCopy = [.. _bulkResults];
+            sustainedCopy = [.. _sustainedResults];
+        }
+
+        if (bulkCopy.Count > 0 || sustainedCopy.Count > 0)
+        {
+            var reportsDir = FindReportsDir();
+            await PerfReportWriter.WriteMarkdownReportAsync(bulkCopy, sustainedCopy, reportsDir);
+        }
+
         await Task.WhenAll(
             _postgres.DisposeAsync().AsTask(),
             _redpanda.DisposeAsync().AsTask(),
@@ -105,6 +136,17 @@ public sealed class PerformanceFixture : IAsyncLifetime
             _azurite.DisposeAsync().AsTask());
 
         await _eventHubNetwork.DisposeAsync();
+    }
+
+    private static string FindReportsDir()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "tests/Outbox.PerformanceTests")))
+            dir = dir.Parent;
+
+        return dir is not null
+            ? Path.Combine(dir.FullName, "tests/Outbox.PerformanceTests/reports")
+            : Path.Combine(AppContext.BaseDirectory, "reports");
     }
 
     private static string BuildEventHubConfig()

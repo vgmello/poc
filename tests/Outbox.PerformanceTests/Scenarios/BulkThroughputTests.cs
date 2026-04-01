@@ -118,8 +118,6 @@ public class BulkThroughputTests
 
         PerfReportWriter.WriteBulkToConsole(result, _output);
 
-#pragma warning disable S125 // Task 11 will add AddBulkResult to PerformanceFixture
-        // _fixture.AddBulkResult(result);
-#pragma warning restore S125
+        _fixture.AddBulkResult(result);
     }
 }
