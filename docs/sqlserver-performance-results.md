@@ -36,19 +36,19 @@ Continuous message insertion at the target rate for 5 minutes.
 
 | Transport | Publishers | Target Rate | Drain Rate | Peak Pending | Final Pending | Kept Up? |
 |-----------|------------|-------------|------------|--------------|---------------|----------|
-| Redpanda  | 1          | 100/s       | 100/s      | 510          | 0             | Yes      |
-| Redpanda  | 2          | 100/s       | 100/s      | 16           | 0             | Yes      |
-| Redpanda  | 4          | 100/s       | 100/s      | 16           | 0             | Yes      |
-| EventHub  | 1          | 50/s        | 50/s       | 250          | 0             | Yes      |
-| EventHub  | 2          | 50/s        | 50/s       | 8            | 0             | Yes      |
-| EventHub  | 4          | 50/s        | 50/s       | 7            | 0             | Yes      |
+| Redpanda  | 1          | 500/s       | 500/s      | 2,550        | 0             | Yes      |
+| Redpanda  | 2          | 500/s       | 500/s      | 100          | 0             | Yes      |
+| Redpanda  | 4          | 500/s       | 500/s      | 202          | 0             | Yes      |
+| EventHub  | 1          | 500/s       | 500/s      | 2,550        | 0             | Yes      |
+| EventHub  | 2          | 500/s       | 500/s      | 107          | 0             | Yes      |
+| EventHub  | 4          | 500/s       | 500/s      | 156          | 0             | Yes      |
 
 ### Observations
 
-- **All combinations kept up** with their target ingestion rate — final pending count was 0 across the board.
-- **1P shows initial backlog spike** (510 pending for Redpanda, 250 for EventHub) as the publisher starts up and takes time to ramp. With 2P+, the peak drops to 7-16 — horizontal scaling effectively eliminates cursor distance.
-- **Redpanda handles 100 msg/sec comfortably.** Based on bulk throughput (1,330/s max), SQL Server could sustain ~1,000/s with Redpanda, but the sustained test used a conservative 100/s target.
-- **EventHub emulator at 50/s is well within capacity** (bulk max ~765/s).
+- **All combinations kept up at 500 msg/sec** — final pending count was 0 across the board, including EventHub.
+- **1P startup backlog is proportional to rate:** ~2,550 pending peak at 500/s (vs 510 at the earlier 100/s run). With 2P+, peak drops to 100-202 — horizontal scaling remains effective.
+- **EventHub emulator handles 500/s** despite bulk throughput showing ~700/s max. The sustained rate leaves enough headroom.
+- **SQL Server at 500/s is well within capacity.** Based on bulk throughput (1,330-1,976/s), the publisher has ~2.5-4x headroom above the sustained target.
 
 ---
 
