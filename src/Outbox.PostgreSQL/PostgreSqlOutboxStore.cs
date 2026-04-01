@@ -70,11 +70,11 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     }
 
     // -------------------------------------------------------------------------
-    // Lease and publish operations
+    // Fetch and publish operations
     // -------------------------------------------------------------------------
 
-    public async Task<IReadOnlyList<OutboxMessage>> LeaseBatchAsync(
-        string publisherId, int batchSize, int leaseDurationSeconds,
+    public async Task<IReadOnlyList<OutboxMessage>> FetchBatchAsync(
+        string publisherId, int batchSize,
         int maxRetryCount, CancellationToken ct)
     {
         var totalPartitions = await GetCachedPartitionCountAsync(ct).ConfigureAwait(false);
@@ -82,11 +82,10 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
         if (totalPartitions == 0)
             return Array.Empty<OutboxMessage>();
 
-        var rows = await _db.QueryAsync<OutboxMessage>(_queries.LeaseBatch,
+        var rows = await _db.QueryAsync<OutboxMessage>(_queries.FetchBatch,
             new
             {
                 batch_size = batchSize,
-                lease_duration_seconds = (double)leaseDurationSeconds,
                 publisher_id = publisherId,
                 total_partitions = totalPartitions,
                 max_retry_count = maxRetryCount,
@@ -97,28 +96,25 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     }
 
     public async Task DeletePublishedAsync(
-        string publisherId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
+        IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
     {
-        var parameters = new DynamicParameters(new { publisher_id = publisherId });
-        parameters.Add("@published_ids", new BigintArrayParam(sequenceNumbers));
+        var parameters = new DynamicParameters();
+        parameters.Add("@ids", new BigintArrayParam(sequenceNumbers));
         await _db.ExecuteAsync(_queries.DeletePublished, parameters, ct).ConfigureAwait(false);
     }
 
-    public async Task ReleaseLeaseAsync(
-        string publisherId, IReadOnlyList<long> sequenceNumbers,
-        bool incrementRetry, CancellationToken ct)
+    public async Task IncrementRetryCountAsync(
+        IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
     {
-        var sql = incrementRetry ? _queries.ReleaseLeaseWithRetry : _queries.ReleaseLeaseNoRetry;
-
-        var parameters = new DynamicParameters(new { publisher_id = publisherId });
+        var parameters = new DynamicParameters();
         parameters.Add("@ids", new BigintArrayParam(sequenceNumbers));
-        await _db.ExecuteAsync(sql, parameters, ct).ConfigureAwait(false);
+        await _db.ExecuteAsync(_queries.IncrementRetryCount, parameters, ct).ConfigureAwait(false);
     }
 
     public async Task DeadLetterAsync(
-        string publisherId, IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
+        IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
     {
-        var parameters = new DynamicParameters(new { publisher_id = publisherId });
+        var parameters = new DynamicParameters();
         parameters.Add("@ids", new BigintArrayParam(sequenceNumbers));
         parameters.Add("@last_error", lastError, DbType.String, size: 2000);
         await _db.ExecuteAsync(_queries.DeadLetter, parameters, ct).ConfigureAwait(false);
@@ -237,19 +233,7 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
 
     public async Task SweepDeadLettersAsync(int maxRetryCount, CancellationToken ct)
     {
-        var opts = _publisherOptions.Get(_optionsName);
-        // Only sweep messages whose lease_owner is NULL (explicitly released),
-        // whose owner is a dead publisher (stale heartbeat), or whose lease has been
-        // expired for longer than LeaseDurationSeconds (publisher had ample time to
-        // delete but didn't — covers the case where DeadLetterAsync itself failed).
-
-        var parameters = new DynamicParameters(new
-        {
-            max_retry_count = maxRetryCount,
-            heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds,
-            lease_duration_seconds = (double)opts.LeaseDurationSeconds,
-            outbox_table_name = _options.GetOutboxTableName()
-        });
+        var parameters = new DynamicParameters(new { max_retry_count = maxRetryCount });
         parameters.Add("@last_error", "Max retry count exceeded (background sweep)", DbType.String, size: 2000);
         await _db.ExecuteAsync(_queries.SweepDeadLetters, parameters, ct).ConfigureAwait(false);
     }

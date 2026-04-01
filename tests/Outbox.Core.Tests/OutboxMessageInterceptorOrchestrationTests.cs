@@ -85,7 +85,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
-        _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var service = CreateService();
@@ -111,7 +111,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
-        _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var interceptor = Substitute.For<IOutboxMessageInterceptor>();
@@ -143,7 +143,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
-        _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var interceptor = Substitute.For<IOutboxMessageInterceptor>();
@@ -176,7 +176,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
-        _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var order = new List<string>();
@@ -227,7 +227,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
-        _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var interceptor = Substitute.For<IOutboxMessageInterceptor>();
@@ -248,9 +248,9 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         await service.StopAsync(CancellationToken.None);
 
         // Interceptor failure is treated as transport failure — retry count incremented.
-        await _store.Received().ReleaseLeaseAsync("p1",
+        await _store.Received().IncrementRetryCountAsync(
             Arg.Is<IReadOnlyList<long>>(s => s.Contains(1L)),
-            true, CancellationToken.None);
+            CancellationToken.None);
 
         // Transport should NOT have been called.
         await _transport.DidNotReceive().SendAsync(
@@ -270,7 +270,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
                 DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow)
         };
         var callCount = 0;
-        _store.LeaseBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var interceptor = Substitute.For<IOutboxMessageInterceptor>();

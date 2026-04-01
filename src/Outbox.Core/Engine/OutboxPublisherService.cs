@@ -250,8 +250,8 @@ internal sealed class OutboxPublisherService : BackgroundService
                 opts = GetOptions();
                 var pollSw = Stopwatch.StartNew();
 
-                var batch = await _store.LeaseBatchAsync(
-                    publisherId, opts.BatchSize, opts.LeaseDurationSeconds,
+                var batch = await _store.FetchBatchAsync(
+                    publisherId, opts.BatchSize,
                     opts.MaxRetryCount, ct);
 
                 pollSw.Stop();
@@ -288,7 +288,6 @@ internal sealed class OutboxPublisherService : BackgroundService
                 if (poison.Count > 0)
                 {
                     await _store.DeadLetterAsync(
-                        publisherId,
                         poison.Select(m => m.SequenceNumber).ToList(),
                         "Max retry count exceeded",
                         CancellationToken.None);
@@ -342,7 +341,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                     var workerTasks = workerGroups
                         .Where(wg => wg.Count > 0)
                         .Select(wg => ProcessGroupsAsync(
-                            publisherId, wg, circuitBreaker, unprocessedSequences, ct))
+                            wg, circuitBreaker, unprocessedSequences, ct))
                         .ToArray();
 
                     try
@@ -368,24 +367,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                 }
                 finally
                 {
-                    // Release any leases not yet processed (e.g., on cancellation).
-                    if (!unprocessedSequences.IsEmpty)
-                    {
-                        try
-                        {
-                            await _store.ReleaseLeaseAsync(
-                                publisherId,
-                                unprocessedSequences.Keys.ToList(),
-                                incrementRetry: false,
-                                CancellationToken.None);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogWarning(ex,
-                                "Failed to release {Count} leases during shutdown — they will expire after lease duration",
-                                unprocessedSequences.Count);
-                        }
-                    }
+                    // No lease release needed — partition ownership replaces per-message leasing.
                 }
 
                 // If we leased messages but none were actually published (e.g., all circuits
@@ -423,7 +405,6 @@ internal sealed class OutboxPublisherService : BackgroundService
     }
 
     private async Task<bool> ProcessGroupsAsync(
-        string publisherId,
         IReadOnlyList<IGrouping<(string TopicName, string PartitionKey), OutboxMessage>> groups,
         TopicCircuitBreaker circuitBreaker,
         ConcurrentDictionary<long, byte> unprocessedSequences,
@@ -440,9 +421,7 @@ internal sealed class OutboxPublisherService : BackgroundService
 
             if (circuitBreaker.IsOpen(topicName))
             {
-                // Circuit open — release without incrementing retry count.
-                await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
-                    incrementRetry: false, CancellationToken.None);
+                // Circuit open — skip without incrementing retry count.
                 foreach (var sn in sequenceNumbers)
                     unprocessedSequences.TryRemove(sn, out _);
 
@@ -508,26 +487,13 @@ internal sealed class OutboxPublisherService : BackgroundService
                 // Delete from outbox — separate try since transport already succeeded.
                 try
                 {
-                    await _store.DeletePublishedAsync(publisherId, sequenceNumbers, ct);
+                    await _store.DeletePublishedAsync(sequenceNumbers, ct);
                 }
                 catch (Exception deleteEx)
                 {
                     _logger.LogWarning(deleteEx,
                         "Failed to delete {Count} published messages — they will be re-delivered on next poll",
                         sequenceNumbers.Count);
-
-                    // Release WITHOUT retry increment — transport succeeded.
-                    try
-                    {
-                        await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
-                            incrementRetry: false, CancellationToken.None);
-                    }
-                    catch (Exception releaseEx)
-                    {
-                        _logger.LogWarning(releaseEx,
-                            "Failed to release lease for {Count} published messages — leases will expire naturally",
-                            sequenceNumbers.Count);
-                    }
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -548,10 +514,9 @@ internal sealed class OutboxPublisherService : BackgroundService
                 // Delete the succeeded messages — they're already on the broker
                 try
                 {
-                    await _store.DeletePublishedAsync(publisherId, pex.SucceededSequenceNumbers, CancellationToken.None);
+                    await _store.DeletePublishedAsync(pex.SucceededSequenceNumbers, CancellationToken.None);
                     _instrumentation.MessagesPublished.Add(pex.SucceededSequenceNumbers.Count);
                     _healthState.RecordSuccessfulPublish();
-                    // Only remove from safety net after successful delete
                     foreach (var sn in pex.SucceededSequenceNumbers)
                         unprocessedSequences.TryRemove(sn, out _);
                 }
@@ -560,39 +525,24 @@ internal sealed class OutboxPublisherService : BackgroundService
                     _logger.LogWarning(deleteEx,
                         "Failed to delete {Count} partially-sent messages — they will be re-delivered",
                         pex.SucceededSequenceNumbers.Count);
-
-                    try
-                    {
-                        await _store.ReleaseLeaseAsync(publisherId, pex.SucceededSequenceNumbers,
-                            incrementRetry: false, CancellationToken.None);
-                        // Only remove from safety net after successful release
-                        foreach (var sn in pex.SucceededSequenceNumbers)
-                            unprocessedSequences.TryRemove(sn, out _);
-                    }
-                    catch (Exception releaseEx)
-                    {
-                        _logger.LogWarning(releaseEx,
-                            "Failed to release lease for {Count} partially-sent succeeded messages after delete failure — leases will expire naturally",
-                            pex.SucceededSequenceNumbers.Count);
-                        // Leave in unprocessedSequences — finally block will attempt release
-                    }
+                    foreach (var sn in pex.SucceededSequenceNumbers)
+                        unprocessedSequences.TryRemove(sn, out _);
                 }
 
-                // Release the failed messages with retry increment
+                // Increment retry count for failed messages
                 try
                 {
-                    await _store.ReleaseLeaseAsync(publisherId, pex.FailedSequenceNumbers,
-                        incrementRetry: true, CancellationToken.None);
-                    // Only remove from safety net after successful release
+                    await _store.IncrementRetryCountAsync(pex.FailedSequenceNumbers, CancellationToken.None);
                     foreach (var sn in pex.FailedSequenceNumbers)
                         unprocessedSequences.TryRemove(sn, out _);
                 }
-                catch (Exception releaseEx)
+                catch (Exception retryEx)
                 {
-                    _logger.LogWarning(releaseEx,
-                        "Failed to release lease for {Count} failed messages — they will expire after lease duration",
+                    _logger.LogWarning(retryEx,
+                        "Failed to increment retry count for {Count} failed messages",
                         pex.FailedSequenceNumbers.Count);
-                    // Leave in unprocessedSequences — finally block will attempt release
+                    foreach (var sn in pex.FailedSequenceNumbers)
+                        unprocessedSequences.TryRemove(sn, out _);
                 }
 
                 // Record failure for circuit breaker (the send did partially fail)
@@ -639,19 +589,17 @@ internal sealed class OutboxPublisherService : BackgroundService
                 // so the retry count is correctly incremented.
                 try
                 {
-                    await _store.ReleaseLeaseAsync(publisherId, sequenceNumbers,
-                        incrementRetry: true, CancellationToken.None);
-                    // Only remove from safety net after successful release
-                    foreach (var sn in sequenceNumbers)
-                        unprocessedSequences.TryRemove(sn, out _);
+                    await _store.IncrementRetryCountAsync(sequenceNumbers, CancellationToken.None);
                 }
-                catch (Exception releaseEx)
+                catch (Exception retryEx)
                 {
-                    _logger.LogWarning(releaseEx,
-                        "Failed to release lease with retry increment for {Count} messages — they will expire after lease duration",
+                    _logger.LogWarning(retryEx,
+                        "Failed to increment retry count for {Count} messages",
                         sequenceNumbers.Count);
-                    // Leave in unprocessedSequences — finally block will attempt release
                 }
+
+                foreach (var sn in sequenceNumbers)
+                    unprocessedSequences.TryRemove(sn, out _);
 
                 var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
 
@@ -860,12 +808,11 @@ internal sealed class OutboxPublisherService : BackgroundService
     {
         _logger.LogInformation(
             "Outbox publisher starting with configuration: " +
-            "BatchSize={BatchSize}, LeaseDuration={LeaseDuration}s, MaxRetry={MaxRetry}, " +
+            "BatchSize={BatchSize}, MaxRetry={MaxRetry}, " +
             "Poll={MinPoll}-{MaxPoll}ms, Heartbeat={HbInterval}ms/timeout={HbTimeout}s, " +
             "GracePeriod={Grace}s, CircuitBreaker={CbThreshold}failures/{CbDuration}s, " +
             "PublishThreads={PublishThreads}, Interceptors={InterceptorCount}",
             opts.BatchSize,
-            opts.LeaseDurationSeconds,
             opts.MaxRetryCount,
             opts.MinPollIntervalMs,
             opts.MaxPollIntervalMs,

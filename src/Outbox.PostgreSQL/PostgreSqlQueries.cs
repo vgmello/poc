@@ -7,10 +7,9 @@ internal sealed class PostgreSqlQueries
     // Store queries
     public string RegisterPublisher { get; }
     public string UnregisterPublisher { get; }
-    public string LeaseBatch { get; }
+    public string FetchBatch { get; }
     public string DeletePublished { get; }
-    public string ReleaseLeaseWithRetry { get; }
-    public string ReleaseLeaseNoRetry { get; }
+    public string IncrementRetryCount { get; }
     public string DeadLetter { get; }
     public string Heartbeat { get; }
     public string GetTotalPartitions { get; }
@@ -59,59 +58,35 @@ DELETE FROM {publishersTable}
 WHERE  publisher_id = @publisher_id
   AND  outbox_table_name = @outbox_table_name;";
 
-        LeaseBatch = $@"
-WITH batch AS (
-    SELECT o.sequence_number
-    FROM {outboxTable} o
-    INNER JOIN {partitionsTable} op
-        ON  op.outbox_table_name = @outbox_table_name
-        AND op.owner_publisher_id = @publisher_id
-        AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < clock_timestamp())
-        AND ((hashtext(o.partition_key) & 2147483647) % @total_partitions) = op.partition_id
-    WHERE (o.leased_until_utc IS NULL OR o.leased_until_utc < clock_timestamp())
-      AND o.retry_count < @max_retry_count
-    ORDER BY o.event_datetime_utc, o.event_ordinal
-    LIMIT @batch_size
-    FOR UPDATE OF o SKIP LOCKED
-)
-UPDATE {outboxTable} o
-SET    leased_until_utc = clock_timestamp() + make_interval(secs => @lease_duration_seconds),
-       lease_owner      = @publisher_id,
-       retry_count      = CASE WHEN o.leased_until_utc IS NOT NULL
-                               THEN o.retry_count + 1
-                               ELSE o.retry_count END
-FROM   batch b
-WHERE  o.sequence_number = b.sequence_number
-RETURNING o.sequence_number, o.topic_name, o.partition_key, o.event_type,
-          o.headers, o.payload, o.payload_content_type,
-          o.event_datetime_utc, o.event_ordinal,
-          o.retry_count, o.created_at_utc;";
+        FetchBatch = $@"
+SELECT o.sequence_number, o.topic_name, o.partition_key, o.event_type,
+       o.headers, o.payload, o.payload_content_type,
+       o.event_datetime_utc, o.event_ordinal,
+       o.retry_count, o.created_at_utc
+FROM {outboxTable} o
+INNER JOIN {partitionsTable} op
+    ON  op.outbox_table_name = @outbox_table_name
+    AND op.owner_publisher_id = @publisher_id
+    AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < clock_timestamp())
+    AND ((hashtext(o.partition_key) & 2147483647) % @total_partitions) = op.partition_id
+WHERE o.retry_count < @max_retry_count
+  AND o.xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint
+ORDER BY o.event_datetime_utc, o.event_ordinal
+LIMIT @batch_size;";
 
         DeletePublished = $@"
 DELETE FROM {outboxTable}
-WHERE  sequence_number = ANY(@published_ids)
-  AND  lease_owner = @publisher_id;";
+WHERE  sequence_number = ANY(@ids);";
 
-        ReleaseLeaseWithRetry = $@"
+        IncrementRetryCount = $@"
 UPDATE {outboxTable}
-SET    leased_until_utc = NULL,
-       lease_owner      = NULL,
-       retry_count      = retry_count + 1
-WHERE  sequence_number = ANY(@ids)
-  AND  lease_owner = @publisher_id;";
-
-        ReleaseLeaseNoRetry = $@"
-UPDATE {outboxTable}
-SET    leased_until_utc = NULL,
-       lease_owner      = NULL
-WHERE  sequence_number = ANY(@ids)
-  AND  lease_owner = @publisher_id;";
+SET    retry_count = retry_count + 1
+WHERE  sequence_number = ANY(@ids);";
 
         DeadLetter = $@"
 WITH dead AS (
     DELETE FROM {outboxTable}
     WHERE  sequence_number = ANY(@ids)
-      AND  lease_owner = @publisher_id
     RETURNING sequence_number, topic_name, partition_key, event_type,
               headers, payload, payload_content_type,
               created_at_utc, retry_count,
@@ -274,15 +249,6 @@ WITH dead AS (
         SELECT sequence_number
         FROM {outboxTable}
         WHERE retry_count >= @max_retry_count
-          AND (leased_until_utc IS NULL OR leased_until_utc < clock_timestamp())
-          AND (lease_owner IS NULL
-               OR leased_until_utc < clock_timestamp() - make_interval(secs => @lease_duration_seconds)
-               OR lease_owner NOT IN (
-                   SELECT publisher_id
-                   FROM {publishersTable}
-                   WHERE outbox_table_name = @outbox_table_name
-                     AND last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
-               ))
         FOR UPDATE SKIP LOCKED
     ) d
     WHERE o.sequence_number = d.sequence_number
@@ -302,9 +268,7 @@ SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
        clock_timestamp(), @last_error
 FROM dead;";
 
-        GetPendingCount = $@"
-SELECT COUNT(*) FROM {outboxTable}
-WHERE  leased_until_utc IS NULL OR leased_until_utc < clock_timestamp();";
+        GetPendingCount = $"SELECT COUNT(*) FROM {outboxTable};";
 
         // ---- Dead-letter manager queries ----
 
@@ -329,11 +293,11 @@ INSERT INTO {outboxTable}
     (topic_name, partition_key, event_type, headers, payload,
      payload_content_type,
      created_at_utc, event_datetime_utc, event_ordinal,
-     leased_until_utc, lease_owner, retry_count)
+     retry_count)
 SELECT topic_name, partition_key, event_type, headers, payload,
        payload_content_type,
        created_at_utc, event_datetime_utc, event_ordinal,
-       NULL, NULL, 0
+       0
 FROM replayed;";
 
         DeadLetterPurge = $@"

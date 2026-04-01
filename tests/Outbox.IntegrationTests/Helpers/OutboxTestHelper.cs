@@ -24,7 +24,6 @@ public static class OutboxTestHelper
         o.MaxRetryCount = 5;
         o.MinPollIntervalMs = 50;
         o.MaxPollIntervalMs = 500;
-        o.LeaseDurationSeconds = 10;
         o.HeartbeatIntervalMs = 2_000;
         o.HeartbeatTimeoutSeconds = 7;
         o.PartitionGracePeriodSeconds = 15;

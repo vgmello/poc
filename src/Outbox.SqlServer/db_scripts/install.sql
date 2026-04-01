@@ -24,9 +24,8 @@ BEGIN
         EventDateTimeUtc DATETIME2(3)          NOT NULL,
         EventOrdinal     INT                   NOT NULL  DEFAULT 0,
         PayloadContentType NVARCHAR(100)       NOT NULL  DEFAULT 'application/json',
-        LeasedUntilUtc   DATETIME2(3)          NULL,
-        LeaseOwner       NVARCHAR(128)         NULL,
         RetryCount       INT                   NOT NULL  DEFAULT 0,
+        RowVersion       ROWVERSION            NOT NULL,
 
         CONSTRAINT PK_Outbox PRIMARY KEY CLUSTERED (SequenceNumber)
     );
@@ -113,32 +112,12 @@ GO
 -- SECTION 3: INDEXES
 -- =============================================================================
 
--- Unified poll (fresh rows arm): unleased rows in causal order
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND name = N'IX_Outbox_Unleased')
+-- Pending rows in causal order for polling
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND name = N'IX_Outbox_Pending')
 BEGIN
-    CREATE NONCLUSTERED INDEX IX_Outbox_Unleased
+    CREATE NONCLUSTERED INDEX IX_Outbox_Pending
     ON dbo.Outbox (EventDateTimeUtc, EventOrdinal)
-    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, RetryCount, CreatedAtUtc)
-    WHERE LeasedUntilUtc IS NULL;
-END;
-GO
-
--- Unified poll (expired rows arm): expired-lease rows
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND name = N'IX_Outbox_LeaseExpiry')
-BEGIN
-    CREATE NONCLUSTERED INDEX IX_Outbox_LeaseExpiry
-    ON dbo.Outbox (LeasedUntilUtc, EventDateTimeUtc, EventOrdinal)
-    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, RetryCount, CreatedAtUtc)
-    WHERE LeasedUntilUtc IS NOT NULL;
-END;
-GO
-
--- Sweep candidates: retry count with lease info
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND name = N'IX_Outbox_Sweep')
-BEGIN
-    CREATE NONCLUSTERED INDEX IX_Outbox_Sweep
-    ON dbo.Outbox (RetryCount, LeaseOwner)
-    INCLUDE (SequenceNumber, LeasedUntilUtc);
+    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, RetryCount, CreatedAtUtc);
 END;
 GO
 
@@ -157,7 +136,7 @@ GO
 CREATE OR ALTER VIEW dbo.vw_Outbox AS
 SELECT SequenceNumber, TopicName, PartitionKey, EventType,
        PayloadContentType,
-       Headers AS HeadersText,
+       Headers,
        CASE WHEN PayloadContentType IN ('application/json', 'text/plain')
             THEN CAST(Payload AS VARCHAR(MAX))
        END AS PayloadText,
@@ -168,7 +147,7 @@ GO
 CREATE OR ALTER VIEW dbo.vw_OutboxDeadLetter AS
 SELECT DeadLetterSeq, SequenceNumber, TopicName, PartitionKey, EventType,
        PayloadContentType,
-       Headers AS HeadersText,
+       Headers,
        CASE WHEN PayloadContentType IN ('application/json', 'text/plain')
             THEN CAST(Payload AS VARCHAR(MAX))
        END AS PayloadText,

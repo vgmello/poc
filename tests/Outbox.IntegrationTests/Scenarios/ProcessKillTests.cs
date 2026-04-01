@@ -115,21 +115,16 @@ public class ProcessKillTests
     }
 
     [Fact]
-    public async Task SigKill_LeasedMessages_RetryCountIncrementedOnRelease()
+    public async Task SigKill_TransportFailure_RetryCountIncrementedByPublisher()
     {
         var topic = OutboxTestHelper.UniqueTopic("sigkill-retry");
         await OutboxTestHelper.CleanupAsync(_infra.ConnectionString);
 
-        // Start publisher A with short lease duration
+        // Start publisher A with a failing transport so messages stay in the outbox
         var (hostA, transportA) = OutboxTestHelper.BuildPublisherHost(
-            _infra.ConnectionString, _infra.BootstrapServers,
-            o =>
-            {
-                OutboxTestHelper.FastTestOptions(o);
-                o.LeaseDurationSeconds = 5; // Short lease for faster test
-            });
+            _infra.ConnectionString, _infra.BootstrapServers);
 
-        // Make transport fail so messages stay leased (not deleted)
+        // Make transport fail so messages are not deleted (retry_count gets incremented)
         transportA.SetFailing(true);
 
         await hostA.StartAsync();
@@ -142,10 +137,10 @@ public class ProcessKillTests
             return owners.Values.Any(v => v != null);
         }, TimeSpan.FromSeconds(10), message: "Publisher A should claim partitions");
 
-        // Insert messages — A will lease them but fail to send (transport failing)
+        // Insert messages — A will fetch them but fail to send, incrementing retry_count
         await OutboxTestHelper.InsertMessagesAsync(_infra.ConnectionString, 5, topic, "key-1");
 
-        // Wait for A to lease and fail (retry_count gets incremented on release)
+        // Wait for A to fetch and fail (retry_count gets incremented via IncrementRetryCountAsync)
         await OutboxTestHelper.WaitUntilAsync(async () =>
         {
             var retryCounts = await OutboxTestHelper.GetRetryCountsAsync(_infra.ConnectionString);
@@ -177,31 +172,14 @@ public class ProcessKillTests
                 conn);
             insertCmd.Parameters.AddWithValue("@id", publisherIdA);
             await insertCmd.ExecuteNonQueryAsync();
-
-            // Re-insert messages that would have been leased by the dead publisher
-            // (simulating messages left behind after SIGKILL)
-            await using var resetCmd = new NpgsqlCommand(@"
-                UPDATE outbox
-                SET lease_owner = @id,
-                    leased_until_utc = clock_timestamp() + interval '5 seconds'
-                WHERE lease_owner IS NULL",
-                conn);
-            resetCmd.Parameters.AddWithValue("@id", publisherIdA);
-            await resetCmd.ExecuteNonQueryAsync();
         }
 
-        // Wait for leases to expire
-        _output.WriteLine("Waiting for leases to expire...");
-        await Task.Delay(TimeSpan.FromSeconds(6));
+        // In the no-lease architecture, messages are immediately available after A stops —
+        // no need to wait for lease expiry.
 
-        // Start publisher B — it should re-lease the messages (incrementing retry_count via LeaseBatch)
+        // Start publisher B with working transport — it should claim partitions and drain messages
         var (hostB, _) = OutboxTestHelper.BuildPublisherHost(
-            _infra.ConnectionString, _infra.BootstrapServers,
-            o =>
-            {
-                OutboxTestHelper.FastTestOptions(o);
-                o.LeaseDurationSeconds = 5;
-            });
+            _infra.ConnectionString, _infra.BootstrapServers);
 
         try
         {

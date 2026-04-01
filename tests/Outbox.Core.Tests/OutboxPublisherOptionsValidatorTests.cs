@@ -14,7 +14,6 @@ public class OutboxPublisherOptionsTests
         MaxRetryCount = 10,
         CircuitBreakerFailureThreshold = 3,
         CircuitBreakerOpenDurationSeconds = 30,
-        LeaseDurationSeconds = 45,
         PartitionGracePeriodSeconds = 60,
         HeartbeatIntervalMs = 10_000,
         HeartbeatTimeoutSeconds = 30,
@@ -51,18 +50,6 @@ public class OutboxPublisherOptionsTests
         var results = Validate(options);
         Assert.NotEmpty(results);
         Assert.Contains(results, r => r.MemberNames.Contains("BatchSize"));
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    public void LeaseDurationSeconds_Invalid_ReturnsFailure(int value)
-    {
-        var options = ValidOptions();
-        options.LeaseDurationSeconds = value;
-        var results = Validate(options);
-        Assert.NotEmpty(results);
-        Assert.Contains(results, r => r.MemberNames.Contains("LeaseDurationSeconds"));
     }
 
     [Theory]
@@ -234,32 +221,6 @@ public class OutboxPublisherOptionsTests
         var results = Validate(options);
         Assert.NotEmpty(results);
         Assert.Contains(results, r => r.ErrorMessage!.Contains("MaxPollIntervalMs must be >= MinPollIntervalMs"));
-    }
-
-    [Fact]
-    public void CrossField_PartitionGracePeriodLessThanLeaseDuration_ReturnsFailure()
-    {
-        var options = ValidOptions();
-        options.LeaseDurationSeconds = 60;
-        options.PartitionGracePeriodSeconds = 45;
-        var results = Validate(options);
-        Assert.NotEmpty(results);
-        Assert.Contains(results, r =>
-            r.MemberNames.Contains("PartitionGracePeriodSeconds") &&
-            r.MemberNames.Contains("LeaseDurationSeconds"));
-    }
-
-    [Fact]
-    public void CrossField_PartitionGracePeriodEqualToLeaseDuration_ReturnsFailure()
-    {
-        var options = ValidOptions();
-        options.LeaseDurationSeconds = 60;
-        options.PartitionGracePeriodSeconds = 60;
-        var results = Validate(options);
-        Assert.NotEmpty(results);
-        Assert.Contains(results, r =>
-            r.ErrorMessage!.Contains("strictly greater") &&
-            r.MemberNames.Contains("PartitionGracePeriodSeconds"));
     }
 
     [Fact]

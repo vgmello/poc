@@ -20,17 +20,15 @@ public class GracefulShutdownTests
     }
 
     [Fact]
-    public async Task GracefulShutdown_ReleasesLeases_NewPublisherPicksUpImmediately()
+    public async Task GracefulShutdown_UnregistersPublisher_NewPublisherPicksUpImmediately()
     {
         var topic = OutboxTestHelper.UniqueTopic("graceful");
         await OutboxTestHelper.CleanupAsync(_infra.ConnectionString);
 
-        // Use long lease so we can tell the difference between "released" and "expired"
         var (hostA, _) = OutboxTestHelper.BuildPublisherHost(
             _infra.ConnectionString, _infra.BootstrapServers,
             o =>
             {
-                o.LeaseDurationSeconds = 120;
                 o.PartitionGracePeriodSeconds = 180;
             });
 
@@ -50,21 +48,12 @@ public class GracefulShutdownTests
         var publishers = await OutboxTestHelper.GetPublisherIdsAsync(_infra.ConnectionString);
         Assert.Empty(publishers);
 
-        // Assert: leased messages have leased_until_utc = NULL (released, not waiting for 120s expiry)
+        // In the no-lease architecture there are no lease columns — remaining messages
+        // are immediately available for the next publisher.
         var remaining = await OutboxTestHelper.GetOutboxCountAsync(_infra.ConnectionString);
+        _output.WriteLine($"{remaining} messages remain, all immediately available");
 
-        if (remaining > 0)
-        {
-            await using var conn = new Npgsql.NpgsqlConnection(_infra.ConnectionString);
-            await conn.OpenAsync();
-            await using var cmd = new Npgsql.NpgsqlCommand(
-                "SELECT COUNT(*) FROM outbox WHERE leased_until_utc IS NOT NULL", conn);
-            var leased = (long)(await cmd.ExecuteScalarAsync())!;
-            Assert.Equal(0, leased); // All leases should be released
-            _output.WriteLine($"{remaining} messages remain but all leases released");
-        }
-
-        // Start publisher B — should pick up remaining messages immediately (not waiting 120s)
+        // Start publisher B — should pick up remaining messages immediately
         var (hostB, _) = OutboxTestHelper.BuildPublisherHost(
             _infra.ConnectionString, _infra.BootstrapServers);
         var startTime = DateTime.UtcNow;

@@ -1,6 +1,5 @@
 // Copyright (c) OrgName. All rights reserved.
 
-using Microsoft.Data.SqlClient;
 using Outbox.IntegrationTests.Fixtures;
 using Outbox.IntegrationTests.Helpers;
 using Xunit;
@@ -21,17 +20,15 @@ public class SqlServerGracefulShutdownTests
     }
 
     [Fact]
-    public async Task GracefulShutdown_ReleasesLeases_NewPublisherPicksUpImmediately()
+    public async Task GracefulShutdown_UnregistersPublisher_NewPublisherPicksUpImmediately()
     {
         var topic = OutboxTestHelper.UniqueTopic("ss-graceful");
         await SqlServerTestHelper.CleanupAsync(_infra.SqlServerConnectionString);
 
-        // Use long lease so we can tell the difference between "released" and "expired"
         var (hostA, _) = SqlServerTestHelper.BuildPublisherHost(
             _infra.SqlServerConnectionString, _infra.BootstrapServers,
             o =>
             {
-                o.LeaseDurationSeconds = 120;
                 o.PartitionGracePeriodSeconds = 180;
             });
 
@@ -51,21 +48,12 @@ public class SqlServerGracefulShutdownTests
         var publishers = await SqlServerTestHelper.GetPublisherIdsAsync(_infra.SqlServerConnectionString);
         Assert.Empty(publishers);
 
-        // Assert: leased messages have LeasedUntilUtc = NULL (released, not waiting for 120s expiry)
+        // In the no-lease architecture there are no lease columns — remaining messages
+        // are immediately available for the next publisher.
         var remaining = await SqlServerTestHelper.GetOutboxCountAsync(_infra.SqlServerConnectionString);
+        _output.WriteLine($"{remaining} messages remain, all immediately available");
 
-        if (remaining > 0)
-        {
-            await using var conn = new SqlConnection(_infra.SqlServerConnectionString);
-            await conn.OpenAsync();
-            await using var cmd = new SqlCommand(
-                "SELECT COUNT(*) FROM dbo.Outbox WHERE LeasedUntilUtc IS NOT NULL", conn);
-            var leased = (long)(int)(await cmd.ExecuteScalarAsync())!;
-            Assert.Equal(0, leased); // All leases should be released
-            _output.WriteLine($"{remaining} messages remain but all leases released");
-        }
-
-        // Start publisher B — should pick up remaining messages immediately (not waiting 120s)
+        // Start publisher B — should pick up remaining messages immediately
         var (hostB, _) = SqlServerTestHelper.BuildPublisherHost(
             _infra.SqlServerConnectionString, _infra.BootstrapServers);
         var startTime = DateTime.UtcNow;

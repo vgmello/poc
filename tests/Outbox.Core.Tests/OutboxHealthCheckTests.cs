@@ -17,7 +17,7 @@ public class OutboxHealthCheckTests
         MaxRetryCount = 10,
         CircuitBreakerFailureThreshold = 3,
         CircuitBreakerOpenDurationSeconds = 30,
-        LeaseDurationSeconds = 45,
+
         PartitionGracePeriodSeconds = 60,
         // Very small intervals so stale thresholds (3x) are 30ms — easy to exceed with Task.Delay(50)
         HeartbeatIntervalMs = 10,
@@ -174,7 +174,7 @@ public class OutboxHealthCheckTests
             MaxRetryCount = 10,
             CircuitBreakerFailureThreshold = 3,
             CircuitBreakerOpenDurationSeconds = 30,
-            LeaseDurationSeconds = 45,
+    
             PartitionGracePeriodSeconds = 60,
             HeartbeatIntervalMs = 10_000,
             HeartbeatTimeoutSeconds = 60,

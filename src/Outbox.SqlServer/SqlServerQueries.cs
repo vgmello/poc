@@ -13,10 +13,9 @@ internal sealed class SqlServerQueries
     // Store queries
     public string RegisterPublisher { get; }
     public string UnregisterPublisher { get; }
-    public string LeaseBatch { get; }
+    public string FetchBatch { get; }
     public string DeletePublished { get; }
-    public string ReleaseLeaseWithRetry { get; }
-    public string ReleaseLeaseNoRetry { get; }
+    public string IncrementRetryCount { get; }
     public string DeadLetter { get; }
     public string Heartbeat { get; }
     public string GetTotalPartitions { get; }
@@ -67,76 +66,32 @@ internal sealed class SqlServerQueries
                                 AND  OutboxTableName = @OutboxTableName;
                               """;
 
-        LeaseBatch = $"""
-                      WITH Batch AS
-                      (
-                          SELECT TOP (@BatchSize)
-                              o.SequenceNumber,
-                              o.TopicName,
-                              o.PartitionKey,
-                              o.EventType,
-                              o.Headers,
-                              o.Payload,
-                              o.PayloadContentType,
-                              o.EventDateTimeUtc,
-                              o.EventOrdinal,
-                              o.LeasedUntilUtc,
-                              o.LeaseOwner,
-                              o.RetryCount,
-                              o.CreatedAtUtc
-                          FROM {outboxTable} o WITH (ROWLOCK, READPAST)
-                          INNER JOIN {partitionsTable} op
-                              ON  op.OutboxTableName = @OutboxTableName
-                              AND op.OwnerPublisherId = @PublisherId
-                              AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
-                              AND (ABS(CAST(CHECKSUM(o.PartitionKey) AS BIGINT)) % @TotalPartitions) = op.PartitionId
-                          WHERE (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
-                            AND o.RetryCount < @MaxRetryCount
-                          ORDER BY o.EventDateTimeUtc, o.EventOrdinal
-                      )
-                      UPDATE Batch
-                      SET    LeasedUntilUtc = DATEADD(SECOND, @LeaseDurationSeconds, SYSUTCDATETIME()),
-                             LeaseOwner     = @PublisherId,
-                             RetryCount     = CASE WHEN LeasedUntilUtc IS NOT NULL
-                                                   THEN RetryCount + 1
-                                                   ELSE RetryCount END
-                      OUTPUT inserted.SequenceNumber,
-                             inserted.TopicName,
-                             inserted.PartitionKey,
-                             inserted.EventType,
-                             inserted.Headers,
-                             inserted.Payload,
-                             inserted.PayloadContentType,
-                             inserted.EventDateTimeUtc,
-                             inserted.EventOrdinal,
-                             inserted.RetryCount,
-                             inserted.CreatedAtUtc;
-                      """;
+        FetchBatch = $"""
+                     SELECT TOP (@BatchSize)
+                         o.SequenceNumber, o.TopicName, o.PartitionKey, o.EventType,
+                         o.Headers, o.Payload, o.PayloadContentType,
+                         o.EventDateTimeUtc, o.EventOrdinal,
+                         o.RetryCount, o.CreatedAtUtc
+                     FROM {outboxTable} o WITH (ROWLOCK, READPAST)
+                     INNER JOIN {partitionsTable} op
+                         ON  op.OutboxTableName = @OutboxTableName
+                         AND op.OwnerPublisherId = @PublisherId
+                         AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
+                         AND (ABS(CAST(CHECKSUM(o.PartitionKey) AS BIGINT)) % @TotalPartitions) = op.PartitionId
+                     WHERE o.RetryCount < @MaxRetryCount
+                       AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
+                     ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
+                     """;
 
         DeletePublished = $"""
-                           DELETE o
-                           FROM   {outboxTable} o
-                           INNER JOIN @PublishedIds p ON o.SequenceNumber = p.SequenceNumber
-                           WHERE  o.LeaseOwner = @PublisherId;
+                           DELETE FROM {outboxTable}
+                           WHERE SequenceNumber IN (SELECT SequenceNumber FROM @Ids);
                            """;
 
-        ReleaseLeaseWithRetry = $"""
-                                 UPDATE o
-                                 SET    o.LeasedUntilUtc = NULL,
-                                        o.LeaseOwner     = NULL,
-                                        o.RetryCount     = o.RetryCount + 1
-                                 FROM   {outboxTable} o
-                                 INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
-                                 WHERE  o.LeaseOwner = @PublisherId;
-                                 """;
-
-        ReleaseLeaseNoRetry = $"""
-                               UPDATE o
-                               SET    o.LeasedUntilUtc = NULL,
-                                      o.LeaseOwner     = NULL
-                               FROM   {outboxTable} o
-                               INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
-                               WHERE  o.LeaseOwner = @PublisherId;
+        IncrementRetryCount = $"""
+                               UPDATE o SET o.RetryCount = o.RetryCount + 1
+                               FROM {outboxTable} o
+                               INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
                                """;
 
         DeadLetter = $"""
@@ -153,8 +108,7 @@ internal sealed class SqlServerQueries
                            EventDateTimeUtc, EventOrdinal,
                            DeadLetteredAtUtc, LastError)
                       FROM {outboxTable} o
-                      INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber
-                      WHERE o.LeaseOwner = @PublisherId;
+                      INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
                       """;
 
         Heartbeat = $"""
@@ -300,10 +254,6 @@ internal sealed class SqlServerQueries
                                  END;
                                  """;
 
-        // Only sweep messages whose LeaseOwner is NULL (explicitly released),
-        // whose owner is a dead producer (stale heartbeat), or whose lease has been
-        // expired for longer than LeaseDurationSeconds (publisher had ample time to
-        // delete but didn't — covers the case where DeadLetterAsync itself failed).
         SweepDeadLetters = $"""
                             DELETE o
                             OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
@@ -318,21 +268,10 @@ internal sealed class SqlServerQueries
                                  EventDateTimeUtc, EventOrdinal,
                                  DeadLetteredAtUtc, LastError)
                             FROM {outboxTable} o WITH (ROWLOCK, READPAST)
-                            WHERE o.RetryCount >= @MaxRetryCount
-                              AND (o.LeasedUntilUtc IS NULL OR o.LeasedUntilUtc < SYSUTCDATETIME())
-                              AND (o.LeaseOwner IS NULL
-                                   OR o.LeasedUntilUtc < DATEADD(SECOND, -@LeaseDurationSeconds, SYSUTCDATETIME())
-                                   OR o.LeaseOwner NOT IN (
-                                       SELECT PublisherId
-                                       FROM {publishersTable}
-                                       WHERE OutboxTableName = @OutboxTableName
-                                         AND LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
-                                   ));
+                            WHERE o.RetryCount >= @MaxRetryCount;
                             """;
 
-        GetPendingCount = $@"
-            SELECT COUNT_BIG(*) FROM {outboxTable}
-            WHERE  LeasedUntilUtc IS NULL OR LeasedUntilUtc < SYSUTCDATETIME();";
+        GetPendingCount = $"SELECT COUNT_BIG(*) FROM {outboxTable};";
 
         // Dead-letter manager queries
         DeadLetterGet = $"""
@@ -365,12 +304,12 @@ internal sealed class SqlServerQueries
                                    deleted.PayloadContentType,
                                    deleted.CreatedAtUtc,
                                    deleted.EventDateTimeUtc, deleted.EventOrdinal,
-                                   0, NULL, NULL
+                                   0
                             INTO {outboxTable}(TopicName, PartitionKey, EventType,
                                  Headers, Payload, PayloadContentType,
                                  CreatedAtUtc,
                                  EventDateTimeUtc, EventOrdinal,
-                                 RetryCount, LeasedUntilUtc, LeaseOwner)
+                                 RetryCount)
                             FROM {deadLetterTable} dl
                             INNER JOIN @Ids p ON dl.DeadLetterSeq = p.SequenceNumber;
                             """;

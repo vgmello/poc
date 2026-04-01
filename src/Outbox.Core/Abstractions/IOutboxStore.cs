@@ -9,19 +9,18 @@ public interface IOutboxStore
     Task<string> RegisterPublisherAsync(CancellationToken ct);
     Task UnregisterPublisherAsync(string publisherId, CancellationToken ct);
 
-    Task<IReadOnlyList<OutboxMessage>> LeaseBatchAsync(
-        string publisherId, int batchSize, int leaseDurationSeconds,
+    Task<IReadOnlyList<OutboxMessage>> FetchBatchAsync(
+        string publisherId, int batchSize,
         int maxRetryCount, CancellationToken ct);
 
     Task DeletePublishedAsync(
-        string publisherId, IReadOnlyList<long> sequenceNumbers, CancellationToken ct);
+        IReadOnlyList<long> sequenceNumbers, CancellationToken ct);
 
-    Task ReleaseLeaseAsync(
-        string publisherId, IReadOnlyList<long> sequenceNumbers,
-        bool incrementRetry, CancellationToken ct);
+    Task IncrementRetryCountAsync(
+        IReadOnlyList<long> sequenceNumbers, CancellationToken ct);
 
     Task DeadLetterAsync(
-        string publisherId, IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct);
+        IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct);
 
     Task HeartbeatAsync(string publisherId, CancellationToken ct);
     Task<int> GetTotalPartitionsAsync(CancellationToken ct);

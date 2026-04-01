@@ -15,9 +15,6 @@ public sealed class OutboxPublisherOptions : IValidatableObject
     public int BatchSize { get; set; } = 100;
 
     [Range(1, int.MaxValue)]
-    public int LeaseDurationSeconds { get; set; } = 45;
-
-    [Range(1, int.MaxValue)]
     public int MaxRetryCount { get; set; } = 5;
 
     [Range(1, int.MaxValue)]
@@ -60,17 +57,6 @@ public sealed class OutboxPublisherOptions : IValidatableObject
             yield return new ValidationResult(
                 "MaxPollIntervalMs must be >= MinPollIntervalMs.",
                 new[] { nameof(MaxPollIntervalMs), nameof(MinPollIntervalMs) });
-        }
-
-        if (PartitionGracePeriodSeconds > 0 && LeaseDurationSeconds > 0 &&
-            PartitionGracePeriodSeconds <= LeaseDurationSeconds)
-        {
-            yield return new ValidationResult(
-                $"PartitionGracePeriodSeconds ({PartitionGracePeriodSeconds}) must be strictly greater than " +
-                $"LeaseDurationSeconds ({LeaseDurationSeconds}). " +
-                "Otherwise, a new publisher can claim a partition while the old publisher still holds active leases, " +
-                "breaking ordering guarantees.",
-                new[] { nameof(PartitionGracePeriodSeconds), nameof(LeaseDurationSeconds) });
         }
 
         var heartbeatTimeoutMs = HeartbeatTimeoutSeconds * 1000;
