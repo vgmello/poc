@@ -19,9 +19,14 @@ public static class MessageProducer
     public static async Task BulkSeedAsync(StoreType store, string connectionString,
         int totalMessages, int batchSize = 10_000)
     {
-        for (var offset = 0; offset < totalMessages; offset += batchSize)
+        // SQL Server limits INSERT VALUES to 1000 rows per statement
+        var effectiveBatchSize = store == StoreType.SqlServer
+            ? Math.Min(batchSize, 1000)
+            : batchSize;
+
+        for (var offset = 0; offset < totalMessages; offset += effectiveBatchSize)
         {
-            var count = Math.Min(batchSize, totalMessages - offset);
+            var count = Math.Min(effectiveBatchSize, totalMessages - offset);
 
             if (store == StoreType.PostgreSql)
                 await InsertBatchPostgreSql(connectionString, offset, count);

@@ -105,6 +105,9 @@ public sealed class PerformanceFixture : IAsyncLifetime
         var ehHost = _eventHubEmulator.Hostname;
         EventHubConnectionString = $"Endpoint=sb://{ehHost}:{ehPort};SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
 
+        // Give the EventHub emulator extra time to fully initialize AMQP listeners
+        await Task.Delay(TimeSpan.FromSeconds(15));
+
         // Initialize schemas
         await Task.WhenAll(
             RunPostgresSchemaAsync(),
