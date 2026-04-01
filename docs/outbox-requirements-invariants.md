@@ -125,12 +125,12 @@ Any store implementation MUST satisfy:
 
 ## Configuration Constraints
 
-| Relationship                                                | Requirement                                              | Why                                              |
-| ----------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------ |
-| `HeartbeatIntervalMs * 3 <= HeartbeatTimeoutSeconds * 1000` | Must tolerate at least 2 missed heartbeats (3 intervals) | Prevents false staleness                         |
-| `CircuitBreakerOpenDurationSeconds > 0`                     | Must eventually probe                                    | Prevents permanent circuit open                  |
-| `MaxRetryCount > CircuitBreakerFailureThreshold`            | Retries must outlast circuit threshold                   | Prevents dead-lettering before circuit opens     |
-| `TransientRetryBackoffMs * 2^(MaxAttempts-1) > 20000`       | Retry budget must cover DB failover                      | Azure SQL failover takes 20-30s                  |
+| Relationship                                                | Requirement                                              | Why                                          |
+| ----------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------- |
+| `HeartbeatIntervalMs * 3 <= HeartbeatTimeoutSeconds * 1000` | Must tolerate at least 2 missed heartbeats (3 intervals) | Prevents false staleness                     |
+| `CircuitBreakerOpenDurationSeconds > 0`                     | Must eventually probe                                    | Prevents permanent circuit open              |
+| `MaxRetryCount > CircuitBreakerFailureThreshold`            | Retries must outlast circuit threshold                   | Prevents dead-lettering before circuit opens |
+| `TransientRetryBackoffMs * 2^(MaxAttempts-1) > 20000`       | Retry budget must cover DB failover                      | Azure SQL failover takes 20-30s              |
 
 ---
 

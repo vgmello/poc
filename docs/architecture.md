@@ -230,11 +230,11 @@ Each topic has its own circuit breaker that prevents retry-count burn during bro
 
 ### States
 
-| State        | Behavior                                                                        |
-| ------------ | ------------------------------------------------------------------------------- |
-| **Closed**   | Normal operation. Failures are counted.                                         |
+| State        | Behavior                                                                                             |
+| ------------ | ---------------------------------------------------------------------------------------------------- |
+| **Closed**   | Normal operation. Failures are counted.                                                              |
 | **Open**     | Messages are skipped—they stay in the outbox without incrementing `retry_count`. No sends attempted. |
-| **HalfOpen** | Timer expired. One probe batch is allowed through.                              |
+| **HalfOpen** | Timer expired. One probe batch is allowed through.                                                   |
 
 ### Transitions
 
@@ -305,13 +305,13 @@ An `ActivitySource` named `"Outbox"` (or `"{groupName}.Outbox"` when using publi
 
 Implement `IOutboxEventHandler` to receive lifecycle notifications:
 
-| Callback                            | When                                         |
-| ----------------------------------- | -------------------------------------------- |
-| `OnMessagePublishedAsync`           | After successful send, before delete         |
+| Callback                            | When                                           |
+| ----------------------------------- | ---------------------------------------------- |
+| `OnMessagePublishedAsync`           | After successful send, before delete           |
 | `OnPublishFailedAsync`              | After transport failure, after retry increment |
-| `OnMessageDeadLetteredAsync`        | After a message is dead-lettered             |
-| `OnCircuitBreakerStateChangedAsync` | After any circuit state change               |
-| `OnRebalanceAsync`                  | After partition rebalance                    |
+| `OnMessageDeadLetteredAsync`        | After a message is dead-lettered               |
+| `OnCircuitBreakerStateChangedAsync` | After any circuit state change                 |
+| `OnRebalanceAsync`                  | After partition rebalance                      |
 
 All callbacks are individually try/caught—exceptions never affect message fate. Health state is always updated _before_ the callback fires.
 
@@ -348,14 +348,14 @@ All publisher options are in the `"Outbox:Publisher"` configuration section and 
 
 PostgreSQL options are in `"Outbox:PostgreSql"`, SQL Server options in `"Outbox:SqlServer"`.
 
-| Option                       | Default      | Store      | Description                       |
-| ---------------------------- | ------------ | ---------- | --------------------------------- |
-| `ConnectionString`           | null         | Both       | Database connection string        |
-| `SchemaName`                 | `"public"`/`"dbo"` | Both | Schema name                       |
-| `TablePrefix`                | `""`         | Both       | Prefix for all table names        |
-| `CommandTimeoutSeconds`      | 30           | Both       | SQL command timeout               |
-| `TransientRetryMaxAttempts`  | 6            | Both       | Max retry attempts                |
-| `TransientRetryBackoffMs`    | 1000         | Both       | Base backoff (ms)                 |
+| Option                      | Default            | Store | Description                |
+| --------------------------- | ------------------ | ----- | -------------------------- |
+| `ConnectionString`          | null               | Both  | Database connection string |
+| `SchemaName`                | `"public"`/`"dbo"` | Both  | Schema name                |
+| `TablePrefix`               | `""`               | Both  | Prefix for all table names |
+| `CommandTimeoutSeconds`     | 30                 | Both  | SQL command timeout        |
+| `TransientRetryMaxAttempts` | 6                  | Both  | Max retry attempts         |
+| `TransientRetryBackoffMs`   | 1000               | Both  | Base backoff (ms)          |
 
 ### Group-scoped config paths
 

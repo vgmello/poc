@@ -153,12 +153,12 @@ Messages map to partitions via `hash(partition_key) % total_partitions`. Each pa
 
 ### Background loops
 
-| Loop | Interval | Purpose |
-|------|----------|---------|
-| Heartbeat | 30s | Updates `last_heartbeat_utc`, clears grace periods. Cancels all loops after 3 consecutive errors |
-| Rebalance | 60s | Marks stale partitions, claims fair share, releases excess—all in one transaction |
-| Orphan sweep | 120s | Claims partitions with no owner (recovery after crashes) |
-| Dead-letter sweep | 300s | Moves max-retry messages to the dead-letter table atomically |
+| Loop              | Interval | Purpose                                                                                          |
+| ----------------- | -------- | ------------------------------------------------------------------------------------------------ |
+| Heartbeat         | 30s      | Updates `last_heartbeat_utc`, clears grace periods. Cancels all loops after 3 consecutive errors |
+| Rebalance         | 60s      | Marks stale partitions, claims fair share, releases excess—all in one transaction                |
+| Orphan sweep      | 120s     | Claims partitions with no owner (recovery after crashes)                                         |
+| Dead-letter sweep | 300s     | Moves max-retry messages to the dead-letter table atomically                                     |
 
 ### Circuit breaker
 
@@ -175,25 +175,25 @@ Each topic has its own circuit breaker: **Closed → Open → HalfOpen → Close
 
 The primary event buffer. Messages are inserted here inside the same transaction as the business data change, guaranteeing atomicity.
 
-| Column | Type (PG / SQL Server) | Description |
-|--------|----------------------|-------------|
-| `sequence_number` | `BIGINT IDENTITY` | PK, auto-incremented |
-| `topic_name` | `VARCHAR(256)` / `NVARCHAR(256)` | Target broker topic |
-| `partition_key` | `VARCHAR(256)` / `NVARCHAR(256)` | Hashed to assign partition ownership |
-| `event_type` | `VARCHAR(256)` / `NVARCHAR(256)` | Event type identifier |
-| `headers` | `VARCHAR(2000)` / `NVARCHAR(2000)` | JSON-serialized headers (nullable) |
-| `payload` | `BYTEA` / `VARBINARY(MAX)` | Binary event payload |
-| `created_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Insertion timestamp (default `NOW()`) |
-| `event_datetime_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Business event time, primary sort key |
-| `event_ordinal` | `INT` | Tiebreaker for same-timestamp events (default 0) |
-| `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)` | MIME type (default `application/json`) |
-| `retry_count` | `INT` | Delivery attempts (default 0) |
-| `RowVersion` | `ROWVERSION` (SQL Server only) | Version ceiling for ordering safety |
+| Column                 | Type (PG / SQL Server)             | Description                                      |
+| ---------------------- | ---------------------------------- | ------------------------------------------------ |
+| `sequence_number`      | `BIGINT IDENTITY`                  | PK, auto-incremented                             |
+| `topic_name`           | `VARCHAR(256)` / `NVARCHAR(256)`   | Target broker topic                              |
+| `partition_key`        | `VARCHAR(256)` / `NVARCHAR(256)`   | Hashed to assign partition ownership             |
+| `event_type`           | `VARCHAR(256)` / `NVARCHAR(256)`   | Event type identifier                            |
+| `headers`              | `VARCHAR(2000)` / `NVARCHAR(2000)` | JSON-serialized headers (nullable)               |
+| `payload`              | `BYTEA` / `VARBINARY(MAX)`         | Binary event payload                             |
+| `created_at_utc`       | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Insertion timestamp (default `NOW()`)            |
+| `event_datetime_utc`   | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Business event time, primary sort key            |
+| `event_ordinal`        | `INT`                              | Tiebreaker for same-timestamp events (default 0) |
+| `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)`   | MIME type (default `application/json`)           |
+| `retry_count`          | `INT`                              | Delivery attempts (default 0)                    |
+| `RowVersion`           | `ROWVERSION` (SQL Server only)     | Version ceiling for ordering safety              |
 
 **Indexes:**
 
-| Index | Columns | Purpose |
-|-------|---------|---------|
+| Index               | Columns                                          | Purpose                                         |
+| ------------------- | ------------------------------------------------ | ----------------------------------------------- |
 | `ix_outbox_pending` | `(event_datetime_utc, event_ordinal)` + includes | Fast lookup of pending messages in causal order |
 
 A single index replaces the previous lease-based partial indexes. Since there are no lease columns, all rows in the outbox are pending—the index covers the full table.
@@ -202,22 +202,22 @@ A single index replaces the previous lease-based partial indexes. Since there ar
 
 Archive for messages that exceeded `MaxRetryCount`. Messages arrive here via two paths: inline dead-lettering during the publish loop, or the background dead-letter sweep.
 
-| Column | Type (PG / SQL Server) | Description |
-|--------|----------------------|-------------|
-| `dead_letter_seq` | `BIGINT IDENTITY` | PK, auto-incremented |
-| `sequence_number` | `BIGINT` | Original outbox sequence number |
-| `topic_name` | `VARCHAR(256)` / `NVARCHAR(256)` | Original target topic |
-| `partition_key` | `VARCHAR(256)` / `NVARCHAR(256)` | Original partition key |
-| `event_type` | `VARCHAR(256)` / `NVARCHAR(256)` | Original event type |
-| `headers` | `VARCHAR(2000)` / `NVARCHAR(2000)` | Original headers (nullable) |
-| `payload` | `BYTEA` / `VARBINARY(MAX)` | Original payload |
-| `created_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Original insertion time |
-| `retry_count` | `INT` | Final retry count at dead-letter time |
-| `event_datetime_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Original business event time |
-| `event_ordinal` | `INT` | Original ordinal |
-| `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)` | Original MIME type |
-| `dead_lettered_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | When the message was dead-lettered |
-| `last_error` | `VARCHAR(2000)` / `NVARCHAR(2000)` | Final error message (nullable) |
+| Column                 | Type (PG / SQL Server)             | Description                           |
+| ---------------------- | ---------------------------------- | ------------------------------------- |
+| `dead_letter_seq`      | `BIGINT IDENTITY`                  | PK, auto-incremented                  |
+| `sequence_number`      | `BIGINT`                           | Original outbox sequence number       |
+| `topic_name`           | `VARCHAR(256)` / `NVARCHAR(256)`   | Original target topic                 |
+| `partition_key`        | `VARCHAR(256)` / `NVARCHAR(256)`   | Original partition key                |
+| `event_type`           | `VARCHAR(256)` / `NVARCHAR(256)`   | Original event type                   |
+| `headers`              | `VARCHAR(2000)` / `NVARCHAR(2000)` | Original headers (nullable)           |
+| `payload`              | `BYTEA` / `VARBINARY(MAX)`         | Original payload                      |
+| `created_at_utc`       | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Original insertion time               |
+| `retry_count`          | `INT`                              | Final retry count at dead-letter time |
+| `event_datetime_utc`   | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Original business event time          |
+| `event_ordinal`        | `INT`                              | Original ordinal                      |
+| `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)`   | Original MIME type                    |
+| `dead_lettered_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | When the message was dead-lettered    |
+| `last_error`           | `VARCHAR(2000)` / `NVARCHAR(2000)` | Final error message (nullable)        |
 
 **Index:** `ix_outbox_dead_letter_sequence_number` on `(sequence_number)` for lookups by original ID.
 
@@ -227,12 +227,12 @@ The move from `outbox` to `outbox_dead_letter` is atomic—a single CTE/OUTPUT d
 
 Heartbeat registry of active publisher instances. Enables failure detection and partition rebalancing.
 
-| Column | Type (PG / SQL Server) | Description |
-|--------|----------------------|-------------|
-| `publisher_id` | `VARCHAR(128)` / `NVARCHAR(128)` | PK, format: `{PublisherName}-{GUID}` |
-| `registered_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | First registration time |
-| `last_heartbeat_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Last heartbeat (default `NOW()`) |
-| `host_name` | `VARCHAR(256)` / `NVARCHAR(256)` | Machine name (nullable) |
+| Column               | Type (PG / SQL Server)            | Description                          |
+| -------------------- | --------------------------------- | ------------------------------------ |
+| `publisher_id`       | `VARCHAR(128)` / `NVARCHAR(128)`  | PK, format: `{PublisherName}-{GUID}` |
+| `registered_at_utc`  | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | First registration time              |
+| `last_heartbeat_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Last heartbeat (default `NOW()`)     |
+| `host_name`          | `VARCHAR(256)` / `NVARCHAR(256)`  | Machine name (nullable)              |
 
 A publisher is considered **stale** when `NOW() - last_heartbeat_utc > HeartbeatTimeoutSeconds`. Stale publishers' partitions enter a grace period before being reclaimed.
 
@@ -242,20 +242,20 @@ On graceful shutdown, `UnregisterPublisherAsync` releases all owned partitions a
 
 Partition ownership ledger. Maps logical partitions (0–31 by default) to active publishers for work distribution.
 
-| Column | Type (PG / SQL Server) | Description |
-|--------|----------------------|-------------|
-| `partition_id` | `INT` | PK, seeded at install (0 to N-1) |
-| `owner_publisher_id` | `VARCHAR(128)` / `NVARCHAR(128)` | FK to `outbox_publishers` (nullable) |
-| `owned_since_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | When ownership was acquired (nullable) |
-| `grace_expires_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Grace period expiry (nullable) |
+| Column               | Type (PG / SQL Server)            | Description                            |
+| -------------------- | --------------------------------- | -------------------------------------- |
+| `partition_id`       | `INT`                             | PK, seeded at install (0 to N-1)       |
+| `owner_publisher_id` | `VARCHAR(128)` / `NVARCHAR(128)`  | FK to `outbox_publishers` (nullable)   |
+| `owned_since_utc`    | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | When ownership was acquired (nullable) |
+| `grace_expires_utc`  | `TIMESTAMPTZ(3)` / `DATETIME2(3)` | Grace period expiry (nullable)         |
 
 **Partition states:**
 
-| State | `owner_publisher_id` | `grace_expires_utc` | Meaning |
-|-------|---------------------|---------------------|---------|
-| Unowned | `NULL` | `NULL` | Claimable by any publisher |
-| Owned | `<publisher_id>` | `NULL` | Only this publisher processes its messages |
-| In grace | `<stale_publisher_id>` | Future timestamp | Original owner may still be processing; claimable after expiry |
+| State    | `owner_publisher_id`   | `grace_expires_utc` | Meaning                                                        |
+| -------- | ---------------------- | ------------------- | -------------------------------------------------------------- |
+| Unowned  | `NULL`                 | `NULL`              | Claimable by any publisher                                     |
+| Owned    | `<publisher_id>`       | `NULL`              | Only this publisher processes its messages                     |
+| In grace | `<stale_publisher_id>` | Future timestamp    | Original owner may still be processing; claimable after expiry |
 
 **Critical invariant:** The grace period gives the original owner time to finish any in-flight work before a new owner takes over. Since there are no per-message leases, partition ownership is the sole mechanism preventing two publishers from processing the same partition simultaneously.
 

@@ -120,8 +120,8 @@ This document defines all failure/error scenarios that must be validated through
 7. **Assert:** Publisher B claims A's orphaned partitions via rebalance or orphan sweep
 8. **Assert:** Messages from A's partitions are now fetched and processed by B
 9. **Assert:** ALL messages eventually published to consumer
-12. **Assert:** Some messages may be duplicated (sent by A before kill, then re-sent by B) — consumer must handle this
-13. **Assert:** After stabilization, outbox table is empty
+10. **Assert:** Some messages may be duplicated (sent by A before kill, then re-sent by B) — consumer must handle this
+11. **Assert:** After stabilization, outbox table is empty
 
 **Recovery time measurement:**
 

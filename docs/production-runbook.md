@@ -10,23 +10,23 @@ This document covers all known failure scenarios, their symptoms, auto-recovery 
 2. [Health Check Reference](#health-check-reference)
 3. [Key Metrics](#key-metrics)
 4. [Failure Scenarios](#failure-scenarios)
-    - [FS-1: Broker Down (EventHub/Kafka Unreachable)](#fs-1-broker-down-eventhubkafka-unreachable)
-    - [FS-2: Database Down (PostgreSQL/SQL Server Unreachable)](#fs-2-database-down-postgresqlsql-server-unreachable)
-    - [FS-3: Process Kill (SIGKILL / OOM Kill)](#fs-3-process-kill-sigkill--oom-kill)
-    - [FS-4: Graceful Shutdown (SIGTERM / Rolling Deployment)](#fs-4-graceful-shutdown-sigterm--rolling-deployment)
-    - [FS-5: Poison Message (Oversized/Malformed Payload)](#fs-5-poison-message-oversizedmalformed-payload)
-    - [FS-6: Network Partition (DB Reachable, Broker Not)](#fs-6-network-partition-db-reachable-broker-not)
-    - [FS-7: Network Partition (Broker Reachable, DB Not)](#fs-7-network-partition-broker-reachable-db-not)
-    - [FS-8: Intermittent Transport Failures](#fs-8-intermittent-transport-failures)
-    - [FS-9: Circuit Breaker Stuck Open](#fs-9-circuit-breaker-stuck-open)
-    - [FS-10: Partition Ownership Stuck / No Publisher Processing Messages](#fs-10-partition-ownership-stuck--no-publisher-processing-messages)
-    - [FS-11: Multi-Publisher Rebalance During Deployments](#fs-11-multi-publisher-rebalance-during-deployments)
-    - [FS-12: Outbox Table Growing Unbounded](#fs-12-outbox-table-growing-unbounded)
-    - [FS-13: Dead Letter Queue Growing](#fs-13-dead-letter-queue-growing)
-    - [FS-14: Duplicate Messages Downstream](#fs-14-duplicate-messages-downstream)
-    - [FS-15: Out-of-Order Messages Downstream](#fs-15-out-of-order-messages-downstream)
-    - [FS-17: Kafka Flush Timeout / Ghost Writes](#fs-17-kafka-flush-timeout--ghost-writes)
-    - [FS-20: Loop Crash Escalation and Host Shutdown](#fs-20-loop-crash-escalation-and-host-shutdown)
+   - [FS-1: Broker Down (EventHub/Kafka Unreachable)](#fs-1-broker-down-eventhubkafka-unreachable)
+   - [FS-2: Database Down (PostgreSQL/SQL Server Unreachable)](#fs-2-database-down-postgresqlsql-server-unreachable)
+   - [FS-3: Process Kill (SIGKILL / OOM Kill)](#fs-3-process-kill-sigkill--oom-kill)
+   - [FS-4: Graceful Shutdown (SIGTERM / Rolling Deployment)](#fs-4-graceful-shutdown-sigterm--rolling-deployment)
+   - [FS-5: Poison Message (Oversized/Malformed Payload)](#fs-5-poison-message-oversizedmalformed-payload)
+   - [FS-6: Network Partition (DB Reachable, Broker Not)](#fs-6-network-partition-db-reachable-broker-not)
+   - [FS-7: Network Partition (Broker Reachable, DB Not)](#fs-7-network-partition-broker-reachable-db-not)
+   - [FS-8: Intermittent Transport Failures](#fs-8-intermittent-transport-failures)
+   - [FS-9: Circuit Breaker Stuck Open](#fs-9-circuit-breaker-stuck-open)
+   - [FS-10: Partition Ownership Stuck / No Publisher Processing Messages](#fs-10-partition-ownership-stuck--no-publisher-processing-messages)
+   - [FS-11: Multi-Publisher Rebalance During Deployments](#fs-11-multi-publisher-rebalance-during-deployments)
+   - [FS-12: Outbox Table Growing Unbounded](#fs-12-outbox-table-growing-unbounded)
+   - [FS-13: Dead Letter Queue Growing](#fs-13-dead-letter-queue-growing)
+   - [FS-14: Duplicate Messages Downstream](#fs-14-duplicate-messages-downstream)
+   - [FS-15: Out-of-Order Messages Downstream](#fs-15-out-of-order-messages-downstream)
+   - [FS-17: Kafka Flush Timeout / Ghost Writes](#fs-17-kafka-flush-timeout--ghost-writes)
+   - [FS-20: Loop Crash Escalation and Host Shutdown](#fs-20-loop-crash-escalation-and-host-shutdown)
 5. [Emergency Procedures](#emergency-procedures)
 6. [Monitoring & Alerting Recommendations](#monitoring--alerting-recommendations)
 
@@ -165,16 +165,16 @@ The health check at `/health` reports three states:
 
 - Monitor error log volume — each loop logs every 5-10s during outage
 - After recovery, verify partition distribution:
-    ```sql
-    SELECT partition_id, owner_publisher_id FROM outbox_partitions ORDER BY partition_id;
-    ```
+  ```sql
+  SELECT partition_id, owner_publisher_id FROM outbox_partitions ORDER BY partition_id;
+  ```
 - Clean up stale publisher rows:
-    ```sql
-    -- PostgreSQL
-    DELETE FROM outbox_publishers WHERE last_heartbeat_utc < clock_timestamp() - INTERVAL '1 hour';
-    -- SQL Server
-    DELETE FROM dbo.OutboxPublishers WHERE LastHeartbeatUtc < DATEADD(HOUR, -1, SYSUTCDATETIME());
-    ```
+  ```sql
+  -- PostgreSQL
+  DELETE FROM outbox_publishers WHERE last_heartbeat_utc < clock_timestamp() - INTERVAL '1 hour';
+  -- SQL Server
+  DELETE FROM dbo.OutboxPublishers WHERE LastHeartbeatUtc < DATEADD(HOUR, -1, SYSUTCDATETIME());
+  ```
 - After long outage (> `PartitionGracePeriodSeconds`), expect full rebalance
 
 ---
@@ -204,18 +204,18 @@ The health check at `/health` reports three states:
 **Operator actions:**
 
 - Verify dead publisher's partitions were redistributed:
-    ```sql
-    SELECT * FROM outbox_partitions WHERE owner_publisher_id = '<dead-publisher-id>';
-    ```
+  ```sql
+  SELECT * FROM outbox_partitions WHERE owner_publisher_id = '<dead-publisher-id>';
+  ```
 - Clean up dead publisher row:
-    ```sql
-    DELETE FROM outbox_publishers WHERE publisher_id = '<dead-publisher-id>';
-    ```
+  ```sql
+  DELETE FROM outbox_publishers WHERE publisher_id = '<dead-publisher-id>';
+  ```
 - Monitor for duplicate messages downstream
 - If multiple publishers die simultaneously, manually verify all 64 partitions are owned:
-    ```sql
-    SELECT COUNT(*) FROM outbox_partitions WHERE owner_publisher_id IS NULL;
-    ```
+  ```sql
+  SELECT COUNT(*) FROM outbox_partitions WHERE owner_publisher_id IS NULL;
+  ```
 
 ---
 
@@ -268,18 +268,18 @@ The health check at `/health` reports three states:
 **Operator actions:**
 
 - Query dead letter queue:
-    ```sql
-    SELECT sequence_number, topic_name, partition_key, event_type, last_error, dead_lettered_at_utc
-    FROM outbox_dead_letter ORDER BY dead_lettered_at_utc DESC;
-    ```
+  ```sql
+  SELECT sequence_number, topic_name, partition_key, event_type, last_error, dead_lettered_at_utc
+  FROM outbox_dead_letter ORDER BY dead_lettered_at_utc DESC;
+  ```
 - If the root cause is fixable (e.g., increase batch size limit), fix it then replay:
-    ```csharp
-    await deadLetterManager.ReplayAsync(new[] { sequenceNumber }, ct);
-    ```
+  ```csharp
+  await deadLetterManager.ReplayAsync(new[] { sequenceNumber }, ct);
+  ```
 - If the message is unrecoverable, purge it:
-    ```csharp
-    await deadLetterManager.PurgeAsync(new[] { sequenceNumber }, ct);
-    ```
+  ```csharp
+  await deadLetterManager.PurgeAsync(new[] { sequenceNumber }, ct);
+  ```
 
 ---
 
@@ -405,20 +405,20 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 **Operator actions:**
 
 - Check partition ownership:
-    ```sql
-    SELECT partition_id, owner_publisher_id, grace_expires_utc FROM outbox_partitions ORDER BY partition_id;
-    ```
+  ```sql
+  SELECT partition_id, owner_publisher_id, grace_expires_utc FROM outbox_partitions ORDER BY partition_id;
+  ```
 - Check for unowned partitions:
-    ```sql
-    SELECT COUNT(*) FROM outbox_partitions WHERE owner_publisher_id IS NULL;
-    ```
+  ```sql
+  SELECT COUNT(*) FROM outbox_partitions WHERE owner_publisher_id IS NULL;
+  ```
 - Check for messages stuck on specific partitions:
-    ```sql
-    -- PostgreSQL
-    SELECT (hashtext(partition_key) & 2147483647) % 32 AS bucket, COUNT(*) FROM outbox GROUP BY bucket;
-    -- SQL Server
-    SELECT ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 32 AS Bucket, COUNT(*) FROM dbo.Outbox GROUP BY ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 32;
-    ```
+  ```sql
+  -- PostgreSQL
+  SELECT (hashtext(partition_key) & 2147483647) % 32 AS bucket, COUNT(*) FROM outbox GROUP BY bucket;
+  -- SQL Server
+  SELECT ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 32 AS Bucket, COUNT(*) FROM dbo.Outbox GROUP BY ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 32;
+  ```
 - Force rebalance by restarting the publisher
 
 ---
@@ -445,9 +445,9 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 - Always use rolling deployments (one instance at a time)
 - Wait at least `RebalanceIntervalMs` (30s) between instance restarts
 - After deployment, verify partition distribution:
-    ```sql
-    SELECT owner_publisher_id, COUNT(*) FROM outbox_partitions GROUP BY owner_publisher_id;
-    ```
+  ```sql
+  SELECT owner_publisher_id, COUNT(*) FROM outbox_partitions GROUP BY owner_publisher_id;
+  ```
 - Expected: roughly equal partition counts per publisher (ceil(32 / N))
 
 ---
@@ -473,12 +473,12 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 
 - Identify root cause from the list above
 - Monitor table size:
-    ```sql
-    -- PostgreSQL
-    SELECT pg_size_pretty(pg_relation_size('outbox'));
-    -- SQL Server
-    EXEC sp_spaceused 'dbo.Outbox';
-    ```
+  ```sql
+  -- PostgreSQL
+  SELECT pg_size_pretty(pg_relation_size('outbox'));
+  -- SQL Server
+  EXEC sp_spaceused 'dbo.Outbox';
+  ```
 - If capacity issue, scale up publisher instances (partitions are distributed automatically)
 - If stuck, see FS-10 diagnostic queries
 - **NEVER** manually DELETE from the outbox table — this can cause message loss
@@ -502,21 +502,21 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 **Operator actions:**
 
 - Investigate dead-lettered messages:
-    ```sql
-    SELECT event_type, last_error, COUNT(*) FROM outbox_dead_letter GROUP BY event_type, last_error;
-    ```
+  ```sql
+  SELECT event_type, last_error, COUNT(*) FROM outbox_dead_letter GROUP BY event_type, last_error;
+  ```
 - Fix root cause, then replay:
-    ```sql
-    -- Find message IDs to replay
-    SELECT sequence_number FROM outbox_dead_letter WHERE last_error LIKE '%specific error%';
-    ```
-    ```csharp
-    await deadLetterManager.ReplayAsync(sequenceNumbers, ct);
-    ```
+  ```sql
+  -- Find message IDs to replay
+  SELECT sequence_number FROM outbox_dead_letter WHERE last_error LIKE '%specific error%';
+  ```
+  ```csharp
+  await deadLetterManager.ReplayAsync(sequenceNumbers, ct);
+  ```
 - Purge unrecoverable messages:
-    ```csharp
-    await deadLetterManager.PurgeAllAsync(ct);  // Nuclear option
-    ```
+  ```csharp
+  await deadLetterManager.PurgeAllAsync(ct);  // Nuclear option
+  ```
 
 ---
 

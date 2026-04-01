@@ -6,39 +6,39 @@ Step-by-step breakdown of everything the outbox publisher does when backed by SQ
 
 Before diving in, here are the options that drive the timings referenced throughout:
 
-| Option | Default | Used by |
-|--------|---------|---------|
-| `PublisherName` | `outbox-publisher` | Publisher ID generation |
-| `BatchSize` | 100 | Fetch query `TOP` |
-| `MaxRetryCount` | 5 | Poison threshold |
-| `MinPollIntervalMs` | 100 | Publish loop (busy) |
-| `MaxPollIntervalMs` | 5000 | Publish loop (idle) |
-| `HeartbeatIntervalMs` | 10,000 | Heartbeat loop delay |
-| `HeartbeatTimeoutSeconds` | 30 | Staleness detection |
-| `PartitionGracePeriodSeconds` | 60 | Partition takeover safety window |
-| `RebalanceIntervalMs` | 30,000 | Rebalance loop delay |
-| `OrphanSweepIntervalMs` | 60,000 | Orphan sweep loop delay |
-| `DeadLetterSweepIntervalMs` | 60,000 | Dead-letter sweep loop delay |
-| `CircuitBreakerFailureThreshold` | 3 | Consecutive failures to trip |
-| `CircuitBreakerOpenDurationSeconds` | 30 | How long the circuit stays open |
+| Option                              | Default            | Used by                          |
+| ----------------------------------- | ------------------ | -------------------------------- |
+| `PublisherName`                     | `outbox-publisher` | Publisher ID generation          |
+| `BatchSize`                         | 100                | Fetch query `TOP`                |
+| `MaxRetryCount`                     | 5                  | Poison threshold                 |
+| `MinPollIntervalMs`                 | 100                | Publish loop (busy)              |
+| `MaxPollIntervalMs`                 | 5000               | Publish loop (idle)              |
+| `HeartbeatIntervalMs`               | 10,000             | Heartbeat loop delay             |
+| `HeartbeatTimeoutSeconds`           | 30                 | Staleness detection              |
+| `PartitionGracePeriodSeconds`       | 60                 | Partition takeover safety window |
+| `RebalanceIntervalMs`               | 30,000             | Rebalance loop delay             |
+| `OrphanSweepIntervalMs`             | 60,000             | Orphan sweep loop delay          |
+| `DeadLetterSweepIntervalMs`         | 60,000             | Dead-letter sweep loop delay     |
+| `CircuitBreakerFailureThreshold`    | 3                  | Consecutive failures to trip     |
+| `CircuitBreakerOpenDurationSeconds` | 30                 | How long the circuit stays open  |
 
 Event Hub transport options:
 
-| Option | Default | Purpose |
-|--------|---------|---------|
-| `ConnectionString` | *(required)* | Namespace-level Event Hub connection string |
-| `MaxBatchSizeBytes` | 1,048,576 (1 MB) | Max `EventDataBatch` size |
-| `SendTimeoutSeconds` | 15 | Per-batch send timeout |
+| Option               | Default          | Purpose                                     |
+| -------------------- | ---------------- | ------------------------------------------- |
+| `ConnectionString`   | _(required)_     | Namespace-level Event Hub connection string |
+| `MaxBatchSizeBytes`  | 1,048,576 (1 MB) | Max `EventDataBatch` size                   |
+| `SendTimeoutSeconds` | 15               | Per-batch send timeout                      |
 
 SQL Server store options:
 
-| Option | Default | Purpose |
-|--------|---------|---------|
-| `SchemaName` | `dbo` | SQL schema for all tables |
-| `TablePrefix` | *(empty)* | Prefix prepended to table names |
-| `CommandTimeoutSeconds` | 30 | SQL command timeout |
-| `TransientRetryMaxAttempts` | 6 | Retry count for transient SQL errors |
-| `TransientRetryBackoffMs` | 1,000 | Base backoff between retries |
+| Option                      | Default   | Purpose                              |
+| --------------------------- | --------- | ------------------------------------ |
+| `SchemaName`                | `dbo`     | SQL schema for all tables            |
+| `TablePrefix`               | _(empty)_ | Prefix prepended to table names      |
+| `CommandTimeoutSeconds`     | 30        | SQL command timeout                  |
+| `TransientRetryMaxAttempts` | 6         | Retry count for transient SQL errors |
+| `TransientRetryBackoffMs`   | 1,000     | Base backoff between retries         |
 
 All table names below assume the defaults (`dbo.Outbox`, `dbo.OutboxPublishers`, etc.). If you set `SchemaName` or `TablePrefix`, the actual names change accordingly.
 
@@ -71,6 +71,7 @@ WHEN NOT MATCHED THEN
 ```
 
 **Parameters:**
+
 - `@PublisherId` — the generated publisher ID
 - `@HostName` — `Environment.MachineName`
 
@@ -122,6 +123,7 @@ ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
 ```
 
 **Parameters:**
+
 - `@BatchSize` — max messages to fetch (default 100)
 - `@PublisherId` — this publisher's ID
 - `@TotalPartitions` — cached partition count
@@ -130,15 +132,15 @@ ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
 
 **What the filters do:**
 
-| Filter | Purpose |
-|--------|---------|
-| `ROWLOCK, READPAST` | Skip rows locked by other transactions |
-| `op.OwnerPublisherId = @PublisherId` | Only fetch from partitions this publisher owns |
-| `op.GraceExpiresUtc IS NULL OR < NOW` | Don't fetch from partitions still in grace period |
-| `ABS(CHECKSUM(PartitionKey)) % Total = PartitionId` | Hash-based partition assignment |
-| `RowVersion < MIN_ACTIVE_ROWVERSION()` | Version ceiling — withholds rows from in-flight write transactions |
-| `RetryCount < @MaxRetryCount` | Skip poison messages (handled separately) |
-| `ORDER BY EventDateTimeUtc, EventOrdinal` | Strict ordering within a partition key |
+| Filter                                              | Purpose                                                            |
+| --------------------------------------------------- | ------------------------------------------------------------------ |
+| `ROWLOCK, READPAST`                                 | Skip rows locked by other transactions                             |
+| `op.OwnerPublisherId = @PublisherId`                | Only fetch from partitions this publisher owns                     |
+| `op.GraceExpiresUtc IS NULL OR < NOW`               | Don't fetch from partitions still in grace period                  |
+| `ABS(CHECKSUM(PartitionKey)) % Total = PartitionId` | Hash-based partition assignment                                    |
+| `RowVersion < MIN_ACTIVE_ROWVERSION()`              | Version ceiling — withholds rows from in-flight write transactions |
+| `RetryCount < @MaxRetryCount`                       | Skip poison messages (handled separately)                          |
+| `ORDER BY EventDateTimeUtc, EventOrdinal`           | Strict ordering within a partition key                             |
 
 **Version ceiling:** The `RowVersion < MIN_ACTIVE_ROWVERSION()` filter prevents the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order. Any concurrent write transaction in the database temporarily pauses processing of new inserts until it commits.
 
@@ -171,6 +173,7 @@ The Event Hub transport resolves an `EventHubProducerClient` per topic name from
 **Message construction:**
 
 For each `OutboxMessage`, an `EventData` is created:
+
 - `Body` ← `msg.Payload` (raw bytes)
 - `Properties["EventType"]` ← `msg.EventType`
 - All `msg.Headers` entries are copied to `Properties`
@@ -194,6 +197,7 @@ send final batch                  ← EventHubProducerClient.SendAsync()
 ```
 
 The `CreateBatchOptions` set:
+
 - `PartitionKey` — the outbox `PartitionKey`, so all messages in a group land on the same Event Hub partition
 - `MaximumSizeInBytes` — from `EventHubTransportOptions.MaxBatchSizeBytes` (default 1 MB)
 
@@ -202,6 +206,7 @@ Each `SendAsync` call has a timeout of `SendTimeoutSeconds` (default 15s), reset
 **Partial send handling:**
 
 If sub-batches 1 and 2 succeed but sub-batch 3 fails, the transport throws a `PartialSendException` containing:
+
 - `SucceededSequenceNumbers` — messages already sent (can't be unsent)
 - `FailedSequenceNumbers` — messages that weren't sent
 
@@ -366,6 +371,7 @@ END;
 ```
 
 **Parameters:**
+
 - `@PublisherId` — this publisher's ID
 - `@HeartbeatTimeoutSeconds` — staleness threshold (default 30)
 - `@PartitionGracePeriodSeconds` — safety window before takeover (default 60)
@@ -459,6 +465,7 @@ WHERE o.RetryCount >= @MaxRetryCount;
 ```
 
 **Parameters:**
+
 - `@MaxRetryCount` — poison threshold (default 5)
 - `@LastError` — always `"Max retry count exceeded (background sweep)"`
 
@@ -490,6 +497,7 @@ INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
 ```
 
 **Parameters:**
+
 - `@Ids` — table-valued parameter (`dbo.SequenceNumberList`) containing the poison message sequence numbers
 - `@LastError` — `"Max retry count exceeded"`
 
@@ -603,17 +611,17 @@ t=???    UnregisterPublisherAsync
 
 ## Query-to-loop cheat sheet
 
-| Query | Loop | Frequency | Uses transaction? |
-|-------|------|-----------|-------------------|
-| `MERGE OutboxPublishers` | Startup | Once | No |
-| `SELECT COUNT(*) FROM OutboxPartitions` | Publish | Cached (60s refresh) | No |
-| `SELECT TOP ... FROM Outbox` (FetchBatch) | Publish | Every poll (100ms–5s) | No |
-| `DELETE FROM Outbox WHERE SequenceNumber IN ...` | Publish | After each successful send | No |
-| `UPDATE Outbox SET RetryCount = RetryCount + 1` | Publish | On transport failure | No |
-| `DELETE Outbox OUTPUT INTO OutboxDeadLetter` (by IDs) | Publish | When poison messages found | No |
-| `UPDATE OutboxPublishers SET LastHeartbeatUtc` | Heartbeat | Every 10s | Yes |
-| `SELECT COUNT_BIG(*) FROM Outbox` | Heartbeat | Every 10s | No |
-| Rebalance (multi-step) | Rebalance | Every 30s | Yes |
-| Orphan claim (multi-step) | Orphan sweep | Every 60s | Yes |
-| `DELETE Outbox OUTPUT INTO OutboxDeadLetter` (by threshold) | Dead-letter sweep | Every 60s | No (single statement) |
-| `UPDATE OutboxPartitions ... DELETE OutboxPublishers` | Shutdown | Once | Yes |
+| Query                                                       | Loop              | Frequency                  | Uses transaction?     |
+| ----------------------------------------------------------- | ----------------- | -------------------------- | --------------------- |
+| `MERGE OutboxPublishers`                                    | Startup           | Once                       | No                    |
+| `SELECT COUNT(*) FROM OutboxPartitions`                     | Publish           | Cached (60s refresh)       | No                    |
+| `SELECT TOP ... FROM Outbox` (FetchBatch)                   | Publish           | Every poll (100ms–5s)      | No                    |
+| `DELETE FROM Outbox WHERE SequenceNumber IN ...`            | Publish           | After each successful send | No                    |
+| `UPDATE Outbox SET RetryCount = RetryCount + 1`             | Publish           | On transport failure       | No                    |
+| `DELETE Outbox OUTPUT INTO OutboxDeadLetter` (by IDs)       | Publish           | When poison messages found | No                    |
+| `UPDATE OutboxPublishers SET LastHeartbeatUtc`              | Heartbeat         | Every 10s                  | Yes                   |
+| `SELECT COUNT_BIG(*) FROM Outbox`                           | Heartbeat         | Every 10s                  | No                    |
+| Rebalance (multi-step)                                      | Rebalance         | Every 30s                  | Yes                   |
+| Orphan claim (multi-step)                                   | Orphan sweep      | Every 60s                  | Yes                   |
+| `DELETE Outbox OUTPUT INTO OutboxDeadLetter` (by threshold) | Dead-letter sweep | Every 60s                  | No (single statement) |
+| `UPDATE OutboxPartitions ... DELETE OutboxPublishers`       | Shutdown          | Once                       | Yes                   |
