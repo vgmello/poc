@@ -9,4 +9,5 @@
   <Project Path="Outbox.Kafka/Outbox.Kafka.csproj" />
   <Project Path="Outbox.PostgreSQL/Outbox.PostgreSQL.csproj" />
   <Project Path="Outbox.SqlServer/Outbox.SqlServer.csproj" />
+  <Project Path="../tests/Outbox.PerformanceTests/Outbox.PerformanceTests.csproj" />
 </Solution>
