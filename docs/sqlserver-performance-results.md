@@ -49,8 +49,8 @@ Continuous message insertion at the target rate for 5 minutes.
 | Redpanda  | 2          | 1,000/s     | 1,000/s    | 180          | 0             | Yes      |
 | Redpanda  | 4          | 1,000/s     | 1,000/s    | 140          | 0             | Yes      |
 | EventHub  | 1          | 1,000/s     | 624/s      | 119,310      | 112,800       | No       |
-| EventHub  | 2          | 1,000/s     | —          | —            | —             | —        |
-| EventHub  | 4          | 1,000/s     | —          | —            | —             | —        |
+| EventHub  | 2          | 1,000/s     | 694/s      | 100,917      | 92,013        | No       |
+| EventHub  | 4          | 1,000/s     | 862/s      | 49,460       | 41,384        | No       |
 
 ### Observations
 
