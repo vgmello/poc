@@ -112,12 +112,14 @@ SELECT TOP (@BatchSize)
     o.EventDateTimeUtc, o.EventOrdinal,
     o.RetryCount, o.CreatedAtUtc
 FROM dbo.Outbox o
-INNER JOIN dbo.OutboxPartitions op
-    ON  op.OutboxTableName = @OutboxTableName
-    AND op.OwnerPublisherId = @PublisherId
-    AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
-    AND (ABS(CAST(CHECKSUM(o.PartitionKey) AS BIGINT)) % @TotalPartitions) = op.PartitionId
-WHERE o.RetryCount < @MaxRetryCount
+WHERE o.PartitionId IN (
+    SELECT op.PartitionId
+    FROM dbo.OutboxPartitions op
+    WHERE op.OutboxTableName = @OutboxTableName
+      AND op.OwnerPublisherId = @PublisherId
+      AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
+)
+  AND o.RetryCount < @MaxRetryCount
   AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
 ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
 ```
@@ -126,7 +128,6 @@ ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
 
 - `@BatchSize` — max messages to fetch (default 100)
 - `@PublisherId` — this publisher's ID
-- `@TotalPartitions` — cached partition count
 - `@MaxRetryCount` — poison threshold (default 5)
 - `@OutboxTableName` — the outbox table name for this publisher group
 
@@ -134,14 +135,15 @@ ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
 
 | Filter                                              | Purpose                                                            |
 | --------------------------------------------------- | ------------------------------------------------------------------ |
-| `op.OwnerPublisherId = @PublisherId`                | Only fetch from partitions this publisher owns                     |
+| `o.PartitionId IN (subquery)`                       | Only fetch from partitions this publisher owns (precomputed hash)  |
 | `op.GraceExpiresUtc IS NULL OR < NOW`               | Don't fetch from partitions still in grace period                  |
-| `ABS(CHECKSUM(PartitionKey)) % Total = PartitionId` | Hash-based partition assignment                                    |
 | `RowVersion < MIN_ACTIVE_ROWVERSION()`              | Version ceiling — withholds rows from in-flight write transactions |
 | `RetryCount < @MaxRetryCount`                       | Skip poison messages (handled separately)                          |
 | `ORDER BY EventDateTimeUtc, EventOrdinal`           | Strict ordering within a partition key                             |
 
 **No row locking:** The query uses no lock hints (`ROWLOCK`, `READPAST`, etc.). Partition ownership is the sole isolation mechanism — each publisher only fetches from its owned partitions, so there is no risk of two publishers reading the same rows. This avoids lock manager overhead, which is the dominant performance cost on SQL Server.
+
+**Precomputed partition hash:** The `PartitionId` column is a persisted computed column (`ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 128`). The hash is computed once at INSERT time, not on every SELECT. The index `IX_Outbox_Pending` leads with `PartitionId`, enabling an Index Seek instead of a full table scan.
 
 **Version ceiling:** The `RowVersion < MIN_ACTIVE_ROWVERSION()` filter prevents the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order. Any concurrent write transaction in the database temporarily pauses processing of new inserts until it commits.
 

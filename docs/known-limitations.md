@@ -114,3 +114,13 @@ Both the publisher service and store implementations use `IOptionsMonitor<Outbox
 3. The publisher's retry logic handles startup connectivity issues gracefully.
 
 For fail-fast behavior, consumers of the library can add their own `IValidateOptions<KafkaTransportOptions>` implementation.
+
+### Partition count changes require publisher downtime (both stores)
+
+Changing the partition count (the modulus in `hash(partition_key) % total_partitions`) while publishers are running corrupts per-key message ordering. When the modulus changes, the same `partition_key` maps to a different `partition_id`, breaking the single-writer-per-partition guarantee. Two publishers can then process the same partition key simultaneously.
+
+**SQL Server:** The modulus is baked into a persisted computed column (`PartitionId = ABS(CHECKSUM(PartitionKey)) % 128`). Changing it requires `ALTER TABLE` to drop and recreate the column, an index rebuild, and reseeding the partitions table. See `docs/production-runbook.md` for the procedure.
+
+**PostgreSQL:** The modulus is computed at query time from the row count of `outbox_partitions`. Changing it requires only INSERT/DELETE on the partitions table (no schema change), but **all publishers must still be stopped** to prevent ordering corruption. The simpler schema change does not mean it's safe to do online.
+
+This asymmetry is intentional: SQL Server's precomputed column enables Index Seek (7ms poll latency) instead of the full table scan (130ms) that runtime hash computation would require. PostgreSQL's query optimizer handles the runtime hash efficiently (3-5ms), so the precomputed column is not needed.

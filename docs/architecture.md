@@ -186,7 +186,7 @@ Messages are distributed across logical partitions using a hash of the partition
 partition_id = hash(partition_key) % total_partitions
 ```
 
-PostgreSQL uses `hashtext()` and SQL Server uses `CHECKSUM()`—different functions, producing different mappings. By default, 64 partitions are seeded per outbox table. Each group can have a different partition count, configured in the install script.
+PostgreSQL uses `hashtext()` (computed at query time) and SQL Server uses `CHECKSUM()` (precomputed as a persisted `PartitionId` column). Different functions, producing different mappings. PostgreSQL seeds 64 partitions by default; SQL Server seeds 128 (the modulus is baked into the computed column formula). Each group can have a different partition count, configured in the install script.
 
 ### How ownership is distributed
 

@@ -628,6 +628,68 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 
 ---
 
+### Changing Partition Count
+
+**CRITICAL: All publishers must be stopped before changing the partition count on either store.** Changing the hash modulus while publishers are running corrupts per-key ordering — the same partition_key maps to a different partition_id, and two publishers can process the same key simultaneously.
+
+#### SQL Server Procedure
+
+```sql
+-- 1. Stop all publishers first!
+
+-- 2. Drop the index (depends on the computed column)
+DROP INDEX IX_Outbox_Pending ON dbo.Outbox;
+
+-- 3. Drop and recreate the computed column with new modulus
+ALTER TABLE dbo.Outbox DROP COLUMN PartitionId;
+ALTER TABLE dbo.Outbox ADD PartitionId AS
+    (ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % <NEW_COUNT>) PERSISTED;
+
+-- 4. Recreate the index
+CREATE NONCLUSTERED INDEX IX_Outbox_Pending
+ON dbo.Outbox (PartitionId, EventDateTimeUtc, EventOrdinal)
+INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload,
+         PayloadContentType, RetryCount, CreatedAtUtc, RowVersion);
+
+-- 5. Reseed partitions
+DELETE FROM dbo.OutboxPartitions WHERE OutboxTableName = 'Outbox';
+DECLARE @i INT = 0;
+WHILE @i < <NEW_COUNT>
+BEGIN
+    INSERT INTO dbo.OutboxPartitions (OutboxTableName, PartitionId) VALUES (N'Outbox', @i);
+    SET @i = @i + 1;
+END;
+
+-- 6. Start publishers
+```
+
+#### PostgreSQL Procedure
+
+```sql
+-- 1. Stop all publishers first!
+
+-- 2. Remove existing partitions
+DELETE FROM outbox_partitions WHERE outbox_table_name = 'outbox';
+
+-- 3. Seed new partition count
+INSERT INTO outbox_partitions (outbox_table_name, partition_id)
+SELECT 'outbox', gs FROM generate_series(0, <NEW_COUNT> - 1) gs
+ON CONFLICT DO NOTHING;
+
+-- 4. Clean up stale publishers (optional)
+DELETE FROM outbox_publishers;
+
+-- 5. Start publishers
+```
+
+No schema changes needed for PostgreSQL — the hash modulus is derived at query time from the partition row count.
+
+#### Ordering safety
+
+When publishers are stopped, the change is safe: no in-flight messages, each key maps to exactly one partition under the new modulus. If the outbox was not fully drained, some messages may be redelivered after restart (at-least-once semantics — consumers must be idempotent).
+
+---
+
 ## Emergency Procedures
 
 ### Emergency: Stop All Publishing

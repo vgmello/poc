@@ -85,7 +85,7 @@ flowchart TB
     subgraph HASH["Partition hashing"]
         direction LR
         HA1["Message partition_key"] --> HA2["hash(key) % total_partitions"]
-        HA2 --> HA3["PG: hashtext(key) & 0x7FFFFFFF\nSQL: ABS(CHECKSUM(key))"]
+        HA2 --> HA3["PG: hashtext(key) & 0x7FFFFFFF (query time)\nSQL: persisted PartitionId column"]
         HA3 --> HA4["→ partition_id\n→ owned by ONE publisher"]
     end
 
@@ -131,7 +131,7 @@ Each publisher generates a unique publisher ID (`{PublisherName}-{GUID}`), regis
 Messages map to partitions via `hash(partition_key) % total_partitions`. Each partition is owned by exactly one publisher at a time—this is what enables parallel publishing without ordering conflicts.
 
 - **PostgreSQL:** `(hashtext(key) & 0x7FFFFFFF) % total_partitions`
-- **SQL Server:** `ABS(CAST(CHECKSUM(key) AS BIGINT)) % total_partitions`
+- **SQL Server:** `PartitionId` persisted computed column — `ABS(CAST(CHECKSUM(key) AS BIGINT)) % 128` (precomputed at INSERT time, used as index leading key)
 
 ### Publish loop
 
