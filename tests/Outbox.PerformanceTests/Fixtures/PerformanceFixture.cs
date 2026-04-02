@@ -27,8 +27,10 @@ public sealed class PerformanceFixture : IAsyncLifetime
     private IContainer _azurite = null!;
     private IContainer _eventHubEmulator = null!;
 
-    // Azure SQL Edge — same approach as integration tests
-    private IContainer _sqlServer = null!;
+    // SQL Server — uses remote instance if SQLSERVER_CONN env var is set, otherwise Azure SQL Edge container
+    private IContainer? _sqlServer;
+    private static readonly string? RemoteSqlServerConnStr = Environment.GetEnvironmentVariable("SQLSERVER_CONN");
+    private static bool UseRemoteSqlServer => RemoteSqlServerConnStr is not null;
 
     public string PostgreSqlConnectionString => _postgres.GetConnectionString();
     public string SqlServerConnectionString { get; private set; } = "";
@@ -63,25 +65,38 @@ public sealed class PerformanceFixture : IAsyncLifetime
                 .UntilMessageIsLogged("Azurite Blob service is successfully listening"))
             .Build();
 
-        _sqlServer = new ContainerBuilder("mcr.microsoft.com/azure-sql-edge:latest")
-            .WithPortBinding(1433, true)
-            .WithEnvironment("ACCEPT_EULA", "Y")
-            .WithEnvironment("MSSQL_SA_PASSWORD", SqlServerPassword)
-            .WithWaitStrategy(Wait.ForUnixContainer()
-                .AddCustomWaitStrategy(new SqlServerReadyWaitStrategy()))
-            .Build();
+        if (UseRemoteSqlServer)
+        {
+            SqlServerConnectionString = RemoteSqlServerConnStr!;
 
-        // Start postgres, redpanda, sql server, azurite in parallel
-        await Task.WhenAll(
-            _postgres.StartAsync(),
-            _redpanda.StartAsync(),
-            _sqlServer.StartAsync(),
-            _azurite.StartAsync());
+            // Start postgres, redpanda, azurite in parallel (no SQL Server container needed)
+            await Task.WhenAll(
+                _postgres.StartAsync(),
+                _redpanda.StartAsync(),
+                _azurite.StartAsync());
+        }
+        else
+        {
+            _sqlServer = new ContainerBuilder("mcr.microsoft.com/azure-sql-edge:latest")
+                .WithPortBinding(1433, true)
+                .WithEnvironment("ACCEPT_EULA", "Y")
+                .WithEnvironment("MSSQL_SA_PASSWORD", SqlServerPassword)
+                .WithWaitStrategy(Wait.ForUnixContainer()
+                    .AddCustomWaitStrategy(new SqlServerReadyWaitStrategy()))
+                .Build();
 
-        // Build SQL Server connection string
-        var sqlPort = _sqlServer.GetMappedPublicPort(1433);
-        var sqlHost = _sqlServer.Hostname;
-        SqlServerConnectionString = $"Server={sqlHost},{sqlPort};Database=master;User Id=sa;Password={SqlServerPassword};TrustServerCertificate=True;";
+            // Start postgres, redpanda, sql server, azurite in parallel
+            await Task.WhenAll(
+                _postgres.StartAsync(),
+                _redpanda.StartAsync(),
+                _sqlServer.StartAsync(),
+                _azurite.StartAsync());
+
+            // Build SQL Server connection string
+            var sqlPort = _sqlServer.GetMappedPublicPort(1433);
+            var sqlHost = _sqlServer.Hostname;
+            SqlServerConnectionString = $"Server={sqlHost},{sqlPort};Database=master;User Id=sa;Password={SqlServerPassword};TrustServerCertificate=True;";
+        }
 
         // Start EventHub emulator (depends on Azurite being ready)
         var configJson = BuildEventHubConfig();
