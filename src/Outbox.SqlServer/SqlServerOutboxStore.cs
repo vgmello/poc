@@ -20,9 +20,6 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     private readonly SqlServerQueries _queries;
 
     private readonly string _optionsName;
-    private volatile int _cachedPartitionCount;
-    private long _partitionCountRefreshedAtTicks;
-
     public SqlServerOutboxStore(
         IServiceProvider serviceProvider,
         IOptionsMonitor<SqlServerStoreOptions> optionsMonitor,
@@ -80,17 +77,11 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         string publisherId, int batchSize,
         int maxRetryCount, CancellationToken ct)
     {
-        var totalPartitions = await GetCachedPartitionCountAsync(ct).ConfigureAwait(false);
-
-        if (totalPartitions == 0)
-            return Array.Empty<OutboxMessage>();
-
         var rows = await _db.QueryAsync<OutboxMessage>(_queries.FetchBatch,
             new
             {
                 BatchSize = batchSize,
                 PublisherId = publisherId,
-                TotalPartitions = totalPartitions,
                 MaxRetryCount = maxRetryCount,
                 OutboxTableName = _options.GetOutboxTableName()
             }, ct).ConfigureAwait(false);
@@ -161,22 +152,6 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     // -------------------------------------------------------------------------
     // Partition management
     // -------------------------------------------------------------------------
-
-    private async Task<int> GetCachedPartitionCountAsync(CancellationToken ct)
-    {
-        const long refreshIntervalMs = 60_000; // 60s
-        var now = Environment.TickCount64;
-        var cached = _cachedPartitionCount;
-
-        if (cached > 0 && now - Volatile.Read(ref _partitionCountRefreshedAtTicks) < refreshIntervalMs)
-            return cached;
-
-        var fresh = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
-        _cachedPartitionCount = fresh;
-        Volatile.Write(ref _partitionCountRefreshedAtTicks, now);
-
-        return fresh;
-    }
 
     public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)
     {
