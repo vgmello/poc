@@ -17,8 +17,8 @@ public class SustainedLoadTests
     {
         (StoreType.PostgreSql, TransportType.Redpanda) => 1_000,
         (StoreType.PostgreSql, TransportType.EventHub) => 500,
-        (StoreType.SqlServer, TransportType.Redpanda) => 500,
-        (StoreType.SqlServer, TransportType.EventHub) => 500,
+        (StoreType.SqlServer, TransportType.Redpanda) => 1_000,
+        (StoreType.SqlServer, TransportType.EventHub) => 1_000,
         _ => 100
     };
 

@@ -17,8 +17,8 @@ public class BulkThroughputTests
     {
         (StoreType.PostgreSql, TransportType.Redpanda) => 1_000_000,
         (StoreType.PostgreSql, TransportType.EventHub) => 200_000,
-        (StoreType.SqlServer, TransportType.Redpanda) => 100_000,
-        (StoreType.SqlServer, TransportType.EventHub) => 50_000,
+        (StoreType.SqlServer, TransportType.Redpanda) => 500_000,
+        (StoreType.SqlServer, TransportType.EventHub) => 500_000,
         _ => 100_000
     };
 

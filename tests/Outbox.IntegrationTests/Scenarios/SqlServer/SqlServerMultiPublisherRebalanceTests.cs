@@ -25,7 +25,7 @@ public class SqlServerMultiPublisherRebalanceTests
         await SqlServerTestHelper.CleanupAsync(_infra.SqlServerConnectionString);
         var topic = OutboxTestHelper.UniqueTopic("ss-rebalance");
 
-        // Start publisher A — should own all 128 partitions
+        // Start publisher A — should own all 64 partitions
         var (hostA, _) = SqlServerTestHelper.BuildPublisherHost(
             _infra.SqlServerConnectionString, _infra.BootstrapServers);
         await hostA.StartAsync();
@@ -34,18 +34,18 @@ public class SqlServerMultiPublisherRebalanceTests
         {
             var owners = await SqlServerTestHelper.GetPartitionOwnersAsync(_infra.SqlServerConnectionString);
 
-            return owners.Values.Count(v => v != null) == 128;
-        }, TimeSpan.FromSeconds(30), message: "A should own all 128 partitions");
+            return owners.Values.Count(v => v != null) == 64;
+        }, TimeSpan.FromSeconds(30), message: "A should own all 64 partitions");
 
         var publishers = await SqlServerTestHelper.GetPublisherIdsAsync(_infra.SqlServerConnectionString);
-        _output.WriteLine($"A owns 128 partitions. PublisherId: {publishers[0]}");
+        _output.WriteLine($"A owns 64 partitions. PublisherId: {publishers[0]}");
 
         // Start publisher B
         var (hostB, _) = SqlServerTestHelper.BuildPublisherHost(
             _infra.SqlServerConnectionString, _infra.BootstrapServers);
         await hostB.StartAsync();
 
-        // Wait for rebalance — should be roughly 16/16
+        // Wait for rebalance — should be roughly 32/32
         await OutboxTestHelper.WaitUntilAsync(async () =>
         {
             var owners = await SqlServerTestHelper.GetPartitionOwnersAsync(_infra.SqlServerConnectionString);
@@ -74,9 +74,9 @@ public class SqlServerMultiPublisherRebalanceTests
         {
             var owners = await SqlServerTestHelper.GetPartitionOwnersAsync(_infra.SqlServerConnectionString);
 
-            return owners.Values.Count(v => v != null) == 128
+            return owners.Values.Count(v => v != null) == 64
                    && owners.Values.Distinct().Count(v => v != null) == 1;
-        }, TimeSpan.FromSeconds(30), message: "A should reclaim all 128 partitions after B stops");
+        }, TimeSpan.FromSeconds(30), message: "A should reclaim all 64 partitions after B stops");
 
         _output.WriteLine("A reclaimed all partitions after B stopped");
 

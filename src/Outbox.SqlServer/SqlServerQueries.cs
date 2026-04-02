@@ -82,7 +82,7 @@ internal sealed class SqlServerQueries
                      )
                        AND o.RetryCount < @MaxRetryCount
                        AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
-                     ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
+                     ORDER BY o.PartitionId, o.EventDateTimeUtc, o.EventOrdinal;
                      """;
 
         DeletePublished = $"""
