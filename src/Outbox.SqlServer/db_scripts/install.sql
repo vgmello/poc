@@ -26,6 +26,7 @@ BEGIN
         PayloadContentType NVARCHAR(100)       NOT NULL  DEFAULT 'application/json',
         RetryCount       INT                   NOT NULL  DEFAULT 0,
         RowVersion       ROWVERSION            NOT NULL,
+        PartitionId      AS (ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 128) PERSISTED,
 
         CONSTRAINT PK_Outbox PRIMARY KEY CLUSTERED (SequenceNumber)
     );
@@ -112,12 +113,12 @@ GO
 -- SECTION 3: INDEXES
 -- =============================================================================
 
--- Pending rows in causal order for polling (covering index eliminates key lookups)
+-- Pending rows: seek by partition, then ordered by causal time (fully covering)
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND name = N'IX_Outbox_Pending')
 BEGIN
     CREATE NONCLUSTERED INDEX IX_Outbox_Pending
-    ON dbo.Outbox (EventDateTimeUtc, EventOrdinal)
-    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, RetryCount, CreatedAtUtc);
+    ON dbo.Outbox (PartitionId, EventDateTimeUtc, EventOrdinal)
+    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, RetryCount, CreatedAtUtc, RowVersion);
 END;
 GO
 
@@ -157,11 +158,11 @@ FROM dbo.OutboxDeadLetter;
 GO
 
 -- =============================================================================
--- SECTION 5: SEED DEFAULT PARTITIONS (64 partitions)
+-- SECTION 5: SEED DEFAULT PARTITIONS (128 partitions)
 -- =============================================================================
 
 DECLARE @i INT = 0;
-WHILE @i < 64
+WHILE @i < 128
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM dbo.OutboxPartitions WHERE OutboxTableName = N'Outbox' AND PartitionId = @i)
     BEGIN
