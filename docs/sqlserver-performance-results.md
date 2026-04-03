@@ -14,28 +14,28 @@ Pre-seeded messages drained to zero by the publisher(s).
 
 | Transport | Publishers | Messages | Duration | Msg/sec | Poll p50 | Poll p95 | Pub p50 | Pub p95 |
 |-----------|------------|----------|----------|---------|----------|----------|---------|---------|
-| Redpanda  | 1          | 500,000  | 1:35     | 5,253   | 30.2ms   | 80.1ms   | 10.5ms  | 11.3ms  |
-| Redpanda  | 2          | 500,000  | 1:04     | 7,726   | 30.3ms   | 87.3ms   | 10.5ms  | 11.4ms  |
-| Redpanda  | 4          | 500,000  | 0:49     | 10,088  | 25.9ms   | 77.0ms   | 10.5ms  | 11.8ms  |
-| EventHub  | 1          | 200,000  | —        | —       | —        | —        | —       | —       |
-| EventHub  | 2          | 200,000  | —        | —       | —        | —        | —       | —       |
-| EventHub  | 4          | 200,000  | —        | —       | —        | —        | —       | —       |
+| Redpanda  | 1          | 500,000  | 1:15     | 6,619   | 16.6ms   | 36.4ms   | 10.6ms  | 11.9ms  |
+| Redpanda  | 2          | 500,000  | 0:45     | 10,876  | 9.9ms    | 32.2ms   | 10.4ms  | 11.2ms  |
+| Redpanda  | 4          | 500,000  | 0:37     | 13,183  | 14.1ms   | 53.2ms   | 10.5ms  | 12.0ms  |
+| EventHub  | 1          | 100,000  | 4:47     | 348     | 5.1ms    | 39.1ms   | 3.3ms   | 22.8ms  |
+| EventHub  | 2          | 100,000  | 2:57     | 563     | 5.2ms    | 23.7ms   | 3.4ms   | 27.4ms  |
+| EventHub  | 4          | 100,000  | 2:18     | 720     | 5.2ms    | 19.9ms   | 3.4ms   | 221.0ms |
 
 ### Improvement vs Previous (128 partitions, unaligned ORDER BY, 100K messages)
 
 | Combo | Before (128p, 100K) | After (64p, 500K) | Improvement | Poll p50 Before | Poll p50 After |
 |-------|---------------------|---------------------|-------------|-----------------|----------------|
-| Redpanda 1P | 1,456/s | **5,253/s** | **+261%** | 75ms | 30ms (-60%) |
-| Redpanda 2P | 2,422/s | **7,726/s** | **+219%** | 53ms | 30ms (-43%) |
-| Redpanda 4P | 4,316/s | **10,088/s** | **+134%** | 36ms | 26ms (-28%) |
+| Redpanda 1P | 1,456/s | **6,619/s** | **+355%** | 75ms | 17ms (-77%) |
+| Redpanda 2P | 2,422/s | **10,876/s** | **+349%** | 53ms | 10ms (-81%) |
+| Redpanda 4P | 4,316/s | **13,183/s** | **+205%** | 36ms | 14ms (-61%) |
 
 ### Observations
 
-- **Throughput tripled at 1P** (1,456 → 5,253 msg/sec) and **more than doubled at 4P** (4,316 → 10,088 msg/sec) after aligning ORDER BY with the index and reducing from 128 to 64 partitions.
-- **Poll latency dropped further** — p50 now at 26-30ms across all publisher counts, with no significant penalty at 4P.
-- **Near-linear horizontal scaling:** 1P (5,253/s) → 2P (7,726/s) → 4P (10,088/s).
+- **Throughput increased 3.5-4.5x at 1-2P** (1,456 → 6,619 and 2,422 → 10,876 msg/sec) after aligning ORDER BY with the index and reducing from 128 to 64 partitions.
+- **Poll latency dropped dramatically** — p50 now at 10-17ms across all publisher counts (was 36-75ms).
+- **Near-linear horizontal scaling:** 1P (6,619/s) → 2P (10,876/s) → 4P (13,183/s).
 - **Pub latency stable** at 10.5ms p50 — consistent Redpanda round-trip.
-- **Gap with PostgreSQL continues to narrow** — SQL Server 4P at 10,088/s vs PostgreSQL 4P at 9,032/s. SQL Server is now **faster** at 4P.
+- **Gap with PostgreSQL continues to narrow** — SQL Server 4P at 13,183/s vs PostgreSQL 4P at 20,021/s (0.66x, was 0.19x before all optimizations).
 
 ---
 
@@ -55,8 +55,8 @@ Continuous message insertion at the target rate for 5 minutes.
 ### Observations
 
 - **All Redpanda combinations kept up at 1,000 msg/sec** (doubled from previous 500/s target) — final pending count was 0.
-- **With 4P throughput now at 10,088/s**, the sustained target of 1,000/s has **10x headroom**.
-- **EventHub emulator caps at ~624/s** — this is the transport bottleneck, not the DB. The 1,000/s target is beyond the emulator's capacity.
+- **With 4P throughput now at 13,183/s**, the sustained target of 1,000/s has **13x headroom**.
+- **EventHub emulator caps at ~624-862/s** — this is the transport bottleneck, not the DB. The 1,000/s target is beyond the emulator's capacity.
 
 ---
 
@@ -83,9 +83,9 @@ Two further optimizations:
 |--------|---------------------|-----------------|------------------------|
 | Plan | Clustered Index Scan | Index Scan + Sort | Ordered Index Scan (no Sort) |
 | Missing index suggestions | 1 (71.68% impact) | 0 | 0 |
-| Poll p50 (1P) | 140ms | 75ms | 30ms |
-| Poll p50 (4P) | 115ms | 36ms | 26ms |
-| Throughput (4P) | 1,758/s | 4,316/s | 10,088/s |
+| Poll p50 (1P) | 140ms | 75ms | 17ms |
+| Poll p50 (4P) | 115ms | 36ms | 14ms |
+| Throughput (4P) | 1,758/s | 4,316/s | 13,183/s |
 
 ### Trade-off
 

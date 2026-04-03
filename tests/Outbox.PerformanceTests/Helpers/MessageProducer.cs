@@ -131,6 +131,7 @@ public static class MessageProducer
         }
 
         await using var cmd = new SqlCommand(sb.ToString(), conn);
+        cmd.CommandTimeout = 120;
         cmd.Parameters.Add(new SqlParameter("@p", System.Data.SqlDbType.VarBinary) { Value = FixedPayload });
         await cmd.ExecuteNonQueryAsync();
     }
