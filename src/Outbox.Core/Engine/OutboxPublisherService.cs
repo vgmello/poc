@@ -154,7 +154,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                     HeartbeatLoopAsync(publisherId, ct),
                     RebalanceLoopAsync(publisherId, ct),
                     OrphanSweepLoopAsync(publisherId, ct),
-                    DeadLetterSweepLoopAsync(ct)
+                    DeadLetterSweepLoopAsync(publisherId, ct)
                 };
 
                 // Wait for the first task to complete (success or failure).
@@ -274,38 +274,8 @@ internal sealed class OutboxPublisherService : BackgroundService
 
                 pollIntervalMs = opts.MinPollIntervalMs;
 
-                // Separate poison messages
-                var poison = batch.Where(m => m.RetryCount >= opts.MaxRetryCount).ToList();
-                var healthy = batch.Where(m => m.RetryCount < opts.MaxRetryCount).ToList();
-
-                // Dead-letter poison messages (CancellationToken.None — must complete even during shutdown)
-                if (poison.Count > 0)
-                {
-                    await _store.DeadLetterAsync(
-                        poison.Select(m => m.SequenceNumber).ToList(),
-                        "Max retry count exceeded",
-                        CancellationToken.None);
-
-                    _instrumentation.MessagesDeadLettered.Add(poison.Count);
-
-                    foreach (var msg in poison)
-                    {
-                        try
-                        {
-                            await _eventHandler.OnMessageDeadLetteredAsync(msg, ct);
-                        }
-                        catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                        {
-                            _logger.LogWarning(handlerEx,
-                                "OnMessageDeadLetteredAsync handler threw for message {Seq} — " +
-                                "message is already dead-lettered, continuing",
-                                msg.SequenceNumber);
-                        }
-                    }
-                }
-
-                // Group healthy messages by (TopicName, PartitionKey)
-                var groups = healthy
+                // Group messages by (TopicName, PartitionKey)
+                var groups = batch
                     .GroupBy(m => (m.TopicName, m.PartitionKey))
                     .ToList();
 
@@ -399,7 +369,7 @@ internal sealed class OutboxPublisherService : BackgroundService
         {
             var topicName = group.Key.TopicName;
             var partitionKey = group.Key.PartitionKey;
-            var groupMessages = group.OrderBy(m => m.SequenceNumber).ToList();
+            var groupMessages = group.OrderBy(m => m.EventDateTimeUtc).ThenBy(m => m.EventOrdinal).ThenBy(m => m.SequenceNumber).ToList();
             var sequenceNumbers = groupMessages.Select(m => m.SequenceNumber).ToList();
 
             if (circuitBreaker.IsOpen(topicName))
@@ -523,9 +493,13 @@ internal sealed class OutboxPublisherService : BackgroundService
                     _instrumentation.CircuitBreakerStateChanges.Add(1);
                 }
 
+                var failedMessages = groupMessages
+                    .Where(m => pex.FailedSequenceNumbers.Contains(m.SequenceNumber))
+                    .ToList();
+
                 try
                 {
-                    await _eventHandler.OnPublishFailedAsync(groupMessages, pex, ct);
+                    await _eventHandler.OnPublishFailedAsync(failedMessages, pex, ct);
                 }
                 catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
                 {
@@ -706,14 +680,14 @@ internal sealed class OutboxPublisherService : BackgroundService
         }
     }
 
-    private async Task DeadLetterSweepLoopAsync(CancellationToken ct)
+    private async Task DeadLetterSweepLoopAsync(string publisherId, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 await Task.Delay(GetOptions().DeadLetterSweepIntervalMs, ct);
-                await _store.SweepDeadLettersAsync(GetOptions().MaxRetryCount, ct);
+                await _store.SweepDeadLettersAsync(publisherId, GetOptions().MaxRetryCount, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {

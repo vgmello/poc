@@ -202,46 +202,6 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task PublishLoop_PoisonMessages_AreDeadLettered()
-    {
-        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
-            .Returns("publisher-1");
-
-        // Poison message: RetryCount >= MaxRetryCount (5)
-        var poisonMessage = MakeMessage(1, retryCount: 5);
-        var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
-            .Returns(ci =>
-            {
-                if (Interlocked.Increment(ref callCount) == 1)
-                    return new[] { poisonMessage };
-
-                return Array.Empty<OutboxMessage>();
-            });
-
-        var service = CreateService();
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
-
-        await service.StartAsync(cts.Token);
-
-        try { await Task.Delay(350, CancellationToken.None); }
-        catch
-        {
-            /* Intentionally empty */
-        }
-
-        await service.StopAsync(CancellationToken.None);
-
-        await _store.Received().DeadLetterAsync(
-            Arg.Is<IReadOnlyList<long>>(s => s.Contains(1L)),
-            Arg.Any<string?>(),
-            Arg.Any<CancellationToken>());
-
-        await _eventHandler.Received().OnMessageDeadLetteredAsync(
-            poisonMessage, Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
     public async Task PublishLoop_GroupsByTopicAndPartitionKey()
     {
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
@@ -437,7 +397,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await service.StopAsync(CancellationToken.None);
 
         await _store.Received().SweepDeadLettersAsync(
-            Arg.Any<int>(), Arg.Any<CancellationToken>());
+            Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -816,111 +776,6 @@ public sealed class OutboxPublisherServiceTests : IDisposable
     // =========================================================================
     // Bug 2: Poison message handler exception must NOT block healthy messages
     // =========================================================================
-
-    [Fact]
-    public async Task PublishLoop_OnMessageDeadLetteredThrows_HealthyMessagesStillProcessed()
-    {
-        // BUG 2: If OnMessageDeadLetteredAsync throws, the exception propagates
-        // past the healthy message processing code, leaving healthy messages
-        // leased but unprocessed until lease expiry.
-        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
-            .Returns("publisher-1");
-
-        // Batch contains 1 poison message and 2 healthy messages
-        var poisonMsg = MakeMessage(1, retryCount: 5);
-        var healthyMsg1 = MakeMessage(2, retryCount: 0);
-        var healthyMsg2 = MakeMessage(3, retryCount: 0);
-
-        var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
-            .Returns(ci =>
-            {
-                if (Interlocked.Increment(ref callCount) == 1)
-                    return new[] { poisonMsg, healthyMsg1, healthyMsg2 };
-
-                return Array.Empty<OutboxMessage>();
-            });
-
-        // Dead-letter handler throws
-        _eventHandler.OnMessageDeadLetteredAsync(Arg.Any<OutboxMessage>(), Arg.Any<CancellationToken>())
-            .ThrowsAsync(new InvalidOperationException("handler bug"));
-
-        var service = CreateService();
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
-
-        await service.StartAsync(cts.Token);
-
-        try { await Task.Delay(600, CancellationToken.None); }
-        catch
-        {
-            /* Intentionally empty */
-        }
-
-        await service.StopAsync(CancellationToken.None);
-
-        // Poison message should have been dead-lettered (this happens before handler call)
-        await _store.Received().DeadLetterAsync(
-            Arg.Is<IReadOnlyList<long>>(s => s.Contains(1L)),
-            Arg.Any<string?>(),
-            Arg.Any<CancellationToken>());
-
-        // CRITICAL: Healthy messages must still be sent to the transport.
-        // With the bug, the handler exception skips healthy message processing entirely.
-        await _transport.Received().SendAsync(
-            "orders", "key-1",
-            Arg.Is<IReadOnlyList<OutboxMessage>>(m => m.Count == 2),
-            Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
-    public async Task PublishLoop_OnMessageDeadLetteredThrows_HealthyMessagesReleasedByFinallyBlock()
-    {
-        // BUG 2 secondary check: Even if the transport doesn't get called for healthy messages,
-        // they should at minimum be released (not stuck until lease expiry).
-        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>())
-            .Returns("publisher-1");
-
-        var poisonMsg = MakeMessage(1, retryCount: 5);
-        var healthyMsg = MakeMessage(2, retryCount: 0);
-
-        var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
-            .Returns(ci =>
-            {
-                if (Interlocked.Increment(ref callCount) == 1)
-                    return new[] { poisonMsg, healthyMsg };
-
-                return Array.Empty<OutboxMessage>();
-            });
-
-        // Dead-letter handler throws
-        _eventHandler.OnMessageDeadLetteredAsync(Arg.Any<OutboxMessage>(), Arg.Any<CancellationToken>())
-            .ThrowsAsync(new InvalidOperationException("handler bug"));
-
-        // Transport will succeed if called
-        _transport.SendAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<OutboxMessage>>(), Arg.Any<CancellationToken>())
-            .Returns(Task.CompletedTask);
-
-        var service = CreateService();
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
-
-        await service.StartAsync(cts.Token);
-
-        try { await Task.Delay(600, CancellationToken.None); }
-        catch
-        {
-            /* Intentionally empty */
-        }
-
-        await service.StopAsync(CancellationToken.None);
-
-        // With the fix: healthy messages should be sent and deleted normally.
-        // Verify transport was called for the healthy message.
-        await _transport.Received().SendAsync(
-            "orders", "key-1",
-            Arg.Is<IReadOnlyList<OutboxMessage>>(m => m.Count == 1 && m[0].SequenceNumber == 2),
-            Arg.Any<CancellationToken>());
-    }
 
     [Fact]
     public async Task PublishLoop_AdaptivePollBackoff_IncreasesIntervalOnEmptyBatch()
@@ -1788,7 +1643,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
             Arg.Any<CancellationToken>()).Returns(Array.Empty<OutboxMessage>());
 
         // SweepDeadLettersAsync throws
-        _store.SweepDeadLettersAsync(Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.SweepDeadLettersAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("dead letter sweep error"));
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(400));
@@ -1797,7 +1652,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
         await Task.Delay(350);
         await service.StopAsync(CancellationToken.None);
 
-        await _store.Received().SweepDeadLettersAsync(Arg.Any<int>(), Arg.Any<CancellationToken>());
+        await _store.Received().SweepDeadLettersAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

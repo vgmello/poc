@@ -28,7 +28,7 @@ public interface IOutboxStore
     Task RebalanceAsync(string publisherId, CancellationToken ct);
     Task ClaimOrphanPartitionsAsync(string publisherId, CancellationToken ct);
 
-    Task SweepDeadLettersAsync(int maxRetryCount, CancellationToken ct);
+    Task SweepDeadLettersAsync(string publisherId, int maxRetryCount, CancellationToken ct);
 
     Task<long> GetPendingCountAsync(CancellationToken ct);
 }

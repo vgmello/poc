@@ -215,9 +215,9 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     // Dead-letter sweep
     // -------------------------------------------------------------------------
 
-    public async Task SweepDeadLettersAsync(int maxRetryCount, CancellationToken ct)
+    public async Task SweepDeadLettersAsync(string publisherId, int maxRetryCount, CancellationToken ct)
     {
-        var parameters = new DynamicParameters(new { MaxRetryCount = maxRetryCount });
+        var parameters = new DynamicParameters(new { PublisherId = publisherId, MaxRetryCount = maxRetryCount, OutboxTableName = _options.GetOutboxTableName() });
         parameters.Add("@LastError", "Max retry count exceeded (background sweep)", DbType.String, size: 2000);
         await _db.ExecuteAsync(_queries.SweepDeadLetters, parameters, ct).ConfigureAwait(false);
     }

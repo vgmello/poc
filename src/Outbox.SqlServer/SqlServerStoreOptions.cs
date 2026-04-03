@@ -14,7 +14,7 @@ public sealed class SqlServerStoreOptions : IValidatableObject
     public string SchemaName { get; set; } = "dbo";
 
     [Required(AllowEmptyStrings = true)]
-    [RegularExpression(@"^[a-zA-Z_][a-zA-Z0-9_]*$",
+    [RegularExpression(@"^([a-zA-Z_][a-zA-Z0-9_]*)?$",
         ErrorMessage = "TablePrefix must be empty or match pattern [a-zA-Z_][a-zA-Z0-9_]*.")]
     public string TablePrefix { get; set; } = "";
 

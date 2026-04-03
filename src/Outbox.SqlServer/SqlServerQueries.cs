@@ -82,7 +82,7 @@ internal sealed class SqlServerQueries
                      )
                        AND o.RetryCount < @MaxRetryCount
                        AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
-                     ORDER BY o.PartitionId, o.EventDateTimeUtc, o.EventOrdinal;
+                     ORDER BY o.PartitionId, o.EventDateTimeUtc, o.EventOrdinal, o.SequenceNumber;
                      """;
 
         DeletePublished = $"""
@@ -269,8 +269,14 @@ internal sealed class SqlServerQueries
                                  CreatedAtUtc, RetryCount,
                                  EventDateTimeUtc, EventOrdinal,
                                  DeadLetteredAtUtc, LastError)
-                            FROM {outboxTable} o WITH (ROWLOCK, READPAST)
-                            WHERE o.RetryCount >= @MaxRetryCount;
+                            FROM {outboxTable} o
+                            WHERE o.RetryCount >= @MaxRetryCount
+                              AND o.PartitionId IN (
+                                  SELECT op.PartitionId
+                                  FROM {partitionsTable} op
+                                  WHERE op.OutboxTableName = @OutboxTableName
+                                    AND op.OwnerPublisherId = @PublisherId
+                              );
                             """;
 
         GetPendingCount = $"SELECT COUNT_BIG(*) FROM {outboxTable};";

@@ -71,7 +71,7 @@ INNER JOIN {partitionsTable} op
     AND ((hashtext(o.partition_key) & 2147483647) % @total_partitions) = op.partition_id
 WHERE o.retry_count < @max_retry_count
   AND o.xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint
-ORDER BY o.event_datetime_utc, o.event_ordinal
+ORDER BY o.event_datetime_utc, o.event_ordinal, o.sequence_number
 LIMIT @batch_size;";
 
         DeletePublished = $@"
@@ -246,10 +246,14 @@ WHERE  {partitionsTable}.partition_id = to_claim.partition_id
 WITH dead AS (
     DELETE FROM {outboxTable} o
     USING (
-        SELECT sequence_number
-        FROM {outboxTable}
-        WHERE retry_count >= @max_retry_count
-        FOR UPDATE SKIP LOCKED
+        SELECT ot.sequence_number
+        FROM {outboxTable} ot
+        INNER JOIN {partitionsTable} op
+            ON  op.outbox_table_name = @outbox_table_name
+            AND op.owner_publisher_id = @publisher_id
+            AND ((hashtext(ot.partition_key) & 2147483647) % (SELECT COUNT(*) FROM {partitionsTable} WHERE outbox_table_name = @outbox_table_name)) = op.partition_id
+        WHERE ot.retry_count >= @max_retry_count
+        FOR UPDATE OF ot SKIP LOCKED
     ) d
     WHERE o.sequence_number = d.sequence_number
     RETURNING o.sequence_number, o.topic_name, o.partition_key, o.event_type,

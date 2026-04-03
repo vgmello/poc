@@ -18,7 +18,7 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     private readonly PostgreSqlQueries _queries;
 
     private readonly string _optionsName;
-    private volatile int _cachedPartitionCount;
+    private int _cachedPartitionCount;
     private long _partitionCountRefreshedAtTicks;
 
     public PostgreSqlOutboxStore(
@@ -142,13 +142,13 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     {
         const long refreshIntervalMs = 60_000; // 60s
         var now = Environment.TickCount64;
-        var cached = _cachedPartitionCount;
+        var cached = Volatile.Read(ref _cachedPartitionCount);
 
         if (cached > 0 && now - Volatile.Read(ref _partitionCountRefreshedAtTicks) < refreshIntervalMs)
             return cached;
 
         var fresh = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
-        _cachedPartitionCount = fresh;
+        Volatile.Write(ref _cachedPartitionCount, fresh);
         Volatile.Write(ref _partitionCountRefreshedAtTicks, now);
 
         return fresh;
@@ -231,9 +231,9 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
             }, ct).ConfigureAwait(false);
     }
 
-    public async Task SweepDeadLettersAsync(int maxRetryCount, CancellationToken ct)
+    public async Task SweepDeadLettersAsync(string publisherId, int maxRetryCount, CancellationToken ct)
     {
-        var parameters = new DynamicParameters(new { max_retry_count = maxRetryCount });
+        var parameters = new DynamicParameters(new { publisher_id = publisherId, max_retry_count = maxRetryCount, outbox_table_name = _options.GetOutboxTableName() });
         parameters.Add("@last_error", "Max retry count exceeded (background sweep)", DbType.String, size: 2000);
         await _db.ExecuteAsync(_queries.SweepDeadLetters, parameters, ct).ConfigureAwait(false);
     }
