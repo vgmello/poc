@@ -294,4 +294,140 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
             Arg.Is<OutboxMessage>(m => ReferenceEquals(m.Payload, originalPayload)),
             Arg.Any<CancellationToken>());
     }
+
+    [Fact]
+    public async Task ThreeInterceptors_ChainCorrectly()
+    {
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        var messages = new[] { MakeMessage(1) };
+        var callCount = 0;
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
+
+        var order = new List<string>();
+
+        var first = Substitute.For<IOutboxMessageInterceptor>();
+        first.AppliesTo(Arg.Any<OutboxMessage>()).Returns(true);
+        first.When(x => x.InterceptAsync(Arg.Any<OutboxMessageContext>(), Arg.Any<CancellationToken>()))
+            .Do(ci =>
+            {
+                order.Add("first");
+                ci.Arg<OutboxMessageContext>().Payload = Encoding.UTF8.GetBytes("step1");
+            });
+
+        var second = Substitute.For<IOutboxMessageInterceptor>();
+        second.AppliesTo(Arg.Any<OutboxMessage>()).Returns(true);
+        second.When(x => x.InterceptAsync(Arg.Any<OutboxMessageContext>(), Arg.Any<CancellationToken>()))
+            .Do(ci =>
+            {
+                order.Add("second");
+                ci.Arg<OutboxMessageContext>().Payload = Encoding.UTF8.GetBytes("step2");
+            });
+
+        var third = Substitute.For<IOutboxMessageInterceptor>();
+        third.AppliesTo(Arg.Any<OutboxMessage>()).Returns(true);
+        third.When(x => x.InterceptAsync(Arg.Any<OutboxMessageContext>(), Arg.Any<CancellationToken>()))
+            .Do(ci =>
+            {
+                order.Add("third");
+                var current = Encoding.UTF8.GetString(ci.Arg<OutboxMessageContext>().Payload);
+                Assert.Equal("step2", current);
+                ci.Arg<OutboxMessageContext>().Payload = Encoding.UTF8.GetBytes("step3");
+            });
+
+        var service = CreateService(new[] { first, second, third });
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        await service.StartAsync(cts.Token);
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch { /* Intentionally empty */ }
+
+        await service.StopAsync(CancellationToken.None);
+
+        Assert.Equal(new[] { "first", "second", "third" }, order);
+
+        await _transport.Received().SendAsync("orders", "key-1",
+            Arg.Is<IReadOnlyList<OutboxMessage>>(m =>
+                m.Count == 1 && Encoding.UTF8.GetString(m[0].Payload) == "step3"),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task SecondInterceptor_Throws_FirstMutationLost_RetryIncremented()
+    {
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        var messages = new[] { MakeMessage(1) };
+        var callCount = 0;
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
+
+        var first = Substitute.For<IOutboxMessageInterceptor>();
+        first.AppliesTo(Arg.Any<OutboxMessage>()).Returns(true);
+        first.When(x => x.InterceptAsync(Arg.Any<OutboxMessageContext>(), Arg.Any<CancellationToken>()))
+            .Do(ci => ci.Arg<OutboxMessageContext>().Payload = Encoding.UTF8.GetBytes("mutated"));
+
+        var second = Substitute.For<IOutboxMessageInterceptor>();
+        second.AppliesTo(Arg.Any<OutboxMessage>()).Returns(true);
+        second.When(x => x.InterceptAsync(Arg.Any<OutboxMessageContext>(), Arg.Any<CancellationToken>()))
+            .Do(_ => throw new InvalidOperationException("second interceptor boom"));
+
+        var service = CreateService(new[] { first, second });
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        await service.StartAsync(cts.Token);
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch { /* Intentionally empty */ }
+
+        await service.StopAsync(CancellationToken.None);
+
+        await _store.Received().IncrementRetryCountAsync(
+            Arg.Is<IReadOnlyList<long>>(s => s.Contains(1L)),
+            CancellationToken.None);
+
+        await _transport.DidNotReceive().SendAsync(
+            Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<IReadOnlyList<OutboxMessage>>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Interceptor_ModifiesHeaders_TransportReceivesModifiedHeaders()
+    {
+        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        var messages = new[]
+        {
+            new OutboxMessage(1, "orders", "key-1", "OrderCreated",
+                new Dictionary<string, string> { ["original"] = "value" },
+                Encoding.UTF8.GetBytes("{}"), "application/json",
+                DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow)
+        };
+        var callCount = 0;
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
+
+        var interceptor = Substitute.For<IOutboxMessageInterceptor>();
+        interceptor.AppliesTo(Arg.Any<OutboxMessage>()).Returns(true);
+        interceptor.When(x => x.InterceptAsync(Arg.Any<OutboxMessageContext>(), Arg.Any<CancellationToken>()))
+            .Do(ci =>
+            {
+                var ctx = ci.Arg<OutboxMessageContext>();
+                ctx.Headers!["added"] = "new-value";
+            });
+
+        var service = CreateService(new[] { interceptor });
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        await service.StartAsync(cts.Token);
+
+        try { await Task.Delay(600, CancellationToken.None); }
+        catch { /* Intentionally empty */ }
+
+        await service.StopAsync(CancellationToken.None);
+
+        await _transport.Received().SendAsync("orders", "key-1",
+            Arg.Is<IReadOnlyList<OutboxMessage>>(m =>
+                m.Count == 1 &&
+                m[0].Headers != null &&
+                m[0].Headers!.ContainsKey("added") &&
+                m[0].Headers!["added"] == "new-value"),
+            Arg.Any<CancellationToken>());
+    }
 }
