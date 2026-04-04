@@ -31,9 +31,23 @@ public class SustainedLoadTests
         _output = output;
     }
 
-    [Theory(Timeout = 600_000)] // 10 minute timeout per combination
-    [MemberData(nameof(TestMatrix.AllCombinations), MemberType = typeof(TestMatrix))]
-    public async Task SustainedRate(TestCombination combo)
+    [Theory(Timeout = 600_000)]
+    [MemberData(nameof(TestMatrix.SqlServerRedpandaCombinations), MemberType = typeof(TestMatrix))]
+    public Task SustainedRate_SqlServer_Redpanda(TestCombination combo) => SustainedRateCore(combo);
+
+    [Theory(Timeout = 600_000)]
+    [MemberData(nameof(TestMatrix.SqlServerEventHubCombinations), MemberType = typeof(TestMatrix))]
+    public Task SustainedRate_SqlServer_EventHub(TestCombination combo) => SustainedRateCore(combo);
+
+    [Theory(Timeout = 600_000)]
+    [MemberData(nameof(TestMatrix.PostgreSqlRedpandaCombinations), MemberType = typeof(TestMatrix))]
+    public Task SustainedRate_PostgreSql_Redpanda(TestCombination combo) => SustainedRateCore(combo);
+
+    [Theory(Timeout = 600_000)]
+    [MemberData(nameof(TestMatrix.PostgreSqlEventHubCombinations), MemberType = typeof(TestMatrix))]
+    public Task SustainedRate_PostgreSql_EventHub(TestCombination combo) => SustainedRateCore(combo);
+
+    private async Task SustainedRateCore(TestCombination combo)
     {
         var targetRate = GetTargetRate(combo);
         var storeConnStr = combo.Store == StoreType.PostgreSql

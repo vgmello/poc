@@ -31,9 +31,23 @@ public class BulkThroughputTests
         _output = output;
     }
 
-    [Theory(Timeout = 600_000)] // 10 minute timeout per combination
-    [MemberData(nameof(TestMatrix.AllCombinations), MemberType = typeof(TestMatrix))]
-    public async Task BulkDrain(TestCombination combo)
+    [Theory(Timeout = 600_000)]
+    [MemberData(nameof(TestMatrix.SqlServerRedpandaCombinations), MemberType = typeof(TestMatrix))]
+    public Task BulkDrain_SqlServer_Redpanda(TestCombination combo) => BulkDrainCore(combo);
+
+    [Theory(Timeout = 600_000)]
+    [MemberData(nameof(TestMatrix.SqlServerEventHubCombinations), MemberType = typeof(TestMatrix))]
+    public Task BulkDrain_SqlServer_EventHub(TestCombination combo) => BulkDrainCore(combo);
+
+    [Theory(Timeout = 600_000)]
+    [MemberData(nameof(TestMatrix.PostgreSqlRedpandaCombinations), MemberType = typeof(TestMatrix))]
+    public Task BulkDrain_PostgreSql_Redpanda(TestCombination combo) => BulkDrainCore(combo);
+
+    [Theory(Timeout = 600_000)]
+    [MemberData(nameof(TestMatrix.PostgreSqlEventHubCombinations), MemberType = typeof(TestMatrix))]
+    public Task BulkDrain_PostgreSql_EventHub(TestCombination combo) => BulkDrainCore(combo);
+
+    private async Task BulkDrainCore(TestCombination combo)
     {
         var totalMessages = GetMessageCount(combo);
         var storeConnStr = combo.Store == StoreType.PostgreSql
