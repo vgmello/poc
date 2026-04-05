@@ -738,6 +738,165 @@ DELETE FROM dbo.OutboxDeadLetter WHERE DeadLetteredAtUtc < DATEADD(DAY, -30, SYS
 
 ---
 
+## SQL Server Index Maintenance
+
+The outbox's continuous DELETE workload generates SQL Server engine-level "ghost records" — rows marked for lazy background cleanup. Under normal load the built-in `ghost_cleanup` task keeps pace, but after prolonged broker outages or sustained high throughput, ghost records can accumulate and degrade poll performance.
+
+Maintenance scripts are located in `src/Outbox.SqlServer/db_scripts/maintenance/`. All scripts accept `@SchemaName` (default `dbo`) and `@TablePrefix` (default empty) parameters to match your `SqlServerStoreOptions` configuration.
+
+### When to Run Maintenance
+
+| Scenario | Action | Urgency |
+|----------|--------|---------|
+| Routine preventive | `check_ghost_records.sql` → `reorganize_indexes.sql` | Weekly |
+| Post broker outage (< 1 hour) | `check_ghost_records.sql` | After drain — usually no action needed |
+| Post broker outage (> 1 hour) | `check_ghost_records.sql` → `reorganize_indexes.sql` | After drain completes |
+| Post major outage (millions drained) | `check_ghost_records.sql` → `rebuild_indexes.sql` | After drain completes |
+| Table bloated, fully drained | `partition_switch_cleanup.sql` | Emergency |
+| `outbox.poll.duration` p99 rising, low pending count | `check_ghost_records.sql` to diagnose | Investigate immediately |
+
+See also [FS-12: Outbox Table Growing Unbounded](#fs-12-outbox-table-growing-unbounded) — ghost record accumulation is one root cause of sustained table bloat.
+
+### Monitoring Ghost Records
+
+**Run the diagnostic script:**
+
+```sql
+-- Adjust @SchemaName and @TablePrefix to match your configuration
+-- Requires VIEW DATABASE STATE permission
+:r check_ghost_records.sql
+```
+
+**Interpreting results:**
+
+| Recommendation | Meaning | Action |
+|----------------|---------|--------|
+| `OK` | Fragmentation < 10%, ghost records < 1,000 | No action needed |
+| `REORGANIZE` | Fragmentation 10-30% or ghost records 1,000-10,000 | Run `reorganize_indexes.sql` during business hours |
+| `REBUILD` | Fragmentation > 30% or ghost records > 10,000 | Run `rebuild_indexes.sql` (coordinate downtime on Standard edition) |
+| `INVESTIGATE` | Table is small (< 1,000 pages) but ghost count is elevated | Ghost records may clear on their own — re-check in 10 minutes |
+
+**Observable symptoms of ghost record accumulation:**
+
+- `outbox.poll.duration` p99 increasing while `outbox.messages.pending` is low or stable
+- `FetchBatchAsync` returns fewer rows than expected despite messages being available
+- `sys.dm_db_index_physical_stats` shows `ghost_record_count` significantly higher than `record_count`
+
+**Suggested alert rule:** If `outbox.poll.duration` p99 > 500ms AND `outbox.messages.pending` < 1,000 for > 5 minutes, run the ghost record check script.
+
+### Routine Maintenance: REORGANIZE
+
+**When:** Weekly preventive, or when the check script recommends `REORGANIZE`.
+
+**Impact:** Online operation. No blocking. Safe to run during active publishing with minimal CPU overhead.
+
+**Steps:**
+
+1. Run `check_ghost_records.sql` and review the output
+2. If any index shows `REORGANIZE` recommendation, run `reorganize_indexes.sql`:
+   ```sql
+   -- Set @IncludeDeadLetter = 1 if dead-letter table is also fragmented
+   :r reorganize_indexes.sql
+   ```
+3. Verify the "After Reorganize" output shows reduced fragmentation and ghost count
+4. Expected duration: seconds to low minutes depending on table size
+
+**Scheduling:** Create a SQL Agent job or Azure Elastic Job that runs `check_ghost_records.sql` followed by `reorganize_indexes.sql` weekly during a low-traffic window.
+
+### Deep Maintenance: REBUILD
+
+**When:** Monthly preventive, when fragmentation exceeds 30%, or after a major outage where millions of rows were drained.
+
+**Impact depends on SQL Server edition:**
+
+| Edition | Behavior | Publisher Impact |
+|---------|----------|-----------------|
+| Enterprise | `ONLINE = ON` — brief schema lock at start and end | Minimal — publishers continue operating |
+| Azure SQL Database | `ONLINE = ON` — same as Enterprise | Minimal |
+| Azure SQL Managed Instance | `ONLINE = ON` — same as Enterprise | Minimal |
+| Standard | `ONLINE = OFF` — **blocks all reads and writes** | **Publishers must be stopped or will timeout** |
+| Express | `ONLINE = OFF` — same as Standard | **Publishers must be stopped** |
+
+**Steps:**
+
+1. Run `check_ghost_records.sql` and confirm `REBUILD` recommendation
+2. **Standard/Express edition only:** Stop all publishers before proceeding
+   ```bash
+   kubectl scale deployment outbox-publisher --replicas=0
+   ```
+3. Run `rebuild_indexes.sql`:
+   ```sql
+   -- Adjust @MaxDop if needed (0 = system default)
+   -- Set @IncludeDeadLetter = 1 if dead-letter table also needs rebuild
+   :r rebuild_indexes.sql
+   ```
+4. Verify the "After Rebuild" output shows ~0% fragmentation and 0 ghost records
+5. **Standard/Express edition only:** Restart publishers
+   ```bash
+   kubectl scale deployment outbox-publisher --replicas=<desired>
+   ```
+6. Expected duration: minutes for typical table sizes (< 1M rows), longer for very large tables
+
+### Emergency: Partition Switch Cleanup
+
+**When:** The Outbox table is physically bloated (hundreds of MB or GB of allocated space) after draining millions of rows following a major outage. The table is empty but the physical pages are still allocated with ghost records.
+
+**Pre-conditions:**
+- Outbox table MUST contain 0 rows (fully drained)
+- All publishers SHOULD be stopped (no concurrent inserts during the switch)
+
+**Impact:** Instant metadata operation — no data movement, no ghost records, no transaction log bloat. But requires exclusive access to the table.
+
+**Steps:**
+
+1. Stop all publishers:
+   ```bash
+   kubectl scale deployment outbox-publisher --replicas=0
+   ```
+2. Verify the outbox table is empty:
+   ```sql
+   SELECT COUNT(*) FROM dbo.Outbox;
+   -- Must return 0
+   ```
+3. Run `partition_switch_cleanup.sql`:
+   ```sql
+   :r partition_switch_cleanup.sql
+   ```
+4. Verify the output shows space reclaimed and IDENTITY reseeded
+5. Restart publishers:
+   ```bash
+   kubectl scale deployment outbox-publisher --replicas=<desired>
+   ```
+
+**If the script aborts:** It will print an error message indicating rows still exist. Wait for the outbox to fully drain, or investigate why messages are stuck (see [FS-12](#fs-12-outbox-table-growing-unbounded)).
+
+### Permissions Required
+
+| Script | Permission | Scope |
+|--------|-----------|-------|
+| `check_ghost_records.sql` | `VIEW DATABASE STATE` | Database-level |
+| `reorganize_indexes.sql` | `ALTER` | On the Outbox table |
+| `rebuild_indexes.sql` | `ALTER` | On the Outbox table |
+| `partition_switch_cleanup.sql` | `ALTER`, `CREATE TABLE` | On the Outbox table + schema |
+
+**Minimum-privilege setup:**
+
+```sql
+-- Create a dedicated role for outbox maintenance
+CREATE ROLE outbox_maintenance;
+
+-- Grant required permissions
+GRANT VIEW DATABASE STATE TO outbox_maintenance;
+GRANT ALTER ON dbo.Outbox TO outbox_maintenance;
+GRANT ALTER ON dbo.OutboxDeadLetter TO outbox_maintenance;
+GRANT CREATE TABLE TO outbox_maintenance;
+
+-- Add the maintenance account to the role
+ALTER ROLE outbox_maintenance ADD MEMBER [your_maintenance_account];
+```
+
+---
+
 ## Monitoring & Alerting Recommendations
 
 ### Critical Alerts (Page On-Call)
