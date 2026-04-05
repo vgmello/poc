@@ -179,9 +179,9 @@ public sealed class PerformanceFixture : IAsyncLifetime
                         "Type": "EventHub",
                         "Name": "emulatorNs1",
                         "Entities": [
-                            { "Name": "perf-topic-0", "PartitionCount": "8", "ConsumerGroups": [] },
-                            { "Name": "perf-topic-1", "PartitionCount": "8", "ConsumerGroups": [] },
-                            { "Name": "perf-topic-2", "PartitionCount": "8", "ConsumerGroups": [] }
+                            { "Name": "perf-topic-0", "PartitionCount": "32", "ConsumerGroups": [] },
+                            { "Name": "perf-topic-1", "PartitionCount": "32", "ConsumerGroups": [] },
+                            { "Name": "perf-topic-2", "PartitionCount": "32", "ConsumerGroups": [] }
                         ]
                     }
                 ],

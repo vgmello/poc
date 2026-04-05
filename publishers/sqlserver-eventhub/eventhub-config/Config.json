@@ -7,7 +7,7 @@
                 "Entities": [
                     {
                         "Name": "orders",
-                        "PartitionCount": "8",
+                        "PartitionCount": "32",
                         "ConsumerGroups": []
                     }
                 ]
