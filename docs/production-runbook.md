@@ -205,16 +205,25 @@ The health check at `/health` reports three states:
 
 - Verify dead publisher's partitions were redistributed:
   ```sql
+  -- PostgreSQL
   SELECT * FROM outbox_partitions WHERE owner_publisher_id = '<dead-publisher-id>';
+  -- SQL Server
+  SELECT * FROM dbo.OutboxPartitions WHERE OwnerPublisherId = '<dead-publisher-id>';
   ```
 - Clean up dead publisher row:
   ```sql
+  -- PostgreSQL
   DELETE FROM outbox_publishers WHERE publisher_id = '<dead-publisher-id>';
+  -- SQL Server
+  DELETE FROM dbo.OutboxPublishers WHERE PublisherId = '<dead-publisher-id>';
   ```
 - Monitor for duplicate messages downstream
 - If multiple publishers die simultaneously, manually verify all 64 partitions are owned:
   ```sql
+  -- PostgreSQL
   SELECT COUNT(*) FROM outbox_partitions WHERE owner_publisher_id IS NULL;
+  -- SQL Server
+  SELECT COUNT(*) FROM dbo.OutboxPartitions WHERE OwnerPublisherId IS NULL;
   ```
 
 ---
@@ -406,18 +415,24 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 
 - Check partition ownership:
   ```sql
+  -- PostgreSQL
   SELECT partition_id, owner_publisher_id, grace_expires_utc FROM outbox_partitions ORDER BY partition_id;
+  -- SQL Server
+  SELECT PartitionId, OwnerPublisherId, GraceExpiresUtc FROM dbo.OutboxPartitions ORDER BY PartitionId;
   ```
 - Check for unowned partitions:
   ```sql
+  -- PostgreSQL
   SELECT COUNT(*) FROM outbox_partitions WHERE owner_publisher_id IS NULL;
+  -- SQL Server
+  SELECT COUNT(*) FROM dbo.OutboxPartitions WHERE OwnerPublisherId IS NULL;
   ```
 - Check for messages stuck on specific partitions:
   ```sql
   -- PostgreSQL
-  SELECT (hashtext(partition_key) & 2147483647) % 32 AS bucket, COUNT(*) FROM outbox GROUP BY bucket;
+  SELECT (hashtext(partition_key) & 2147483647) % 64 AS bucket, COUNT(*) FROM outbox GROUP BY bucket;
   -- SQL Server
-  SELECT ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 32 AS Bucket, COUNT(*) FROM dbo.Outbox GROUP BY ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 32;
+  SELECT PartitionId, COUNT(*) FROM dbo.Outbox GROUP BY PartitionId;
   ```
 - Force rebalance by restarting the publisher
 
@@ -446,9 +461,12 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 - Wait at least `RebalanceIntervalMs` (30s) between instance restarts
 - After deployment, verify partition distribution:
   ```sql
+  -- PostgreSQL
   SELECT owner_publisher_id, COUNT(*) FROM outbox_partitions GROUP BY owner_publisher_id;
+  -- SQL Server
+  SELECT OwnerPublisherId, COUNT(*) FROM dbo.OutboxPartitions GROUP BY OwnerPublisherId;
   ```
-- Expected: roughly equal partition counts per publisher (ceil(32 / N))
+- Expected: roughly equal partition counts per publisher (ceil(64 / N))
 
 ---
 
@@ -503,12 +521,17 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 
 - Investigate dead-lettered messages:
   ```sql
+  -- PostgreSQL
   SELECT event_type, last_error, COUNT(*) FROM outbox_dead_letter GROUP BY event_type, last_error;
+  -- SQL Server
+  SELECT EventType, LastError, COUNT(*) FROM dbo.OutboxDeadLetter GROUP BY EventType, LastError;
   ```
 - Fix root cause, then replay:
   ```sql
-  -- Find message IDs to replay
+  -- PostgreSQL
   SELECT sequence_number FROM outbox_dead_letter WHERE last_error LIKE '%specific error%';
+  -- SQL Server
+  SELECT SequenceNumber FROM dbo.OutboxDeadLetter WHERE LastError LIKE '%specific error%';
   ```
   ```csharp
   await deadLetterManager.ReplayAsync(sequenceNumbers, ct);
@@ -599,8 +622,8 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 **Symptoms:**
 
 - Health check: `Degraded` (loop restarts > 0), then `Unhealthy`
-- Log messages: "Outbox loop orchestration failed. Restart N/5"
-- Eventually: "Max consecutive restarts exceeded. Stopping host."
+- Log messages: "Restarting outbox loops in {Delay}s (attempt {Attempt}/{Max})"
+- Eventually: "Outbox loops have restarted {Count} consecutive times — stopping host"
 - `IHostApplicationLifetime.StopApplication()` called
 
 **What happens:**
@@ -616,8 +639,9 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 **When it CAN trigger:**
 
 - A bug in the publisher code itself (NullReferenceException, etc.)
-- An exception thrown from `IOutboxEventHandler` callback (user code)
 - `OutOfMemoryException` or `StackOverflowException`
+
+**Note:** `IOutboxEventHandler` callback exceptions cannot trigger this path — all handler calls are individually wrapped with `catch (Exception)` and logged as warnings without propagating.
 
 **Operator actions:**
 
@@ -911,7 +935,7 @@ ALTER ROLE outbox_maintenance ADD MEMBER [your_maintenance_account];
 | ------------------------ | ---------------------------------------------------------------------- | ----------------------------- |
 | Publisher Not Publishing | `outbox.messages.published` rate = 0 AND `outbox.messages.pending` > 0 | > 5 min                       |
 | Dead Letters Appearing   | `outbox.messages.dead_lettered` increment                              | Any (investigate immediately) |
-| Host Shutdown            | Log: "Max consecutive restarts exceeded"                               | Any occurrence                |
+| Host Shutdown            | Log: "Outbox loops have restarted {Count} consecutive times — stopping host" | Any occurrence                |
 | Outbox Table Depth       | `outbox.messages.pending`                                              | > 10,000 messages             |
 
 ### Warning Alerts (Investigate Next Business Day)

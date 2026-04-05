@@ -143,7 +143,7 @@ ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
 
 **No row locking:** The query uses no lock hints (`ROWLOCK`, `READPAST`, etc.). Partition ownership is the sole isolation mechanism — each publisher only fetches from its owned partitions, so there is no risk of two publishers reading the same rows. This avoids lock manager overhead, which is the dominant performance cost on SQL Server.
 
-**Precomputed partition hash:** The `PartitionId` column is a persisted computed column (`ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 128`). The hash is computed once at INSERT time, not on every SELECT. The index `IX_Outbox_Pending` leads with `PartitionId`, enabling an Index Seek instead of a full table scan.
+**Precomputed partition hash:** The `PartitionId` column is a persisted computed column (`ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 64`). The hash is computed once at INSERT time, not on every SELECT. The index `IX_Outbox_Pending` leads with `PartitionId`, enabling an Index Seek instead of a full table scan.
 
 **Version ceiling:** The `RowVersion < MIN_ACTIVE_ROWVERSION()` filter prevents the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order. Any concurrent write transaction in the database temporarily pauses processing of new inserts until it commits.
 

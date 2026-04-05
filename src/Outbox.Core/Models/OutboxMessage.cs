@@ -9,7 +9,7 @@ namespace Outbox.Core.Models;
 ///     <para>
 ///         <b>Ordering contract:</b> Messages sharing the same <see cref="PartitionKey" /> are
 ///         delivered to the broker in <see cref="EventDateTimeUtc" /> then <see cref="EventOrdinal" />
-///         order. This is enforced by the lease query's ORDER BY clause and the partition-affinity
+///         order. This is enforced by the FetchBatch query's ORDER BY clause and the partition-affinity
 ///         model (one publisher per logical partition at a time). Callers MUST set both fields
 ///         correctly at insert time to achieve causal ordering.
 ///     </para>

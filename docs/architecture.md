@@ -35,19 +35,17 @@ The publisher doesn't receive push notifications. It **polls** the database on a
 
 1. **Fetch a batch** — `FetchBatchAsync` selects up to `BatchSize` (default 100) messages from partitions owned by this publisher. This is a pure `SELECT`—no row locking or lease stamping. A version ceiling filter (`xmin` on PostgreSQL, `RowVersion` on SQL Server) withholds rows from in-flight write transactions to prevent out-of-order publishing.
 
-2. **Separate poison messages** — Messages with `retry_count >= MaxRetryCount` are immediately dead-lettered with `CancellationToken.None`.
+2. **Group by destination** — Messages are grouped by `(topic_name, partition_key)`. (Poison messages with `retry_count >= MaxRetryCount` are never returned by `FetchBatchAsync` — they are handled exclusively by the background dead-letter sweep loop.)
 
-3. **Group by destination** — Healthy messages are grouped by `(topic_name, partition_key)`.
+3. **Check circuit breaker** — If the circuit is open for a topic, the group is skipped without incrementing the retry count. Messages stay in the outbox and will be picked up when the circuit closes.
 
-4. **Check circuit breaker** — If the circuit is open for a topic, the group is skipped without incrementing the retry count. Messages stay in the outbox and will be picked up when the circuit closes.
+4. **Send to broker** — For each group, messages are sent via `IOutboxTransport.SendAsync`, ordered by `EventDateTimeUtc, EventOrdinal, SequenceNumber`.
 
-5. **Send to broker** — For each group, messages are sent via `IOutboxTransport.SendAsync`, ordered by `SequenceNumber`.
+5. **Delete on success** — Successfully sent messages are deleted from the outbox.
 
-6. **Delete on success** — Successfully sent messages are deleted from the outbox.
+6. **Increment retry on failure** — Failed messages have their `retry_count` incremented via `IncrementRetryCountAsync`.
 
-7. **Increment retry on failure** — Failed messages have their `retry_count` incremented via `IncrementRetryCountAsync`.
-
-8. **No safety net needed** — Partition ownership is the sole isolation mechanism. There are no leases to release on cancellation or crash.
+7. **No safety net needed** — Partition ownership is the sole isolation mechanism. There are no leases to release on cancellation or crash.
 
 ### Adaptive polling
 
@@ -71,13 +69,13 @@ A version ceiling filter ensures rows from in-flight write transactions aren't v
 
 ### 2. Batch-level ordering
 
-Before sending each group to the transport, the publish loop sorts by `SequenceNumber`:
+Before sending each group to the transport, the publish loop sorts by causal time with `SequenceNumber` as a tiebreaker:
 
 ```csharp
-var groupMessages = group.OrderBy(m => m.SequenceNumber).ToList();
+var groupMessages = group.OrderBy(m => m.EventDateTimeUtc).ThenBy(m => m.EventOrdinal).ThenBy(m => m.SequenceNumber).ToList();
 ```
 
-This guarantees monotonic ordering within each group.
+This guarantees causal ordering within each group, consistent with the store-level `FetchBatchAsync` ordering.
 
 ### 3. Partition ownership (single-writer guarantee)
 
@@ -186,7 +184,7 @@ Messages are distributed across logical partitions using a hash of the partition
 partition_id = hash(partition_key) % total_partitions
 ```
 
-PostgreSQL uses `hashtext()` (computed at query time) and SQL Server uses `CHECKSUM()` (precomputed as a persisted `PartitionId` column). Different functions, producing different mappings. PostgreSQL seeds 64 partitions by default; SQL Server seeds 128 (the modulus is baked into the computed column formula). Each group can have a different partition count, configured in the install script.
+PostgreSQL uses `hashtext()` (computed at query time) and SQL Server uses `CHECKSUM()` (precomputed as a persisted `PartitionId` column). Different functions, producing different mappings. Both providers seed 64 partitions by default (the modulus is baked into SQL Server's computed column formula). Each group can have a different partition count, configured in the install script.
 
 ### How ownership is distributed
 
@@ -249,10 +247,7 @@ Without the circuit breaker, a broker outage would burn through every message's 
 
 ## Dead-lettering
 
-Messages that exhaust their retry budget (`retry_count >= MaxRetryCount`) are moved to a `dead_letter` table. This happens in two ways:
-
-1. **Inline** — The publish loop detects a poison message during batch processing and calls `DeadLetterAsync`.
-2. **Background sweep** — The `DeadLetterSweepLoop` (every 60s) finds messages that a publisher failed to dead-letter (e.g., the publisher crashed after incrementing the retry count but before moving the message).
+Messages that exhaust their retry budget (`retry_count >= MaxRetryCount`) are moved to a `dead_letter` table by the **background dead-letter sweep loop** (every 60s). The `FetchBatchAsync` query filters `retry_count < MaxRetryCount`, so poison messages are never returned to the publish loop — they remain in the outbox until the sweep picks them up and moves them atomically.
 
 Dead-lettered messages can be replayed via `IDeadLetterManager.ReplayAsync`, which moves them back to the outbox with `retry_count` reset to 0.
 

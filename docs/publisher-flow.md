@@ -17,7 +17,7 @@ flowchart TB
 
         subgraph PUBLISH["Loop 1: Publish loop"]
             direction TB
-            P1["Poll store at adaptive interval\n(100ms → 30s backoff)"]
+            P1["Poll store at adaptive interval\n(100ms → 5s backoff)"]
             P1 --> P2["FetchBatchAsync"]
 
             subgraph FETCH["Message selection (FetchBatchAsync)"]
@@ -33,11 +33,7 @@ flowchart TB
             P2 --> FETCH
             FETCH --> P3{"Batch empty?"}
             P3 -->|Yes| P3B["Increase poll interval\n(adaptive backoff)"] --> P1
-            P3 -->|No| P4["Separate poison vs healthy messages"]
-
-            P4 --> P5{"Poison?\nretry >= Max"}
-            P5 -->|Yes| P6["DeadLetterAsync\n(CancellationToken.None)"]
-            P5 -->|No| P7["Group by (TopicName, PartitionKey)"]
+            P3 -->|No| P7["Group by (TopicName, PartitionKey)\n(poison messages already filtered\nby FetchBatch WHERE clause)"]
 
             P7 --> P8{"Circuit breaker\nopen for topic?"}
             P8 -->|Open| P9["Skip — messages stay\nin outbox"]
@@ -53,10 +49,9 @@ flowchart TB
             P14 --> P1
             P15 --> P1
             P9 --> P1
-            P6 --> P7
         end
 
-        subgraph HEARTBEAT["Loop 2: Heartbeat\n(every 30s)"]
+        subgraph HEARTBEAT["Loop 2: Heartbeat\n(every 10s)"]
             H1["Update last_heartbeat_utc\n+ clear grace_expires_utc\n(atomic transaction)"]
             H1 --> H2["Query pending count\n+ update metrics"]
             H2 --> H3{"3 consecutive\nerrors?"}
@@ -64,7 +59,7 @@ flowchart TB
             H3 -->|No| H1
         end
 
-        subgraph REBALANCE["Loop 3: Rebalance\n(every 60s)"]
+        subgraph REBALANCE["Loop 3: Rebalance\n(every 30s)"]
             direction TB
             R1["1. Mark stale partitions\nwith grace period"]
             R1 --> R2["2. Claim fair share\nCEIL(partitions / publishers)"]
@@ -72,11 +67,11 @@ flowchart TB
             R4["All 3 steps in single\ntransaction + SKIP LOCKED"]
         end
 
-        subgraph ORPHAN["Loop 4: Orphan sweep\n(every 120s)"]
+        subgraph ORPHAN["Loop 4: Orphan sweep\n(every 60s)"]
             O1["Claim partitions\nwith owner = NULL"]
         end
 
-        subgraph DLS["Loop 5: Dead-letter sweep\n(every 300s)"]
+        subgraph DLS["Loop 5: Dead-letter sweep\n(every 60s)"]
             D1["Find: retry >= Max"]
             D1 --> D2["Atomic DELETE from outbox\nINSERT into dead_letter"]
         end
@@ -131,15 +126,14 @@ Each publisher generates a unique publisher ID (`{PublisherName}-{GUID}`), regis
 Messages map to partitions via `hash(partition_key) % total_partitions`. Each partition is owned by exactly one publisher at a time—this is what enables parallel publishing without ordering conflicts.
 
 - **PostgreSQL:** `(hashtext(key) & 0x7FFFFFFF) % total_partitions`
-- **SQL Server:** `PartitionId` persisted computed column — `ABS(CAST(CHECKSUM(key) AS BIGINT)) % 128` (precomputed at INSERT time, used as index leading key)
+- **SQL Server:** `PartitionId` persisted computed column — `ABS(CAST(CHECKSUM(key) AS BIGINT)) % 64` (precomputed at INSERT time, used as index leading key)
 
 ### Publish loop
 
-1. **Poll** the store at an adaptive interval (100ms when busy, backs off to 30s when idle)
+1. **Poll** the store at an adaptive interval (100ms when busy, backs off to 5s when idle)
 2. **Fetch** a batch of messages—only from owned partitions, under max retry count, with version ceiling filter
-3. **Separate** poison messages (retry >= max) and dead-letter them immediately
-4. **Group** healthy messages by `(topic, partitionKey)`
-5. **Check circuit breaker**—if open, skip the group (messages stay in the outbox)
+3. **Group** messages by `(topic, partitionKey)` (poison messages with `retry_count >= MaxRetryCount` are already filtered out by the `FetchBatchAsync` WHERE clause — they are handled by the background dead-letter sweep)
+4. **Check circuit breaker**—if open, skip the group (messages stay in the outbox)
 6. **Apply interceptors** (modify headers, payload, event type)
 7. **Send** via transport with sub-batching
 8. **Finalize**—delete on success, increment retry count on failure
@@ -155,10 +149,10 @@ Messages map to partitions via `hash(partition_key) % total_partitions`. Each pa
 
 | Loop              | Interval | Purpose                                                                                          |
 | ----------------- | -------- | ------------------------------------------------------------------------------------------------ |
-| Heartbeat         | 30s      | Updates `last_heartbeat_utc`, clears grace periods. Cancels all loops after 3 consecutive errors |
-| Rebalance         | 60s      | Marks stale partitions, claims fair share, releases excess—all in one transaction                |
-| Orphan sweep      | 120s     | Claims partitions with no owner (recovery after crashes)                                         |
-| Dead-letter sweep | 300s     | Moves max-retry messages to the dead-letter table atomically                                     |
+| Heartbeat         | 10s      | Updates `last_heartbeat_utc`, clears grace periods. Cancels all loops after 3 consecutive errors |
+| Rebalance         | 30s      | Marks stale partitions, claims fair share, releases excess—all in one transaction                |
+| Orphan sweep      | 60s      | Claims partitions with no owner (recovery after crashes)                                         |
+| Dead-letter sweep | 60s      | Moves max-retry messages to the dead-letter table atomically                                     |
 
 ### Circuit breaker
 
@@ -200,7 +194,7 @@ A single index replaces the previous lease-based partial indexes. Since there ar
 
 ### outbox_dead_letter
 
-Archive for messages that exceeded `MaxRetryCount`. Messages arrive here via two paths: inline dead-lettering during the publish loop, or the background dead-letter sweep.
+Archive for messages that exceeded `MaxRetryCount`. Messages arrive here via the background dead-letter sweep loop, which atomically moves rows from the outbox to this table.
 
 | Column                 | Type (PG / SQL Server)             | Description                           |
 | ---------------------- | ---------------------------------- | ------------------------------------- |
@@ -240,7 +234,7 @@ On graceful shutdown, `UnregisterPublisherAsync` releases all owned partitions a
 
 ### outbox_partitions
 
-Partition ownership ledger. Maps logical partitions (0–31 by default) to active publishers for work distribution.
+Partition ownership ledger. Maps logical partitions (0–63 by default) to active publishers for work distribution.
 
 | Column               | Type (PG / SQL Server)            | Description                            |
 | -------------------- | --------------------------------- | -------------------------------------- |

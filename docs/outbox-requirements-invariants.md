@@ -14,7 +14,7 @@ This document captures the critical invariants, behavioral requirements, and arc
 
 ### Message ordering
 
-- **Within a (topic, partitionKey) group in a single batch:** messages MUST be sent to the broker in `SequenceNumber` order.
+- **Within a (topic, partitionKey) group in a single batch:** messages MUST be sent to the broker in `event_datetime_utc, event_ordinal, sequence_number` order.
 - **Across batches for the same partitionKey:** ordering is guaranteed by the SQL `ORDER BY event_datetime_utc, event_ordinal` in FetchBatch, combined with a version ceiling filter (`xmin < pg_snapshot_xmin(pg_current_snapshot())` on PostgreSQL, `RowVer < MIN_ACTIVE_ROWVERSION()` on SQL Server) that withholds freshly inserted rows when earlier write transactions are still in-flight. This prevents the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order. Trade-off: any concurrent write transaction in the database temporarily pauses processing of new inserts until it commits.
 - **Cross-partitionKey:** no ordering guarantee. This is by design.
 
