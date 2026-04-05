@@ -847,6 +847,12 @@ See also [FS-12: Outbox Table Growing Unbounded](#fs-12-outbox-table-growing-unb
 
 **Impact:** Instant metadata operation — no data movement, no ghost records, no transaction log bloat. But requires exclusive access to the table.
 
+**How it works:** SQL Server stores table data as collections of pages. `ALTER TABLE ... SWITCH TO` reassigns page ownership in the metadata catalog — no rows are copied. The script creates an empty staging table with an identical schema, switches the Outbox's pages to the staging table, then runs `TRUNCATE TABLE` on the staging table. Unlike `DELETE`, which marks each row as a ghost record for lazy background cleanup, `TRUNCATE` deallocates entire pages at the allocation unit level — no ghost records are created and space is reclaimed instantly. This is the key advantage: a `DELETE FROM` of millions of rows would generate millions of *new* ghost records, making the problem worse.
+
+**Typical scenario:** A broker outage lasting several hours causes millions of messages to accumulate. When the broker recovers, publishers drain the backlog, issuing millions of DELETEs. The ghost cleanup task (which processes a few thousand records per ~10-second cycle) cannot keep pace. The table ends up with 0 logical rows but potentially gigabytes of physical space occupied by ghost-filled pages. `IX_Outbox_Pending` scans must traverse these pages even though they contain no live rows, causing poll latency to spike. The partition switch eliminates this instantly.
+
+**When to use this vs REBUILD:** REORGANIZE or REBUILD handle most cases — use them when the table still has rows or when fragmentation is moderate. The partition switch is for when the table is fully drained, physically bloated, and you need it clean *now* without waiting for REBUILD to process every page.
+
 **Steps:**
 
 1. Stop all publishers:
