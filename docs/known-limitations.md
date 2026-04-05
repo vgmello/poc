@@ -124,3 +124,18 @@ Changing the partition count (the modulus in `hash(partition_key) % total_partit
 **PostgreSQL:** The modulus is computed at query time from the row count of `outbox_partitions`. Changing it requires only INSERT/DELETE on the partitions table (no schema change), but **all publishers must still be stopped** to prevent ordering corruption. The simpler schema change does not mean it's safe to do online.
 
 This asymmetry is intentional: SQL Server's precomputed column enables Index Seek (7ms poll latency) instead of the full table scan (130ms) that runtime hash computation would require. PostgreSQL's query optimizer handles the runtime hash efficiently (3-5ms), so the precomputed column is not needed.
+
+### SQL Server ghost records from continuous DELETE workload
+
+**Affected:** SQL Server store only (PostgreSQL's VACUUM handles this natively)
+
+The outbox pattern generates a continuous stream of DELETE operations as published messages are removed from the table. SQL Server does not immediately reclaim the physical space from deleted rows — instead it marks them as "ghost records" and relies on a background task (`ghost_cleanup`) to remove them asynchronously, typically within seconds.
+
+Under normal load (< 1,000 msg/sec per publisher) the ghost cleanup task easily keeps pace and no operator action is needed. However, ghost records can accumulate faster than cleanup in two scenarios:
+
+1. **Post-outage drain:** A prolonged broker outage (> 1 hour) causes millions of messages to accumulate in the outbox. When the broker recovers, the backlog drains rapidly — producing a burst of thousands of DELETEs per second that outpaces the ghost cleanup task.
+2. **Sustained high throughput:** At 10K+ msg/sec across multiple publishers, continuous high-volume deletes can gradually outpace cleanup between cycles.
+
+**Symptoms:** `IX_Outbox_Pending` bloats with ghost records and empty pages, causing `FetchBatchAsync` scans to slow down. Observable as increasing `outbox.poll.duration` p99 even when `outbox.messages.pending` is low.
+
+**Mitigation:** Maintenance scripts are provided in `src/Outbox.SqlServer/db_scripts/maintenance/`. See the "SQL Server Index Maintenance" section in `docs/production-runbook.md` for scheduling guidance and procedures.
