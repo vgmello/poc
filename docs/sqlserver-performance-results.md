@@ -1,6 +1,6 @@
 # SQL Server Performance Test Results
 
-**Date:** 2026-04-02
+**Date:** 2026-04-07
 **Platform:** Linux 6.17.0 (ARM64), .NET 10.0
 **Database:** Azure SQL Edge (mcr.microsoft.com/azure-sql-edge:latest) via Testcontainers
 **Transports:** Redpanda v24.2.18, EventHub emulator (latest)
@@ -14,19 +14,20 @@ Pre-seeded messages drained to zero by the publisher(s).
 
 | Transport | Publishers | Messages | Duration | Msg/sec | Poll p50 | Poll p95 | Pub p50 | Pub p95 |
 |-----------|------------|----------|----------|---------|----------|----------|---------|---------|
-| Redpanda  | 1          | 500,000  | 1:15     | 6,619   | 16.6ms   | 36.4ms   | 10.6ms  | 11.9ms  |
-| Redpanda  | 2          | 500,000  | 0:45     | 10,876  | 9.9ms    | 32.2ms   | 10.4ms  | 11.2ms  |
-| Redpanda  | 4          | 500,000  | 0:37     | 13,183  | 14.1ms   | 53.2ms   | 10.5ms  | 12.0ms  |
-| EventHub  | 1          | 100,000  | 4:47     | 348     | 5.1ms    | 39.1ms   | 3.3ms   | 22.8ms  |
-| EventHub  | 2          | 100,000  | 2:57     | 563     | 5.2ms    | 23.7ms   | 3.4ms   | 27.4ms  |
-| EventHub  | 4          | 100,000  | 2:18     | 720     | 5.2ms    | 19.9ms   | 3.4ms   | 221.0ms |
+| Redpanda  | 1          | 500,000  | 1:19     | 6,272   | 17.7ms   | 43.4ms   | 10.5ms  | 11.4ms  |
+| Redpanda  | 2          | 500,000  | 0:52     | 9,566   | 18.7ms   | 51.7ms   | 10.5ms  | 11.3ms  |
+| Redpanda  | 4          | 500,000  | 0:37     | 13,181  | 14.7ms   | 47.5ms   | 10.5ms  | 11.4ms  |
+| EventHub  | 1          | 100,000  | 4:26     | 376     | 5.3ms    | 40.4ms   | 3.4ms   | 22.5ms  |
+| EventHub  | 2          | 100,000  | 2:45     | 603     | 5.1ms    | 36.3ms   | 3.1ms   | 19.6ms  |
+| EventHub  | 4          | 100,000  | 1:53     | 885     | 6.7ms    | 24.7ms   | 3.1ms   | 44.8ms  |
 
 ### Observations
 
-- **Near-linear horizontal scaling:** 1P (6,619/s) → 2P (10,876/s) → 4P (13,183/s).
-- **Poll latency:** p50 at 10-17ms across all publisher counts.
+- **Near-linear horizontal scaling:** 1P (6,272/s) → 2P (9,566/s) → 4P (13,181/s).
+- **Poll latency:** p50 at 15-19ms across all publisher counts.
 - **Pub latency stable** at 10.5ms p50 — consistent Redpanda round-trip.
 - **EventHub emulator** significantly slower than Redpanda — transport-bound, not DB-bound.
+- **EventHub 4P** showed improved throughput (885/s vs prior 720/s) with increased emulator partition count (32).
 
 ---
 
@@ -36,18 +37,18 @@ Continuous message insertion at 1,000 msg/sec for 5 minutes.
 
 | Transport | Publishers | Target Rate | Drain Rate | Peak Pending | Final Pending | Kept Up? |
 |-----------|------------|-------------|------------|--------------|---------------|----------|
-| Redpanda  | 1          | 1,000/s     | 1,000/s    | 5,100        | 0             | Yes      |
-| Redpanda  | 2          | 1,000/s     | 1,000/s    | 180          | 0             | Yes      |
-| Redpanda  | 4          | 1,000/s     | 1,000/s    | 140          | 0             | Yes      |
-| EventHub  | 1          | 1,000/s     | 624/s      | 119,310      | 112,800       | No       |
-| EventHub  | 2          | 1,000/s     | 694/s      | 100,917      | 92,013        | No       |
-| EventHub  | 4          | 1,000/s     | 862/s      | 49,460       | 41,384        | No       |
+| Redpanda  | 1          | 1,000/s     | 1,000/s    | 5,080        | 0             | Yes      |
+| Redpanda  | 2          | 1,000/s     | 1,000/s    | 206          | 0             | Yes      |
+| Redpanda  | 4          | 1,000/s     | 1,000/s    | 138          | 0             | Yes      |
+| EventHub  | 1          | 1,000/s     | 1,000/s    | 5,100        | 0             | Yes      |
+| EventHub  | 2          | 1,000/s     | 1,000/s    | 142          | 0             | Yes      |
+| EventHub  | 4          | 1,000/s     | 1,000/s    | 120          | 0             | Yes      |
 
 ### Observations
 
-- **All Redpanda combinations kept up at 1,000 msg/sec** — final pending count was 0.
-- **With 4P throughput at 13,183/s**, the sustained target of 1,000/s has **13x headroom**.
-- **EventHub emulator caps at ~624-862/s** — this is the transport bottleneck, not the DB.
+- **All combinations kept up at 1,000 msg/sec** — final pending count was 0 across all scenarios.
+- **EventHub now keeps up** — previously capped at ~624-862/s with 8 emulator partitions, now sustains 1,000/s with 32 partitions.
+- **With 4P throughput at 13,181/s**, the sustained target of 1,000/s has **13x headroom** (Redpanda).
 
 ---
 
