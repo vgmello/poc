@@ -1,9 +1,9 @@
 # PostgreSQL Performance Test Results
 
-**Date:** 2026-04-01
+**Date:** 2026-04-07
 **Platform:** Linux 6.17.0 (ARM64), .NET 10.0
 **Database:** PostgreSQL 16 Alpine via Testcontainers
-**Transports:** Redpanda v24.2.18, EventHub emulator (latest)
+**Transports:** Redpanda v24.2.18, EventHub emulator (latest, 32 partitions)
 **Partitions:** 64, Publisher threads: 4
 
 ---
@@ -14,20 +14,20 @@ Pre-seeded messages drained to zero by the publisher(s).
 
 | Transport | Publishers | Messages  | Duration | Msg/sec | Poll p50 | Poll p95 | Pub p50 | Pub p95 |
 |-----------|------------|-----------|----------|---------|----------|----------|---------|---------|
-| Redpanda  | 1          | 1,000,000 | 4:51     | 3,433   | 4.5ms    | 13.8ms   | 10.2ms  | 20.3ms  |
-| Redpanda  | 2          | 1,000,000 | 2:49     | 5,899   | 12.1ms   | 154.2ms  | 10.2ms  | 21.8ms  |
-| Redpanda  | 4          | 1,000,000 | 2:00     | 8,297   | 19.8ms   | 438.2ms  | 10.4ms  | 47.0ms  |
-| EventHub  | 1          | 200,000   | 4:57     | 673     | 3.0ms    | 76.7ms   | 4.3ms   | 12.4ms  |
-| EventHub  | 2          | 200,000   | 3:34     | 934     | 16.5ms   | 121.1ms  | 4.3ms   | 12.5ms  |
-| EventHub  | 4          | 200,000   | 3:32     | 943     | 15.5ms   | 123.1ms  | 4.0ms   | 11.4ms  |
+| Redpanda  | 1          | 1,000,000 | 4:01     | 4,141   | 9.1ms    | 14.9ms   | 10.5ms  | 21.4ms  |
+| Redpanda  | 2          | 1,000,000 | 2:00     | 8,321   | 9.0ms    | 163.2ms  | 10.3ms  | 14.8ms  |
+| Redpanda  | 4          | 1,000,000 | 0:59     | 16,761  | 18.9ms   | 157.7ms  | 10.3ms  | 20.4ms  |
+| EventHub  | 1          | 200,000   | 3:10     | 1,052   | 2.1ms    | 37.9ms   | 2.8ms   | 6.4ms   |
+| EventHub  | 2          | 200,000   | 2:24     | 1,383   | 5.4ms    | 49.1ms   | 2.2ms   | 5.0ms   |
+| EventHub  | 4          | 200,000   | 2:34     | 1,292   | 29.2ms   | 96.5ms   | 2.7ms   | 6.9ms   |
 
 ### Observations
 
-- **Redpanda throughput scales near-linearly:** 1P (3,433/s) to 2P (5,899/s) to 4P (8,297/s) — 1.7x and 2.4x improvement respectively.
-- **Poll latency is excellent:** p50 of 3-20ms shows PostgreSQL's MVCC model handles the FetchBatch query efficiently with no lock contention.
-- **p95 poll latency increases with publishers** (13ms at 1P to 438ms at 4P) due to more concurrent queries and partition contention at higher parallelism.
-- **EventHub emulator is the bottleneck** for EventHub tests — capped around 673-943 msg/sec regardless of publisher count. Poll p50 is only 3ms, confirming the DB is not the limiting factor.
-- **EventHub 2P and 4P show minimal improvement** (934 vs 943 msg/sec) — the emulator's AMQP throughput caps out, so adding publishers doesn't help.
+- **Redpanda throughput scales near-linearly:** 1P (4,141/s) → 2P (8,321/s) → 4P (16,761/s) — 2.0x and 4.0x improvement respectively.
+- **Redpanda 4P at 16,761/s** — highest throughput across all store/transport combinations.
+- **Poll latency is excellent:** p50 of 9-19ms shows PostgreSQL's MVCC model handles the FetchBatch query efficiently with no lock contention.
+- **EventHub throughput improved** with 32 emulator partitions: 1P now reaches 1,052/s (up from 673/s with 8 partitions). 2P peaks at 1,383/s.
+- **EventHub 4P shows diminishing returns** (1,292/s vs 2P's 1,383/s) — emulator AMQP throughput saturates while poll latency increases.
 
 ---
 
@@ -37,19 +37,19 @@ Continuous message insertion at the target rate for 5 minutes.
 
 | Transport | Publishers | Target Rate | Drain Rate | Peak Pending | Final Pending | Kept Up? |
 |-----------|------------|-------------|------------|--------------|---------------|----------|
-| Redpanda  | 1          | 1,000/s     | 1,000/s    | 5,100        | 0             | Yes      |
-| Redpanda  | 2          | 1,000/s     | 1,000/s    | 176          | 0             | Yes      |
-| Redpanda  | 4          | 1,000/s     | 1,000/s    | 167          | 0             | Yes      |
-| EventHub  | 1          | 500/s       | 500/s      | 2,550        | 0             | Yes      |
-| EventHub  | 2          | 500/s       | 500/s      | 180          | 0             | Yes      |
-| EventHub  | 4          | 500/s       | 500/s      | 266          | 0             | Yes      |
+| Redpanda  | 1          | 1,000/s     | 1,000/s    | 5,000        | 0             | Yes      |
+| Redpanda  | 2          | 1,000/s     | 1,000/s    | 188          | 0             | Yes      |
+| Redpanda  | 4          | 1,000/s     | 1,000/s    | 140          | 0             | Yes      |
+| EventHub  | 1          | 500/s       | 500/s      | 2,500        | 0             | Yes      |
+| EventHub  | 2          | 500/s       | 500/s      | 100          | 0             | Yes      |
+| EventHub  | 4          | 500/s       | 500/s      | 138          | 0             | Yes      |
 
 ### Observations
 
 - **All combinations kept up** with their target ingestion rate — final pending count was 0 across the board.
-- **1P has a noticeable startup backlog:** 5,100 pending for Redpanda at 1K/s, 2,550 for EventHub at 500/s. This is the initial burst while the publisher starts up, rebalances, and begins draining.
-- **2P+ dramatically reduces cursor distance:** Peak pending drops from 5,100 to 176 (Redpanda) and from 2,550 to 180 (EventHub). Horizontal scaling is highly effective for keeping the pending backlog tight.
-- **Redpanda at 1K/sec is well within capacity.** Based on bulk throughput (8,297/s max at 4P), PostgreSQL+Redpanda could sustain ~5,000-6,000/s. The 1K/s target was chosen as a representative production workload.
+- **1P has a noticeable startup backlog:** 5,000 pending for Redpanda at 1K/s, 2,500 for EventHub at 500/s. This is the initial burst while the publisher starts up, rebalances, and begins draining.
+- **2P+ dramatically reduces cursor distance:** Peak pending drops from 5,000 to 188 (Redpanda) and from 2,500 to 100 (EventHub). Horizontal scaling is highly effective for keeping the pending backlog tight.
+- **Redpanda at 1K/sec is well within capacity.** Based on bulk throughput (16,761/s max at 4P), PostgreSQL+Redpanda has **16x headroom**.
 
 ---
 
@@ -57,10 +57,10 @@ Continuous message insertion at the target rate for 5 minutes.
 
 | Metric | PostgreSQL | SQL Server (Azure SQL Edge ARM) | Ratio |
 |--------|-----------|--------------------------------|-------|
-| Bulk throughput (1P, Redpanda) | 3,433 msg/s | 1,330 msg/s | 2.6x |
-| Bulk throughput (4P, Redpanda) | 8,297 msg/s | 1,758 msg/s | 4.7x |
-| Poll latency p50 (1P) | 4.5ms | 140.3ms | 31x faster |
-| Poll latency p95 (1P) | 13.8ms | 206.2ms | 15x faster |
-| Sustained peak pending (1P, Redpanda) | 5,100 | 510 | SQL Server lower (lower rate = lower backlog) |
+| Bulk throughput (1P, Redpanda) | 4,141 msg/s | 6,272 msg/s | 0.7x |
+| Bulk throughput (4P, Redpanda) | 16,761 msg/s | 13,181 msg/s | 1.3x |
+| Poll latency p50 (1P) | 9.1ms | 17.7ms | 1.9x faster |
+| Poll latency p95 (1P) | 14.9ms | 43.4ms | 2.9x faster |
+| EventHub bulk (1P) | 1,052 msg/s | 376 msg/s | 2.8x |
 
-PostgreSQL's MVCC model and `hashtext()` function result in significantly faster FetchBatch queries compared to SQL Server's `CHECKSUM()` and `MIN_ACTIVE_ROWVERSION()` on Azure SQL Edge ARM. The gap narrows on real SQL Server hardware with proper query plan caching and x86 optimizations.
+PostgreSQL shows stronger scaling at higher publisher counts (4P: 16,761 vs 13,181 msg/s) thanks to MVCC's lower lock contention. SQL Server edges ahead at 1P due to efficient single-connection query plan caching. Both stores comfortably exceed typical production workloads.
