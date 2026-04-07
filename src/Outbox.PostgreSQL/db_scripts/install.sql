@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS outbox_dead_letter
     topic_name           VARCHAR(256)   NOT NULL,
     partition_key        VARCHAR(256)   NOT NULL,
     event_type           VARCHAR(256)   NOT NULL,
-    headers              TEXT           NULL,
+    headers              VARCHAR(2000)  NULL,
     payload              BYTEA          NOT NULL,
     created_at_utc       TIMESTAMPTZ(3) NOT NULL,
     retry_count          INT            NOT NULL,

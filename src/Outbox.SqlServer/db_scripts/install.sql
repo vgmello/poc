@@ -45,7 +45,7 @@ BEGIN
         TopicName         NVARCHAR(256)         NOT NULL,
         PartitionKey      NVARCHAR(256)         NOT NULL,
         EventType         NVARCHAR(256)         NOT NULL,
-        Headers           NVARCHAR(MAX)         NULL,
+        Headers           NVARCHAR(2000)        NULL,
         Payload           VARBINARY(MAX)        NOT NULL,
         CreatedAtUtc      DATETIME2(3)          NOT NULL,
         RetryCount        INT                   NOT NULL,
