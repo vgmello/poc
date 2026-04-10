@@ -75,7 +75,7 @@ public class KafkaTransportInterceptorTests
             .Do(ci =>
             {
                 var ctx = ci.Arg<TransportMessageContext<Message<string, byte[]>>>();
-                ctx.Message.Headers.Add("X-Custom", Encoding.UTF8.GetBytes("custom-value"));
+                ctx.Envelope.Headers.Add("X-Custom", Encoding.UTF8.GetBytes("custom-value"));
             });
 
         Message<string, byte[]>? capturedMessage = null;

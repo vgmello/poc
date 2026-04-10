@@ -6,6 +6,12 @@ namespace Outbox.Core.Abstractions;
 
 public interface IOutboxStore
 {
+    /// <summary>
+    ///     Stable identity for this publisher instance, generated when the store is constructed.
+    ///     Available for logging and correlation before <see cref="RegisterPublisherAsync" /> completes.
+    /// </summary>
+    string PublisherId { get; }
+
     Task<string> RegisterPublisherAsync(CancellationToken ct);
     Task UnregisterPublisherAsync(string publisherId, CancellationToken ct);
 

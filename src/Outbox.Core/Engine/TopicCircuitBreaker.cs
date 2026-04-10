@@ -8,13 +8,13 @@ namespace Outbox.Core.Engine;
 internal sealed class TopicCircuitBreaker
 {
     private readonly int _failureThreshold;
-    private readonly int _openDurationSeconds;
+    private readonly long _openDurationMs;
     private readonly ConcurrentDictionary<string, CircuitEntry> _circuits = new();
 
     public TopicCircuitBreaker(int failureThreshold, int openDurationSeconds)
     {
         _failureThreshold = failureThreshold;
-        _openDurationSeconds = openDurationSeconds;
+        _openDurationMs = openDurationSeconds * 1000L;
     }
 
     public bool IsOpen(string topicName)
@@ -25,7 +25,7 @@ internal sealed class TopicCircuitBreaker
         lock (entry.Lock)
         {
             if (entry.State == CircuitState.Open &&
-                DateTimeOffset.UtcNow >= entry.OpenedAtUtc.AddSeconds(_openDurationSeconds))
+                Environment.TickCount64 - entry.OpenedAtTicks >= _openDurationMs)
             {
                 entry.State = CircuitState.HalfOpen;
 
@@ -44,7 +44,7 @@ internal sealed class TopicCircuitBreaker
         lock (entry.Lock)
         {
             if (entry.State == CircuitState.Open &&
-                DateTimeOffset.UtcNow >= entry.OpenedAtUtc.AddSeconds(_openDurationSeconds))
+                Environment.TickCount64 - entry.OpenedAtTicks >= _openDurationMs)
             {
                 entry.State = CircuitState.HalfOpen;
             }
@@ -62,10 +62,15 @@ internal sealed class TopicCircuitBreaker
         {
             entry.FailureCount++;
 
-            if (entry.FailureCount >= _failureThreshold && entry.State != CircuitState.Open)
+            // Any failure in HalfOpen immediately re-opens the circuit (standard pattern).
+            // Otherwise, open once the failure count reaches the threshold.
+            var shouldOpen = entry.State == CircuitState.HalfOpen ||
+                             (entry.FailureCount >= _failureThreshold && entry.State != CircuitState.Open);
+
+            if (shouldOpen)
             {
                 entry.State = CircuitState.Open;
-                entry.OpenedAtUtc = DateTimeOffset.UtcNow;
+                entry.OpenedAtTicks = Environment.TickCount64;
 
                 return (true, CircuitState.Open);
             }
@@ -95,6 +100,6 @@ internal sealed class TopicCircuitBreaker
         public readonly object Lock = new();
         public int FailureCount;
         public CircuitState State = CircuitState.Closed;
-        public DateTimeOffset OpenedAtUtc;
+        public long OpenedAtTicks;
     }
 }

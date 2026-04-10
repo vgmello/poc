@@ -51,6 +51,7 @@ internal sealed class TestOutboxServiceFactory : IDisposable
         OptionsMonitor.Get(Arg.Any<string>()).Returns(Options);
 
         Store.GetTotalPartitionsAsync(Arg.Any<CancellationToken>()).Returns(64);
+        Store.PublisherId.Returns("test-publisher");
     }
 
     public OutboxPublisherService CreateService(

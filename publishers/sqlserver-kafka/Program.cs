@@ -5,7 +5,7 @@ using Outbox.SqlServer;
 
 var builder = WebApplication.CreateSlimBuilder(args);
 
-builder.Services.AddOutbox(builder.Configuration, outbox =>
+builder.AddOutbox(outbox =>
 {
     outbox.UseSqlServer();
     outbox.UseKafka();

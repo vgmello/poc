@@ -75,36 +75,9 @@ internal sealed class OutboxPublisherService : BackgroundService
             opts.CircuitBreakerFailureThreshold,
             opts.CircuitBreakerOpenDurationSeconds);
 
-        string publisherId = null!;
-        var attempt = 0;
+        var publisherId = await RegisterPublisherWithRetryAsync(stoppingToken);
 
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            attempt++;
-
-            try
-            {
-                publisherId = await _store.RegisterPublisherAsync(stoppingToken);
-
-                break;
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                var delay = TimeSpan.FromSeconds(Math.Min(2 * Math.Pow(2, attempt - 1), 60));
-                _logger.LogError(ex,
-                    "Failed to register outbox publisher (attempt {Attempt}), retrying in {Delay:F0}s",
-                    attempt, delay.TotalSeconds);
-
-                try { await Task.Delay(delay, stoppingToken); }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
-            }
-        }
-
-        if (stoppingToken.IsCancellationRequested)
+        if (publisherId is null)
             return;
 
         _logger.LogInformation("Outbox publisher registered as publisher {PublisherId}", publisherId);
@@ -163,25 +136,18 @@ internal sealed class OutboxPublisherService : BackgroundService
                 // A loop exited — cancel the others.
                 await linkedCts.CancelAsync();
 
-                // Wait for all to finish cleanup (ignore cancellation exceptions).
-                // Note: await unwraps AggregateException, so we only see the first inner exception.
-                try { await Task.WhenAll(tasks); }
-                catch (OperationCanceledException)
-                {
-                    /* expected — we just cancelled them */
-                }
+                // Wait for all to finish cleanup. This helper inspects every task
+                // individually so non-cancellation faults aren't swallowed when a
+                // concurrent OperationCanceledException is unwrapped first.
+                await AwaitAllSuppressingCancellationAsync(tasks);
 
                 // If the host is stopping, exit cleanly.
                 if (stoppingToken.IsCancellationRequested)
                     return;
 
-                // A loop exited unexpectedly. Check if it faulted.
-                if (completed.IsFaulted)
-                {
-                    _logger.LogError(completed.Exception!.InnerException,
-                        "Outbox loop crashed unexpectedly, will attempt restart");
-                }
-                else
+                // Faults were already logged by the helper; only log here when the
+                // first completed loop exited cleanly without error.
+                if (!completed.IsFaulted)
                 {
                     _logger.LogWarning("Outbox loop exited unexpectedly without error, will attempt restart");
                 }
@@ -484,43 +450,11 @@ internal sealed class OutboxPublisherService : BackgroundService
                         pex.FailedSequenceNumbers.Count);
                 }
 
-                // Record failure for circuit breaker (the send did partially fail)
-                var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
-
-                if (stateChanged)
-                {
-                    _healthState.SetCircuitOpen(topicName);
-                    _instrumentation.CircuitBreakerStateChanges.Add(1);
-                }
-
                 var failedMessages = groupMessages
                     .Where(m => pex.FailedSequenceNumbers.Contains(m.SequenceNumber))
                     .ToList();
 
-                try
-                {
-                    await _eventHandler.OnPublishFailedAsync(failedMessages, pex, ct);
-                }
-                catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                {
-                    _logger.LogWarning(handlerEx,
-                        "OnPublishFailedAsync handler threw after partial send for topic {Topic} — " +
-                        "message fates are already finalized, continuing", topicName);
-                }
-
-                if (stateChanged)
-                {
-                    try
-                    {
-                        await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
-                    }
-                    catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                    {
-                        _logger.LogWarning(handlerEx,
-                            "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
-                            "circuit state is already updated, continuing", topicName);
-                    }
-                }
+                await HandlePublishFailureAsync(topicName, failedMessages, pex, circuitBreaker, ct);
             }
             catch (Exception ex)
             {
@@ -541,43 +475,127 @@ internal sealed class OutboxPublisherService : BackgroundService
                         sequenceNumbers.Count);
                 }
 
-                var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
-
-                // Update health state before event handler to avoid skipping on handler exception.
-                if (stateChanged)
-                {
-                    _healthState.SetCircuitOpen(topicName);
-                    _instrumentation.CircuitBreakerStateChanges.Add(1);
-                }
-
-                try
-                {
-                    await _eventHandler.OnPublishFailedAsync(groupMessages, ex, ct);
-                }
-                catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                {
-                    _logger.LogWarning(handlerEx,
-                        "OnPublishFailedAsync handler threw after transport failure for topic {Topic} — " +
-                        "message fates are already finalized, continuing", topicName);
-                }
-
-                if (stateChanged)
-                {
-                    try
-                    {
-                        await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
-                    }
-                    catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                    {
-                        _logger.LogWarning(handlerEx,
-                            "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
-                            "circuit state is already updated, continuing", topicName);
-                    }
-                }
+                await HandlePublishFailureAsync(topicName, groupMessages, ex, circuitBreaker, ct);
             }
         }
 
         return publishedAny;
+    }
+
+    /// <summary>
+    ///     Records a publish failure against the circuit breaker, updates health state,
+    ///     and invokes the corresponding event handlers. Used from both the partial-send
+    ///     and general-exception paths in <see cref="ProcessGroupsAsync" />.
+    /// </summary>
+    private async Task HandlePublishFailureAsync(
+        string topicName,
+        IReadOnlyList<OutboxMessage> failedMessages,
+        Exception exception,
+        TopicCircuitBreaker circuitBreaker,
+        CancellationToken ct)
+    {
+        var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
+
+        // Update health state before event handler to avoid skipping on handler exception.
+        if (stateChanged)
+        {
+            _healthState.SetCircuitOpen(topicName);
+            _instrumentation.CircuitBreakerStateChanges.Add(1);
+        }
+
+        try
+        {
+            await _eventHandler.OnPublishFailedAsync(failedMessages, exception, ct);
+        }
+        catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+        {
+            _logger.LogWarning(handlerEx,
+                "OnPublishFailedAsync handler threw for topic {Topic} — " +
+                "message fates are already finalized, continuing", topicName);
+        }
+
+        if (stateChanged)
+        {
+            try
+            {
+                await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
+            }
+            catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+            {
+                _logger.LogWarning(handlerEx,
+                    "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
+                    "circuit state is already updated, continuing", topicName);
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Registers the publisher with the store, retrying with exponential backoff on transient
+    ///     failures. Returns the assigned publisher id, or <c>null</c> if cancellation was requested
+    ///     before registration succeeded.
+    /// </summary>
+    private async Task<string?> RegisterPublisherWithRetryAsync(CancellationToken stoppingToken)
+    {
+        var attempt = 0;
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            attempt++;
+
+            try
+            {
+                return await _store.RegisterPublisherAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return null;
+            }
+            catch (Exception ex)
+            {
+                var delay = TimeSpan.FromSeconds(Math.Min(2 * Math.Pow(2, attempt - 1), 60));
+                _logger.LogError(ex,
+                    "Failed to register outbox publisher {PublisherId} (attempt {Attempt}), retrying in {Delay:F0}s",
+                    _store.PublisherId, attempt, delay.TotalSeconds);
+
+                try { await Task.Delay(delay, stoppingToken); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return null; }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    ///     Awaits all provided tasks, suppressing <see cref="OperationCanceledException" /> from
+    ///     any of them (expected when we cancel during shutdown/restart) while still logging any
+    ///     non-cancellation faults from every task. This avoids the pitfall where
+    ///     <c>await Task.WhenAll</c> unwraps only the first inner exception and silently drops
+    ///     concurrent real faults that occurred alongside a cancellation.
+    /// </summary>
+    private async Task AwaitAllSuppressingCancellationAsync(Task[] tasks)
+    {
+        try
+        {
+            await Task.WhenAll(tasks);
+        }
+        catch
+        {
+            // Swallow — we inspect every task below to surface all faults.
+        }
+
+        foreach (var task in tasks)
+        {
+            if (!task.IsFaulted || task.Exception is null)
+                continue;
+
+            foreach (var ex in task.Exception.InnerExceptions)
+            {
+                if (ex is OperationCanceledException)
+                    continue;
+
+                _logger.LogError(ex, "Outbox loop task faulted");
+            }
+        }
     }
 
     private async Task HeartbeatLoopAsync(string publisherId, CancellationToken ct)

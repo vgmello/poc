@@ -125,7 +125,7 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
 
                 if (transportCtx is not null)
                 {
-                    kafkaMessage = transportCtx.Message;
+                    kafkaMessage = transportCtx.Envelope;
                 }
             }
 

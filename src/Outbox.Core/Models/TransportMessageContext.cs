@@ -4,23 +4,26 @@ namespace Outbox.Core.Models;
 
 /// <summary>
 ///     Mutable context wrapping a transport-specific message envelope.
-///     Passed to <see cref="Abstractions.ITransportMessageInterceptor{TMessage}" />.
+///     Passed to <see cref="Abstractions.ITransportMessageInterceptor{TEnvelope}" />.
 /// </summary>
-public sealed class TransportMessageContext<TMessage>
+public sealed class TransportMessageContext<TEnvelope> where TEnvelope : class
 {
     /// <summary>
-    ///     The source outbox message (post-core-interception).
+    ///     The original outbox message (post-core-interception).
     /// </summary>
-    public OutboxMessage SourceMessage { get; }
+    public OutboxMessage OriginalMessage { get; }
 
     /// <summary>
     ///     The transport-specific envelope. Interceptors may replace or mutate this.
     /// </summary>
-    public TMessage Message { get; set; }
+    public TEnvelope Envelope { get; set; }
 
-    public TransportMessageContext(OutboxMessage sourceMessage, TMessage message)
+    public TransportMessageContext(OutboxMessage originalMessage, TEnvelope envelope)
     {
-        SourceMessage = sourceMessage;
-        Message = message;
+        ArgumentNullException.ThrowIfNull(originalMessage);
+        ArgumentNullException.ThrowIfNull(envelope);
+
+        OriginalMessage = originalMessage;
+        Envelope = envelope;
     }
 }

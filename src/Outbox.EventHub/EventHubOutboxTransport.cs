@@ -77,7 +77,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
 
                     if (transportCtx is not null)
                     {
-                        eventData = transportCtx.Message;
+                        eventData = transportCtx.Envelope;
                     }
                 }
 

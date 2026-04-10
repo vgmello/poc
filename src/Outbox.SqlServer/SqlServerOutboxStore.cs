@@ -20,6 +20,9 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     private readonly SqlServerQueries _queries;
 
     private readonly string _optionsName;
+
+    public string PublisherId { get; }
+
     public SqlServerOutboxStore(
         IServiceProvider serviceProvider,
         IOptionsMonitor<SqlServerStoreOptions> optionsMonitor,
@@ -35,6 +38,11 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             _options.GetSharedSchemaName(), _options.GetOutboxTableName());
 
         DapperConfiguration.EnsureInitialized();
+
+        var publisherName = _publisherOptions.Get(_optionsName).PublisherName;
+        PublisherId = _options.GroupName is not null
+            ? $"{_options.GroupName}-{publisherName}-{Guid.NewGuid():N}"
+            : $"{publisherName}-{Guid.NewGuid():N}";
     }
 
     // -------------------------------------------------------------------------
@@ -43,16 +51,12 @@ public sealed class SqlServerOutboxStore : IOutboxStore
 
     public async Task<string> RegisterPublisherAsync(CancellationToken ct)
     {
-        var opts = _publisherOptions.Get(_optionsName);
-        var publisherId = _options.GroupName is not null
-            ? $"{_options.GroupName}-{opts.PublisherName}-{Guid.NewGuid():N}"
-            : $"{opts.PublisherName}-{Guid.NewGuid():N}";
         var hostName = Environment.MachineName;
 
         await _db.ExecuteAsync(_queries.RegisterPublisher,
-            new { PublisherId = publisherId, HostName = hostName, OutboxTableName = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
+            new { PublisherId, HostName = hostName, OutboxTableName = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
 
-        return publisherId;
+        return PublisherId;
     }
 
     public async Task UnregisterPublisherAsync(string publisherId, CancellationToken ct)
@@ -77,7 +81,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         string publisherId, int batchSize,
         int maxRetryCount, CancellationToken ct)
     {
-        var rows = await _db.QueryAsync<OutboxMessage>(_queries.FetchBatch,
+        var rows = await _db.QueryAsync<FetchBatchOutputRow>(_queries.FetchBatch,
             new
             {
                 BatchSize = batchSize,
@@ -86,7 +90,12 @@ public sealed class SqlServerOutboxStore : IOutboxStore
                 OutboxTableName = _options.GetOutboxTableName()
             }, ct).ConfigureAwait(false);
 
-        return rows.AsList();
+        var list = rows.AsList();
+        var result = new List<OutboxMessage>(list.Count);
+        for (var i = 0; i < list.Count; i++)
+            result.Add(list[i].ToDomain());
+
+        return result;
     }
 
     // -------------------------------------------------------------------------

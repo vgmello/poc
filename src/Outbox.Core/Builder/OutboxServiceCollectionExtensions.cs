@@ -16,6 +16,25 @@ namespace Outbox.Core.Builder;
 
 public static class OutboxServiceCollectionExtensions
 {
+    /// <summary>
+    ///     Registers the outbox publisher with the application's host builder. Preferred
+    ///     entry point on .NET 8+ hosts — reads <see cref="IConfiguration" /> directly from
+    ///     the builder so callers don't have to pass it explicitly.
+    /// </summary>
+    public static IOutboxBuilder AddOutbox(
+        this IHostApplicationBuilder builder,
+        Action<IOutboxBuilder> configure) =>
+        builder.Services.AddOutbox(builder.Configuration, configure);
+
+    /// <summary>
+    ///     Registers a named outbox publisher group with the application's host builder.
+    /// </summary>
+    public static IOutboxBuilder AddOutbox(
+        this IHostApplicationBuilder builder,
+        string groupName,
+        Action<IOutboxBuilder> configure) =>
+        builder.Services.AddOutbox(groupName, builder.Configuration, configure);
+
     public static IOutboxBuilder AddOutbox(
         this IServiceCollection services,
         IConfiguration configuration,

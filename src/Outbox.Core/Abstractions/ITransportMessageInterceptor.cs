@@ -8,7 +8,7 @@ namespace Outbox.Core.Abstractions;
 ///     Intercepts transport-specific message envelopes before they are sent to the broker.
 ///     Each transport package closes the generic with its envelope type.
 /// </summary>
-public interface ITransportMessageInterceptor<TMessage>
+public interface ITransportMessageInterceptor<TEnvelope> where TEnvelope : class
 {
     /// <summary>
     ///     Determines whether this interceptor should run for the given message.
@@ -21,5 +21,5 @@ public interface ITransportMessageInterceptor<TMessage>
     ///     Return <see cref="ValueTask" /> to allow synchronous interceptors to complete without
     ///     allocating a state machine.
     /// </summary>
-    ValueTask InterceptAsync(TransportMessageContext<TMessage> context, CancellationToken ct);
+    ValueTask InterceptAsync(TransportMessageContext<TEnvelope> context, CancellationToken ct);
 }

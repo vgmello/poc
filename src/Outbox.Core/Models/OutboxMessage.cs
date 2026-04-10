@@ -38,8 +38,4 @@ public sealed record OutboxMessage(
     DateTimeOffset EventDateTimeUtc,
     int EventOrdinal,
     int RetryCount,
-    DateTimeOffset CreatedAtUtc)
-{
-    /// <summary>Parameterless constructor for Dapper property-based materialization.</summary>
-    public OutboxMessage() : this(0, "", "", "", null, [], "", default, 0, 0, default) { }
-}
+    DateTimeOffset CreatedAtUtc);

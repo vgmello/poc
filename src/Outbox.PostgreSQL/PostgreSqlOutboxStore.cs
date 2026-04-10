@@ -21,6 +21,8 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     private int _cachedPartitionCount;
     private long _partitionCountRefreshedAtTicks;
 
+    public string PublisherId { get; }
+
     public PostgreSqlOutboxStore(
         IServiceProvider serviceProvider,
         IOptionsMonitor<PostgreSqlStoreOptions> optionsMonitor,
@@ -35,6 +37,11 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
             _options.SchemaName, _options.TablePrefix,
             _options.GetSharedSchemaName(), _options.GetOutboxTableName());
         DapperConfiguration.EnsureInitialized();
+
+        var publisherName = _publisherOptions.Get(_optionsName).PublisherName;
+        PublisherId = _options.GroupName is not null
+            ? $"{_options.GroupName}-{publisherName}-{Guid.NewGuid():N}"
+            : $"{publisherName}-{Guid.NewGuid():N}";
     }
 
     // -------------------------------------------------------------------------
@@ -43,16 +50,12 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
 
     public async Task<string> RegisterPublisherAsync(CancellationToken ct)
     {
-        var opts = _publisherOptions.Get(_optionsName);
-        var publisherId = _options.GroupName is not null
-            ? $"{_options.GroupName}-{opts.PublisherName}-{Guid.NewGuid():N}"
-            : $"{opts.PublisherName}-{Guid.NewGuid():N}";
         var hostName = Environment.MachineName;
 
         await _db.ExecuteAsync(_queries.RegisterPublisher,
-            new { publisher_id = publisherId, host_name = hostName, outbox_table_name = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
+            new { publisher_id = PublisherId, host_name = hostName, outbox_table_name = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
 
-        return publisherId;
+        return PublisherId;
     }
 
     public async Task UnregisterPublisherAsync(string publisherId, CancellationToken ct)
@@ -82,7 +85,7 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
         if (totalPartitions == 0)
             return Array.Empty<OutboxMessage>();
 
-        var rows = await _db.QueryAsync<OutboxMessage>(_queries.FetchBatch,
+        var rows = await _db.QueryAsync<FetchBatchOutputRow>(_queries.FetchBatch,
             new
             {
                 batch_size = batchSize,
@@ -92,7 +95,12 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
                 outbox_table_name = _options.GetOutboxTableName()
             }, ct).ConfigureAwait(false);
 
-        return rows.AsList();
+        var list = rows.AsList();
+        var result = new List<OutboxMessage>(list.Count);
+        for (var i = 0; i < list.Count; i++)
+            result.Add(list[i].ToDomain());
+
+        return result;
     }
 
     public async Task DeletePublishedAsync(
