@@ -126,8 +126,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                     PublishLoopAsync(publisherId, circuitBreaker, ct),
                     HeartbeatLoopAsync(publisherId, ct),
                     RebalanceLoopAsync(publisherId, ct),
-                    OrphanSweepLoopAsync(publisherId, ct),
-                    DeadLetterSweepLoopAsync(publisherId, ct)
+                    OrphanSweepLoopAsync(publisherId, ct)
                 };
 
                 // Wait for the first task to complete (success or failure).
@@ -216,8 +215,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                 var pollSw = Stopwatch.StartNew();
 
                 var batch = await _store.FetchBatchAsync(
-                    publisherId, opts.BatchSize,
-                    opts.MaxRetryCount, ct);
+                    publisherId, opts.BatchSize, ct);
 
                 pollSw.Stop();
                 _instrumentation.PollDuration.Record(pollSw.Elapsed.TotalMilliseconds);
@@ -335,13 +333,52 @@ internal sealed class OutboxPublisherService : BackgroundService
         {
             var topicName = group.Key.TopicName;
             var partitionKey = group.Key.PartitionKey;
-            var groupMessages = group.OrderBy(m => m.EventDateTimeUtc).ThenBy(m => m.EventOrdinal).ThenBy(m => m.SequenceNumber).ToList();
-            var sequenceNumbers = groupMessages.Select(m => m.SequenceNumber).ToList();
 
+            var groupResult = await ProcessGroupWithRetriesAsync(
+                topicName, partitionKey, group.ToList(), circuitBreaker, ct);
+
+            if (groupResult)
+                publishedAny = true;
+        }
+
+        return publishedAny;
+    }
+
+    /// <summary>
+    ///     Processes one (topic, partitionKey) group with the in-batch retry loop.
+    ///     Returns <c>true</c> if at least one message in the group reached the broker
+    ///     (full or partial success), <c>false</c> otherwise.
+    /// </summary>
+    private async Task<bool> ProcessGroupWithRetriesAsync(
+        string topicName,
+        string partitionKey,
+        List<OutboxMessage> initialGroup,
+        TopicCircuitBreaker circuitBreaker,
+        CancellationToken ct)
+    {
+        var opts = GetOptions();
+        var maxAttempts = opts.MaxPublishAttempts;
+        var attempt = 0;
+        var publishedAny = false;
+        Exception? lastError = null;
+
+        var remaining = initialGroup
+            .OrderBy(m => m.EventDateTimeUtc)
+            .ThenBy(m => m.EventOrdinal)
+            .ThenBy(m => m.SequenceNumber)
+            .ToList();
+
+        while (attempt < maxAttempts && !ct.IsCancellationRequested && remaining.Count > 0)
+        {
             if (circuitBreaker.IsOpen(topicName))
             {
-                // Circuit open — skip without incrementing retry count.
-                continue;
+                // Outage in progress — leave remaining messages in the outbox.
+                _instrumentation.PublishFailures.Add(1);
+                await NotifyPublishFailedAsync(
+                    topicName, remaining,
+                    lastError ?? new InvalidOperationException("Circuit breaker open"),
+                    PublishFailureReason.CircuitOpened, ct);
+                return publishedAny;
             }
 
             try
@@ -350,182 +387,284 @@ internal sealed class OutboxPublisherService : BackgroundService
 
                 using var activity = _instrumentation.ActivitySource.StartActivity("outbox.publish");
                 activity?.SetTag("messaging.destination.name", topicName);
-                activity?.SetTag("messaging.batch.message_count", groupMessages.Count);
+                activity?.SetTag("messaging.batch.message_count", remaining.Count);
 
-                var effectiveMessages = await ApplyInterceptorsAsync(groupMessages, ct);
+                var effectiveMessages = await ApplyInterceptorsAsync(remaining, ct);
                 await _transport.SendAsync(topicName, partitionKey, effectiveMessages, ct);
 
                 publishSw.Stop();
                 _instrumentation.PublishDuration.Record(publishSw.Elapsed.TotalMilliseconds);
 
-                // Transport succeeded — record success metrics before attempting delete.
-                _instrumentation.MessagesPublished.Add(groupMessages.Count);
-                _healthState.RecordSuccessfulPublish();
+                // Full success.
+                await OnGroupFullySentAsync(topicName, remaining, circuitBreaker, ct);
                 publishedAny = true;
-
-                var (stateChanged, newState) = circuitBreaker.RecordSuccess(topicName);
-
-                if (stateChanged)
-                {
-                    _healthState.SetCircuitClosed(topicName);
-                    _instrumentation.CircuitBreakerStateChanges.Add(1);
-
-                    try
-                    {
-                        await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
-                    }
-                    catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                    {
-                        _logger.LogWarning(handlerEx,
-                            "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
-                            "circuit state is already updated, continuing", topicName);
-                    }
-                }
-
-                foreach (var msg in groupMessages)
-                {
-                    try
-                    {
-                        await _eventHandler.OnMessagePublishedAsync(msg, ct);
-                    }
-                    catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
-                    {
-                        _logger.LogWarning(handlerEx,
-                            "OnMessagePublishedAsync handler threw for message {Seq} on topic {Topic} — " +
-                            "message fate is already finalized (transport succeeded), continuing",
-                            msg.SequenceNumber, topicName);
-                    }
-                }
-
-                // Delete from outbox — separate try since transport already succeeded.
-                try
-                {
-                    await _store.DeletePublishedAsync(sequenceNumbers, ct);
-                }
-                catch (Exception deleteEx)
-                {
-                    _logger.LogWarning(deleteEx,
-                        "Failed to delete {Count} published messages — they will be re-delivered on next poll",
-                        sequenceNumbers.Count);
-                }
+                return publishedAny;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                // Graceful shutdown — exit the group processing loop.
-                break;
+                // Shutdown — messages stay in outbox, no handler call (logs only).
+                _logger.LogDebug(
+                    "Publish cancelled mid-retry for topic {Topic}, {Count} messages remain in outbox",
+                    topicName, remaining.Count);
+                return publishedAny;
             }
             catch (PartialSendException pex)
             {
-                // Some messages were sent, others failed.
                 _logger.LogWarning(pex.InnerException,
-                    "Partial send: {Succeeded} messages sent, {Failed} failed for topic {Topic}",
+                    "Partial send: {Succeeded} sent, {Failed} failed for topic {Topic}",
                     pex.SucceededSequenceNumbers.Count, pex.FailedSequenceNumbers.Count, topicName);
 
                 _instrumentation.PublishFailures.Add(1);
-                publishedAny = true; // Some messages did get through
+                publishedAny = true;
+                lastError = pex.InnerException ?? pex;
 
-                // Delete the succeeded messages — they're already on the broker
-                try
+                // Delete succeeded subset; they're already on the broker.
+                var succeededSet = pex.SucceededSequenceNumbers.ToHashSet();
+                var succeeded = remaining.Where(m => succeededSet.Contains(m.SequenceNumber)).ToList();
+                if (succeeded.Count > 0)
                 {
-                    await _store.DeletePublishedAsync(pex.SucceededSequenceNumbers, CancellationToken.None);
-                    _instrumentation.MessagesPublished.Add(pex.SucceededSequenceNumbers.Count);
+                    // Metrics and handler notifications fire regardless of delete outcome —
+                    // transport already delivered these messages.
+                    _instrumentation.MessagesPublished.Add(succeeded.Count);
                     _healthState.RecordSuccessfulPublish();
-                }
-                catch (Exception deleteEx)
-                {
-                    _logger.LogWarning(deleteEx,
-                        "Failed to delete {Count} partially-sent messages — they will be re-delivered",
-                        pex.SucceededSequenceNumbers.Count);
+
+                    foreach (var msg in succeeded)
+                    {
+                        try { await _eventHandler.OnMessagePublishedAsync(msg, ct); }
+                        catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+                        {
+                            _logger.LogWarning(handlerEx,
+                                "OnMessagePublishedAsync handler threw for message {Seq} on topic {Topic}",
+                                msg.SequenceNumber, topicName);
+                        }
+                    }
+
+                    try
+                    {
+                        await _store.DeletePublishedAsync(
+                            succeeded.Select(m => m.SequenceNumber).ToList(),
+                            CancellationToken.None);
+                    }
+                    catch (Exception deleteEx)
+                    {
+                        _logger.LogWarning(deleteEx,
+                            "Failed to delete {Count} partially-sent messages — they will be re-delivered",
+                            succeeded.Count);
+                    }
                 }
 
-                // Increment retry count for failed messages
-                try
+                // Narrow remaining to the failed subset.
+                remaining = remaining.Where(m => !succeededSet.Contains(m.SequenceNumber)).ToList();
+                if (remaining.Count == 0)
                 {
-                    await _store.IncrementRetryCountAsync(pex.FailedSequenceNumbers, CancellationToken.None);
-                }
-                catch (Exception retryEx)
-                {
-                    _logger.LogWarning(retryEx,
-                        "Failed to increment retry count for {Count} failed messages",
-                        pex.FailedSequenceNumbers.Count);
+                    circuitBreaker.RecordSuccess(topicName);
+                    return publishedAny;
                 }
 
-                var failedMessages = groupMessages
-                    .Where(m => pex.FailedSequenceNumbers.Contains(m.SequenceNumber))
-                    .ToList();
-
-                await HandlePublishFailureAsync(topicName, failedMessages, pex, circuitBreaker, ct);
+                if (ClassifyAndRecord(lastError, topicName, ref attempt, circuitBreaker))
+                    await FireCircuitOpenedEventAsync(topicName, ct);
             }
             catch (Exception ex)
             {
-                // Transport failure — increment retry count.
-                _logger.LogError(ex, "Failed to publish {Count} messages to topic {Topic}", groupMessages.Count, topicName);
-                _instrumentation.PublishFailures.Add(1);
+                _logger.LogWarning(ex,
+                    "Failed to publish {Count} messages to topic {Topic} (attempt {Attempt}/{Max})",
+                    remaining.Count, topicName, attempt + 1, maxAttempts);
 
-                // Use CancellationToken.None — this must complete even during shutdown
-                // so the retry count is correctly incremented.
+                _instrumentation.PublishFailures.Add(1);
+                lastError = ex;
+
+                if (ClassifyAndRecord(ex, topicName, ref attempt, circuitBreaker))
+                    await FireCircuitOpenedEventAsync(topicName, ct);
+            }
+
+            // Backoff before next attempt (only if another attempt will be made).
+            if (attempt < maxAttempts && !ct.IsCancellationRequested && remaining.Count > 0)
+            {
                 try
                 {
-                    await _store.IncrementRetryCountAsync(sequenceNumbers, CancellationToken.None);
+                    await Task.Delay(ComputeBackoff(attempt, opts), ct);
                 }
-                catch (Exception retryEx)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    _logger.LogWarning(retryEx,
-                        "Failed to increment retry count for {Count} messages",
-                        sequenceNumbers.Count);
+                    return publishedAny;
                 }
-
-                await HandlePublishFailureAsync(topicName, groupMessages, ex, circuitBreaker, ct);
             }
         }
+
+        // Loop exited without full success.
+        if (ct.IsCancellationRequested || remaining.Count == 0)
+            return publishedAny;
+
+        // Retries exhausted via non-transient errors → DLQ inline.
+        await DeadLetterAndNotifyAsync(
+            topicName, remaining, attempt,
+            lastError ?? new InvalidOperationException("Retries exhausted with no captured error"),
+            ct);
 
         return publishedAny;
     }
 
     /// <summary>
-    ///     Records a publish failure against the circuit breaker, updates health state,
-    ///     and invokes the corresponding event handlers. Used from both the partial-send
-    ///     and general-exception paths in <see cref="ProcessGroupsAsync" />.
+    ///     Classifies the exception as transient or non-transient and updates either
+    ///     the attempt counter or the circuit breaker accordingly. Transient errors
+    ///     record a circuit failure without burning an attempt; non-transient errors
+    ///     burn an attempt without recording a circuit failure.
     /// </summary>
-    private async Task HandlePublishFailureAsync(
-        string topicName,
-        IReadOnlyList<OutboxMessage> failedMessages,
-        Exception exception,
-        TopicCircuitBreaker circuitBreaker,
-        CancellationToken ct)
+    /// <returns><c>true</c> if the circuit breaker just transitioned to Open; otherwise <c>false</c>.</returns>
+    private bool ClassifyAndRecord(
+        Exception ex, string topicName, ref int attempt, TopicCircuitBreaker circuitBreaker)
     {
-        var (stateChanged, newState) = circuitBreaker.RecordFailure(topicName);
-
-        // Update health state before event handler to avoid skipping on handler exception.
-        if (stateChanged)
+        if (_transport.IsTransient(ex))
         {
-            _healthState.SetCircuitOpen(topicName);
-            _instrumentation.CircuitBreakerStateChanges.Add(1);
+            var (stateChanged, _) = circuitBreaker.RecordFailure(topicName);
+            if (stateChanged)
+            {
+                _healthState.SetCircuitOpen(topicName);
+                _instrumentation.CircuitBreakerStateChanges.Add(1);
+                return true;
+            }
+            // Do NOT increment attempt — transient does not consume the retry budget.
+        }
+        else
+        {
+            attempt++;
+            // Do NOT record a circuit failure — message-level poison must not block the topic.
         }
 
+        return false;
+    }
+
+    private async Task FireCircuitOpenedEventAsync(string topicName, CancellationToken ct)
+    {
         try
         {
-            await _eventHandler.OnPublishFailedAsync(failedMessages, exception, ct);
+            await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, CircuitState.Open, ct);
         }
         catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
         {
             _logger.LogWarning(handlerEx,
-                "OnPublishFailedAsync handler threw for topic {Topic} — " +
-                "message fates are already finalized, continuing", topicName);
+                "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic}", topicName);
         }
+    }
 
+    private static TimeSpan ComputeBackoff(int attempt, OutboxPublisherOptions opts)
+    {
+        var exponent = Math.Max(0, attempt - 1);
+        var ms = opts.RetryBackoffBaseMs * Math.Pow(2, exponent);
+        var capped = Math.Min(ms, opts.RetryBackoffMaxMs);
+        return TimeSpan.FromMilliseconds(capped);
+    }
+
+    /// <summary>
+    ///     Full-success exit: records metrics, fires <c>OnMessagePublishedAsync</c>
+    ///     per message, closes circuit if appropriate, deletes the group from the store.
+    /// </summary>
+    private async Task OnGroupFullySentAsync(
+        string topicName,
+        List<OutboxMessage> sentMessages,
+        TopicCircuitBreaker circuitBreaker,
+        CancellationToken ct)
+    {
+        _instrumentation.MessagesPublished.Add(sentMessages.Count);
+        _healthState.RecordSuccessfulPublish();
+
+        var (stateChanged, newState) = circuitBreaker.RecordSuccess(topicName);
         if (stateChanged)
         {
-            try
-            {
-                await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct);
-            }
+            _healthState.SetCircuitClosed(topicName);
+            _instrumentation.CircuitBreakerStateChanges.Add(1);
+
+            try { await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct); }
             catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
             {
                 _logger.LogWarning(handlerEx,
-                    "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic} — " +
-                    "circuit state is already updated, continuing", topicName);
+                    "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic}", topicName);
             }
+        }
+
+        foreach (var msg in sentMessages)
+        {
+            try { await _eventHandler.OnMessagePublishedAsync(msg, ct); }
+            catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+            {
+                _logger.LogWarning(handlerEx,
+                    "OnMessagePublishedAsync handler threw for message {Seq} on topic {Topic}",
+                    msg.SequenceNumber, topicName);
+            }
+        }
+
+        try
+        {
+            await _store.DeletePublishedAsync(
+                sentMessages.Select(m => m.SequenceNumber).ToList(), ct);
+        }
+        catch (Exception deleteEx)
+        {
+            _logger.LogWarning(deleteEx,
+                "Failed to delete {Count} published messages — they will be re-delivered",
+                sentMessages.Count);
+        }
+    }
+
+    /// <summary>
+    ///     Retries-exhausted exit: dead-letter inline, fire <c>OnPublishFailedAsync</c>
+    ///     with <c>RetriesExhausted</c>, fire <c>OnMessageDeadLetteredAsync</c> per message.
+    /// </summary>
+    private async Task DeadLetterAndNotifyAsync(
+        string topicName,
+        List<OutboxMessage> failed,
+        int attemptCount,
+        Exception lastError,
+        CancellationToken ct)
+    {
+        try
+        {
+            await _store.DeadLetterAsync(
+                failed.Select(m => m.SequenceNumber).ToList(),
+                attemptCount,
+                lastError.ToString(),
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to dead-letter {Count} messages on topic {Topic} after {Attempts} attempts",
+                failed.Count, topicName, attemptCount);
+            return;
+        }
+
+        _instrumentation.MessagesDeadLettered.Add(failed.Count);
+
+        await NotifyPublishFailedAsync(topicName, failed, lastError, PublishFailureReason.RetriesExhausted, ct);
+
+        foreach (var msg in failed)
+        {
+            try { await _eventHandler.OnMessageDeadLetteredAsync(msg, ct); }
+            catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+            {
+                _logger.LogWarning(handlerEx,
+                    "OnMessageDeadLetteredAsync handler threw for message {Seq} on topic {Topic} — " +
+                    "continuing with remaining poison messages", msg.SequenceNumber, topicName);
+            }
+        }
+    }
+
+    private async Task NotifyPublishFailedAsync(
+        string topicName,
+        IReadOnlyList<OutboxMessage> failed,
+        Exception lastError,
+        PublishFailureReason reason,
+        CancellationToken ct)
+    {
+        try
+        {
+            await _eventHandler.OnPublishFailedAsync(failed, lastError, reason, ct);
+        }
+        catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+        {
+            _logger.LogWarning(handlerEx,
+                "OnPublishFailedAsync handler threw for topic {Topic} (reason {Reason})",
+                topicName, reason);
         }
     }
 
@@ -698,26 +837,6 @@ internal sealed class OutboxPublisherService : BackgroundService
         }
     }
 
-    private async Task DeadLetterSweepLoopAsync(string publisherId, CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                await Task.Delay(GetOptions().DeadLetterSweepIntervalMs, ct);
-                await _store.SweepDeadLettersAsync(publisherId, GetOptions().MaxRetryCount, ct);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error in dead letter sweep loop");
-            }
-        }
-    }
-
     private async Task<IReadOnlyList<OutboxMessage>> ApplyInterceptorsAsync(
         List<OutboxMessage> messages, CancellationToken ct)
     {
@@ -766,12 +885,12 @@ internal sealed class OutboxPublisherService : BackgroundService
     {
         _logger.LogInformation(
             "Outbox publisher starting with configuration: " +
-            "BatchSize={BatchSize}, MaxRetry={MaxRetry}, " +
+            "BatchSize={BatchSize}, MaxAttempts={MaxAttempts}, " +
             "Poll={MinPoll}-{MaxPoll}ms, Heartbeat={HbInterval}ms/timeout={HbTimeout}s, " +
             "GracePeriod={Grace}s, CircuitBreaker={CbThreshold}failures/{CbDuration}s, " +
             "PublishThreads={PublishThreads}, Interceptors={InterceptorCount}",
             opts.BatchSize,
-            opts.MaxRetryCount,
+            opts.MaxPublishAttempts,
             opts.MinPollIntervalMs,
             opts.MaxPollIntervalMs,
             opts.HeartbeatIntervalMs,

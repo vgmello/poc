@@ -12,7 +12,7 @@ public sealed class TransportMessageContextTests
     private static OutboxMessage MakeMessage(long seq = 1) =>
         new(seq, "orders", "key-1", "OrderCreated", null,
             System.Text.Encoding.UTF8.GetBytes("{}"), "application/json",
-            DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow);
 
     [Fact]
     public void Constructor_SetsOriginalMessageAndEnvelope()

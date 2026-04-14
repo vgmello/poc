@@ -78,15 +78,13 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     // -------------------------------------------------------------------------
 
     public async Task<IReadOnlyList<OutboxMessage>> FetchBatchAsync(
-        string publisherId, int batchSize,
-        int maxRetryCount, CancellationToken ct)
+        string publisherId, int batchSize, CancellationToken ct)
     {
         var rows = await _db.QueryAsync<FetchBatchOutputRow>(_queries.FetchBatch,
             new
             {
                 BatchSize = batchSize,
                 PublisherId = publisherId,
-                MaxRetryCount = maxRetryCount,
                 OutboxTableName = _options.GetOutboxTableName()
             }, ct).ConfigureAwait(false);
 
@@ -99,7 +97,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
     }
 
     // -------------------------------------------------------------------------
-    // Delete / Dead-letter / IncrementRetry
+    // Delete / Dead-letter
     // -------------------------------------------------------------------------
 
     public async Task DeletePublishedAsync(
@@ -113,27 +111,16 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         await _db.ExecuteAsync(_queries.DeletePublished, parameters, ct).ConfigureAwait(false);
     }
 
-    public async Task IncrementRetryCountAsync(
-        IReadOnlyList<long> sequenceNumbers, CancellationToken ct)
-    {
-        await _db.ExecuteWithRetryAsync(async (conn, token) =>
-        {
-            var dt = SqlServerDbHelper.CreateSequenceNumberTable(sequenceNumbers);
-            var parameters = new DynamicParameters();
-            parameters.Add("@Ids", dt.AsTableValuedParameter(_queries.TvpType));
-            await conn.ExecuteAsync(new CommandDefinition(
-                _queries.IncrementRetryCount, parameters,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
-    }
-
     public async Task DeadLetterAsync(
-        IReadOnlyList<long> sequenceNumbers, string? lastError, CancellationToken ct)
+        IReadOnlyList<long> sequenceNumbers,
+        int attemptCount,
+        string? lastError,
+        CancellationToken ct)
     {
         if (sequenceNumbers.Count == 0) return;
 
         var parameters = new DynamicParameters();
+        parameters.Add("@AttemptCount", attemptCount, DbType.Int32);
         parameters.Add("@LastError", lastError, DbType.String, size: 2000);
         parameters.Add("@Ids",
             SqlServerDbHelper.CreateSequenceNumberTable(sequenceNumbers).AsTableValuedParameter(_queries.TvpType));
@@ -218,17 +205,6 @@ public sealed class SqlServerOutboxStore : IOutboxStore
                 cancellationToken: cancel)).ConfigureAwait(false);
             await tx.CommitAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
-    }
-
-    // -------------------------------------------------------------------------
-    // Dead-letter sweep
-    // -------------------------------------------------------------------------
-
-    public async Task SweepDeadLettersAsync(string publisherId, int maxRetryCount, CancellationToken ct)
-    {
-        var parameters = new DynamicParameters(new { PublisherId = publisherId, MaxRetryCount = maxRetryCount, OutboxTableName = _options.GetOutboxTableName() });
-        parameters.Add("@LastError", "Max retry count exceeded (background sweep)", DbType.String, size: 2000);
-        await _db.ExecuteAsync(_queries.SweepDeadLetters, parameters, ct).ConfigureAwait(false);
     }
 
     public async Task<long> GetPendingCountAsync(CancellationToken ct)

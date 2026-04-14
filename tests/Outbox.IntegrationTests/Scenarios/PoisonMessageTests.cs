@@ -25,14 +25,17 @@ public class PoisonMessageTests
         var topic = OutboxTestHelper.UniqueTopic("poison");
         await OutboxTestHelper.CleanupAsync(_infra.ConnectionString);
 
-        // Use MaxRetryCount=3 for faster test
+        // Use MaxPublishAttempts=4 for faster test
         var (host, transport) = OutboxTestHelper.BuildPublisherHost(
             _infra.ConnectionString, _infra.BootstrapServers,
             o =>
             {
-                o.MaxRetryCount = 4;
-                o.CircuitBreakerFailureThreshold = 3;
+                o.MaxPublishAttempts = 4;
+                o.CircuitBreakerFailureThreshold = 10; // High so circuit never opens for this test
             });
+
+        // Failures must be non-transient so attempts are consumed and DLQ happens inline.
+        transport.SetSimulatedFailuresTransient(false);
 
         // Make transport fail for a specific partition key (simulating oversized message)
         var poisonKey = "poison-key";

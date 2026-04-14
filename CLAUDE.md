@@ -6,9 +6,9 @@ A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and st
 
 ## Key Architecture
 
-- `OutboxPublisherService` (BackgroundService) runs 5 parallel loops: publish, heartbeat, rebalance, orphan sweep, dead-letter sweep
+- `OutboxPublisherService` (BackgroundService) runs 4 parallel loops: publish, heartbeat, rebalance, orphan sweep
 - Messages are partitioned by `hash(partition_key) % total_partitions`, each partition owned by one publisher
-- Circuit breaker per topic prevents retry-count burn during broker outages
+- Circuit breaker per topic prevents attempt-counter burn during broker outages; dead-lettering happens inline within the publish loop
 - Partition ownership prevents duplicate processing across publishers
 
 ## Critical Documents
@@ -30,7 +30,8 @@ A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and st
 
 Before approving any change, verify against `docs/outbox-requirements-invariants.md`:
 - [ ] **MESSAGE ORDERING MUST NEVER BE CORRUPTED.** Per-(topic, partitionKey) ordering is the core guarantee. Any change that could cause two publishers to process the same partition key simultaneously, or reorder messages within a partition key, is a critical bug. This includes: changing partition counts while publishers are running, changing the hash function, modifying FetchBatch ORDER BY, or breaking the single-writer-per-partition invariant.
-- [ ] Retry count only incremented on transport failure (never on delete failure or circuit-open skip)
+- [ ] Attempt counter only incremented on **non-transient** transport failure; transient failures record circuit failures instead
+- [ ] DLQ never happens while the circuit is open — the retry loop must exit via `CircuitOpened`, not via the DLQ branch
 - [ ] No per-message lease columns remain (partition ownership is the sole isolation mechanism)
 - [ ] `CancellationToken.None` used for cleanup operations in failure paths
 - [ ] No tight loops without backoff (check circuit-open and error paths)

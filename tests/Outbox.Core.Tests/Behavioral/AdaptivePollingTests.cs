@@ -21,7 +21,7 @@ public sealed class AdaptivePollingTests : IDisposable
 
         _f.Store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(Array.Empty<OutboxMessage>());
 
         var service = _f.CreateService();
@@ -43,7 +43,7 @@ public sealed class AdaptivePollingTests : IDisposable
         var messages = new[] { TestOutboxServiceFactory.MakeMessage(1) };
         var callCount = 0;
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 var n = Interlocked.Increment(ref callCount);
@@ -66,11 +66,12 @@ public sealed class AdaptivePollingTests : IDisposable
     {
         _f.Options.CircuitBreakerFailureThreshold = 1;
         _f.Store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _f.Transport.IsTransient(Arg.Any<Exception>()).Returns(true);
 
         var messages = new[] { TestOutboxServiceFactory.MakeMessage(1) };
         var callCount = 0;
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
                 Interlocked.Increment(ref callCount) <= 5
                     ? messages

@@ -36,10 +36,10 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
 
         _options = new OutboxPublisherOptions
         {
-            BatchSize = 10, MaxRetryCount = 5,
+            BatchSize = 10, MaxPublishAttempts = 5,
             MinPollIntervalMs = 10, MaxPollIntervalMs = 100,
             HeartbeatIntervalMs = 100_000, RebalanceIntervalMs = 100_000,
-            OrphanSweepIntervalMs = 100_000, DeadLetterSweepIntervalMs = 100_000,
+            OrphanSweepIntervalMs = 100_000,
             CircuitBreakerFailureThreshold = 3, CircuitBreakerOpenDurationSeconds = 30
         };
 
@@ -77,7 +77,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
 
     private static OutboxMessage MakeMessage(long seq, string topic = "orders", string key = "key-1") =>
         new(seq, topic, key, "OrderCreated", null, Encoding.UTF8.GetBytes("{}"),
-            "application/json", DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow);
+            "application/json", DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow);
 
     [Fact]
     public async Task NoInterceptors_MessagePassedUnchanged()
@@ -85,7 +85,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var service = CreateService();
@@ -111,7 +111,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var interceptor = Substitute.For<IOutboxMessageInterceptor>();
@@ -143,7 +143,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var interceptor = Substitute.For<IOutboxMessageInterceptor>();
@@ -176,7 +176,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var order = new List<string>();
@@ -222,43 +222,6 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
     }
 
     [Fact]
-    public async Task Interceptor_Throws_GroupReleasedWithRetryIncrement()
-    {
-        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
-        var messages = new[] { MakeMessage(1) };
-        var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
-            .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
-
-        var interceptor = Substitute.For<IOutboxMessageInterceptor>();
-        interceptor.AppliesTo(Arg.Any<OutboxMessage>()).Returns(true);
-        interceptor.When(x => x.InterceptAsync(Arg.Any<OutboxMessageContext>(), Arg.Any<CancellationToken>()))
-            .Do(_ => throw new InvalidOperationException("interceptor boom"));
-
-        var service = CreateService(new[] { interceptor });
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
-        await service.StartAsync(cts.Token);
-
-        try { await Task.Delay(600, CancellationToken.None); }
-        catch
-        {
-            /* Intentionally empty */
-        }
-
-        await service.StopAsync(CancellationToken.None);
-
-        // Interceptor failure is treated as transport failure — retry count incremented.
-        await _store.Received().IncrementRetryCountAsync(
-            Arg.Is<IReadOnlyList<long>>(s => s.Contains(1L)),
-            CancellationToken.None);
-
-        // Transport should NOT have been called.
-        await _transport.DidNotReceive().SendAsync(
-            Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<IReadOnlyList<OutboxMessage>>(), Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
     public async Task EventHandler_ReceivesOriginalMessage_NotIntercepted()
     {
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
@@ -267,10 +230,10 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         {
             new OutboxMessage(1, "orders", "key-1", "OrderCreated", null,
                 originalPayload, "application/json",
-                DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow)
+                DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow)
         };
         var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var interceptor = Substitute.For<IOutboxMessageInterceptor>();
@@ -301,7 +264,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         var messages = new[] { MakeMessage(1) };
         var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var order = new List<string>();
@@ -353,43 +316,6 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
     }
 
     [Fact]
-    public async Task SecondInterceptor_Throws_FirstMutationLost_RetryIncremented()
-    {
-        _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
-        var messages = new[] { MakeMessage(1) };
-        var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
-            .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
-
-        var first = Substitute.For<IOutboxMessageInterceptor>();
-        first.AppliesTo(Arg.Any<OutboxMessage>()).Returns(true);
-        first.When(x => x.InterceptAsync(Arg.Any<OutboxMessageContext>(), Arg.Any<CancellationToken>()))
-            .Do(ci => ci.Arg<OutboxMessageContext>().Payload = Encoding.UTF8.GetBytes("mutated"));
-
-        var second = Substitute.For<IOutboxMessageInterceptor>();
-        second.AppliesTo(Arg.Any<OutboxMessage>()).Returns(true);
-        second.When(x => x.InterceptAsync(Arg.Any<OutboxMessageContext>(), Arg.Any<CancellationToken>()))
-            .Do(_ => throw new InvalidOperationException("second interceptor boom"));
-
-        var service = CreateService(new[] { first, second });
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
-        await service.StartAsync(cts.Token);
-
-        try { await Task.Delay(600, CancellationToken.None); }
-        catch { /* Intentionally empty */ }
-
-        await service.StopAsync(CancellationToken.None);
-
-        await _store.Received().IncrementRetryCountAsync(
-            Arg.Is<IReadOnlyList<long>>(s => s.Contains(1L)),
-            CancellationToken.None);
-
-        await _transport.DidNotReceive().SendAsync(
-            Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<IReadOnlyList<OutboxMessage>>(), Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
     public async Task Interceptor_ModifiesHeaders_TransportReceivesModifiedHeaders()
     {
         _store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
@@ -398,10 +324,10 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
             new OutboxMessage(1, "orders", "key-1", "OrderCreated",
                 new Dictionary<string, string> { ["original"] = "value" },
                 Encoding.UTF8.GetBytes("{}"), "application/json",
-                DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow)
+                DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow)
         };
         var callCount = 0;
-        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci => Interlocked.Increment(ref callCount) == 1 ? messages : Array.Empty<OutboxMessage>());
 
         var interceptor = Substitute.For<IOutboxMessageInterceptor>();

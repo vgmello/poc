@@ -27,7 +27,7 @@ Four tables, a TVP type, one index, two diagnostic views, and a 64-partition see
 | Table | Purpose |
 |---|---|
 | `dbo.Outbox` | Primary event buffer |
-| `dbo.OutboxDeadLetter` | Messages past `MaxRetryCount` |
+| `dbo.OutboxDeadLetter` | Messages dead-lettered after exhausting `MaxPublishAttempts` |
 | `dbo.OutboxPublishers` | Heartbeat registry |
 | `dbo.OutboxPartitions` | Partition-to-publisher ownership map |
 | `dbo.SequenceNumberList` (TVP) | Table-valued parameter for batch operations |
@@ -42,7 +42,6 @@ Four tables, a TVP type, one index, two diagnostic views, and a 64-partition see
 | `Payload` | `VARBINARY(MAX)` | Raw message bytes |
 | `Headers` | `NVARCHAR(2000)` | JSON-serialized headers (nullable) |
 | `EventOrdinal` | `INT` | Tiebreaker for same-timestamp events |
-| `RetryCount` | `INT` | Delivery attempts |
 | `RowVersion` | `ROWVERSION` | Version ceiling for ordering safety |
 
 ### Indexes
@@ -120,7 +119,7 @@ With `TablePrefix = "Orders"`, objects become `dbo.OrdersOutbox`, `dbo.OrdersOut
 `SqlServerDeadLetterManager` implements `IDeadLetterManager`:
 
 - **Get** — Paginated read using `OFFSET...FETCH NEXT`, ordered by `DeadLetterSeq`
-- **Replay** — Atomic `DELETE...OUTPUT...INTO` from dead-letter back to outbox with `RetryCount = 0`
+- **Replay** — Atomic `DELETE...OUTPUT...INTO` from dead-letter back to outbox (in-memory attempt counter starts fresh on next poll)
 - **Purge/PurgeAll** — Permanent deletion via TVP join or full table delete
 
 Replayed messages get a new `SequenceNumber` (the identity column regenerates).

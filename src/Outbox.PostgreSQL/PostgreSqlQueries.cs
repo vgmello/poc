@@ -9,7 +9,6 @@ internal sealed class PostgreSqlQueries
     public string UnregisterPublisher { get; }
     public string FetchBatch { get; }
     public string DeletePublished { get; }
-    public string IncrementRetryCount { get; }
     public string DeadLetter { get; }
     public string Heartbeat { get; }
     public string GetTotalPartitions { get; }
@@ -18,7 +17,6 @@ internal sealed class PostgreSqlQueries
     public string RebalanceClaim { get; }
     public string RebalanceRelease { get; }
     public string ClaimOrphanPartitions { get; }
-    public string SweepDeadLetters { get; }
     public string GetPendingCount { get; }
 
     // Dead-letter manager queries
@@ -62,25 +60,19 @@ WHERE  publisher_id = @publisher_id
 SELECT o.sequence_number, o.topic_name, o.partition_key, o.event_type,
        o.headers, o.payload, o.payload_content_type,
        o.event_datetime_utc, o.event_ordinal,
-       o.retry_count, o.created_at_utc
+       o.created_at_utc
 FROM {outboxTable} o
 INNER JOIN {partitionsTable} op
     ON  op.outbox_table_name = @outbox_table_name
     AND op.owner_publisher_id = @publisher_id
     AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < clock_timestamp())
     AND ((hashtext(o.partition_key) & 2147483647) % @total_partitions) = op.partition_id
-WHERE o.retry_count < @max_retry_count
-  AND o.xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint
+WHERE o.xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint
 ORDER BY o.event_datetime_utc, o.event_ordinal, o.sequence_number
 LIMIT @batch_size;";
 
         DeletePublished = $@"
 DELETE FROM {outboxTable}
-WHERE  sequence_number = ANY(@ids);";
-
-        IncrementRetryCount = $@"
-UPDATE {outboxTable}
-SET    retry_count = retry_count + 1
 WHERE  sequence_number = ANY(@ids);";
 
         DeadLetter = $@"
@@ -89,17 +81,17 @@ WITH dead AS (
     WHERE  sequence_number = ANY(@ids)
     RETURNING sequence_number, topic_name, partition_key, event_type,
               headers, payload, payload_content_type,
-              created_at_utc, retry_count,
+              created_at_utc,
               event_datetime_utc, event_ordinal
 )
 INSERT INTO {deadLetterTable}
     (sequence_number, topic_name, partition_key, event_type, headers, payload,
      payload_content_type,
-     created_at_utc, retry_count, event_datetime_utc, event_ordinal,
+     created_at_utc, attempt_count, event_datetime_utc, event_ordinal,
      dead_lettered_at_utc, last_error)
 SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
        payload_content_type,
-       created_at_utc, retry_count, event_datetime_utc, event_ordinal,
+       created_at_utc, @attempt_count, event_datetime_utc, event_ordinal,
        clock_timestamp(), @last_error
 FROM dead;";
 
@@ -242,36 +234,6 @@ FROM   to_claim
 WHERE  {partitionsTable}.partition_id = to_claim.partition_id
   AND  {partitionsTable}.outbox_table_name = @outbox_table_name;";
 
-        SweepDeadLetters = $@"
-WITH dead AS (
-    DELETE FROM {outboxTable} o
-    USING (
-        SELECT ot.sequence_number
-        FROM {outboxTable} ot
-        INNER JOIN {partitionsTable} op
-            ON  op.outbox_table_name = @outbox_table_name
-            AND op.owner_publisher_id = @publisher_id
-            AND ((hashtext(ot.partition_key) & 2147483647) % (SELECT COUNT(*) FROM {partitionsTable} WHERE outbox_table_name = @outbox_table_name)) = op.partition_id
-        WHERE ot.retry_count >= @max_retry_count
-        FOR UPDATE OF ot SKIP LOCKED
-    ) d
-    WHERE o.sequence_number = d.sequence_number
-    RETURNING o.sequence_number, o.topic_name, o.partition_key, o.event_type,
-              o.headers, o.payload, o.payload_content_type,
-              o.created_at_utc, o.retry_count,
-              o.event_datetime_utc, o.event_ordinal
-)
-INSERT INTO {deadLetterTable}
-    (sequence_number, topic_name, partition_key, event_type, headers, payload,
-     payload_content_type,
-     created_at_utc, retry_count, event_datetime_utc, event_ordinal,
-     dead_lettered_at_utc, last_error)
-SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
-       payload_content_type,
-       created_at_utc, retry_count, event_datetime_utc, event_ordinal,
-       clock_timestamp(), @last_error
-FROM dead;";
-
         GetPendingCount = $"SELECT COUNT(*) FROM {outboxTable};";
 
         // ---- Dead-letter manager queries ----
@@ -279,7 +241,7 @@ FROM dead;";
         DeadLetterGet = $@"
 SELECT dead_letter_seq, sequence_number, topic_name, partition_key, event_type, headers, payload,
        payload_content_type,
-       event_datetime_utc, event_ordinal, retry_count, created_at_utc,
+       event_datetime_utc, event_ordinal, attempt_count, created_at_utc,
        dead_lettered_at_utc, last_error
 FROM   {deadLetterTable}
 ORDER  BY dead_letter_seq
@@ -296,12 +258,10 @@ WITH replayed AS (
 INSERT INTO {outboxTable}
     (topic_name, partition_key, event_type, headers, payload,
      payload_content_type,
-     created_at_utc, event_datetime_utc, event_ordinal,
-     retry_count)
+     created_at_utc, event_datetime_utc, event_ordinal)
 SELECT topic_name, partition_key, event_type, headers, payload,
        payload_content_type,
-       created_at_utc, event_datetime_utc, event_ordinal,
-       0
+       created_at_utc, event_datetime_utc, event_ordinal
 FROM replayed;";
 
         DeadLetterPurge = $@"

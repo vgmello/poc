@@ -133,6 +133,23 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
 
 #pragma warning restore S3776
 
+    /// <inheritdoc />
+    public bool IsTransient(Exception exception)
+    {
+        return exception switch
+        {
+            OperationCanceledException => true,
+            // The CancelAfter timeout in SendAsync surfaces as OperationCanceledException via
+        // the linked CancellationToken, not as TimeoutException. This arm is kept as a
+        // defensive guard for SDK versions or interceptors that may raise TimeoutException directly.
+        TimeoutException => true,
+            EventHubsException eh => eh.IsTransient,
+            AggregateException agg => agg.InnerExceptions.Count > 0
+                && agg.InnerExceptions.All(IsTransient),
+            _ => false
+        };
+    }
+
     public async ValueTask DisposeAsync()
     {
         foreach (var client in _clients.Values)

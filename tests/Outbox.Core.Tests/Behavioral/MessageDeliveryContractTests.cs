@@ -51,22 +51,6 @@ public sealed class MessageDeliveryContractTests : IDisposable
     }
 
     [Fact]
-    public async Task DeleteFailure_AfterSuccessfulSend_DoesNotIncrementRetryCount()
-    {
-        var messages = new[] { TestOutboxServiceFactory.MakeMessage(1) };
-        _f.SetupSingleBatch("p1", messages);
-
-        _f.Store.DeletePublishedAsync(Arg.Any<IReadOnlyList<long>>(), Arg.Any<CancellationToken>())
-            .ThrowsAsync(new InvalidOperationException("DB down"));
-
-        var service = _f.CreateService();
-        await TestOutboxServiceFactory.RunServiceAsync(service);
-
-        await _f.Store.DidNotReceive().IncrementRetryCountAsync(
-            Arg.Any<IReadOnlyList<long>>(), Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
     public async Task DeleteFailure_AfterSuccessfulSend_DoesNotDeadLetterMessage()
     {
         var messages = new[] { TestOutboxServiceFactory.MakeMessage(1) };
@@ -79,7 +63,7 @@ public sealed class MessageDeliveryContractTests : IDisposable
         await TestOutboxServiceFactory.RunServiceAsync(service);
 
         await _f.Store.DidNotReceive().DeadLetterAsync(
-            Arg.Any<IReadOnlyList<long>>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyList<long>>(), Arg.Any<int>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

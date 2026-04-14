@@ -35,7 +35,7 @@ public class EventHubTransportInterceptorTests
     private static OutboxMessage MakeMessage(long seq = 1) =>
         new(seq, "test-hub", "pk", "TestEvent", null,
             Encoding.UTF8.GetBytes("{}"), "application/json",
-            DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow);
 
     [Fact]
     public async Task Interceptor_AppliesToReturnsFalse_NoInterception()

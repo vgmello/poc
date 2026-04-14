@@ -147,23 +147,6 @@ public static class SqlServerTestHelper
         return (long)(int)(await cmd.ExecuteScalarAsync())!;
     }
 
-    public static async Task<List<(long Seq, int RetryCount)>> GetRetryCountsAsync(string connectionString)
-    {
-        var results = new List<(long, int)>();
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync();
-        await using var cmd = new SqlCommand(
-            "SELECT SequenceNumber, RetryCount FROM dbo.Outbox ORDER BY SequenceNumber", conn);
-        await using var reader = await cmd.ExecuteReaderAsync();
-
-        while (await reader.ReadAsync())
-        {
-            results.Add((reader.GetInt64(0), reader.GetInt32(1)));
-        }
-
-        return results;
-    }
-
     public static async Task<Dictionary<int, string?>> GetPartitionOwnersAsync(string connectionString)
     {
         var map = new Dictionary<int, string?>();

@@ -18,11 +18,14 @@ This document captures the critical invariants, behavioral requirements, and arc
 - **Across batches for the same partitionKey:** ordering is guaranteed by the SQL `ORDER BY event_datetime_utc, event_ordinal` in FetchBatch, combined with a version ceiling filter (`xmin < pg_snapshot_xmin(pg_current_snapshot())` on PostgreSQL, `RowVer < MIN_ACTIVE_ROWVERSION()` on SQL Server) that withholds freshly inserted rows when earlier write transactions are still in-flight. This prevents the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order. Trade-off: any concurrent write transaction in the database temporarily pauses processing of new inserts until it commits.
 - **Cross-partitionKey:** no ordering guarantee. This is by design.
 
-### Retry count accuracy
+### Attempt counter and dead-lettering
 
-- `retry_count` MUST be incremented ONLY when a **transport send fails** (explicit failure), via `IncrementRetryCountAsync`.
-- `retry_count` MUST NOT be incremented when: circuit breaker is open (messages are left untouched and will be picked up again when the circuit closes), or transport succeeded but delete failed.
-- Once `retry_count >= MaxRetryCount`, the message MUST be moved to the dead letter table.
+- Retry tracking is **in-memory only**, scoped to the current attempt of a single (topic, partitionKey) group. There is no persistent retry counter on outbox rows.
+- The attempt counter MUST be incremented ONLY when a transport send fails with a **non-transient** error, as classified by `IOutboxTransport.IsTransient`.
+- Transient errors (broker unreachable, timeouts, leader-election, etc.) MUST NOT consume the attempt counter. They MUST record a circuit breaker failure instead.
+- Dead-lettering happens **inline** within the publish loop: when the attempt counter reaches `MaxPublishAttempts`, the failed messages are moved to the dead-letter table via `IOutboxStore.DeadLetterAsync` before the next group is processed.
+- Dead-lettering MUST NOT happen while the circuit breaker is open. The retry loop checks `circuitBreaker.IsOpen(topic)` at the top of each iteration and exits via the `CircuitOpened` branch when the circuit is open.
+- On publisher restart, in-memory attempt state is lost. Failed messages are re-fetched on the next poll and given a fresh attempt budget. This is acceptable under at-least-once semantics.
 
 ### Partition ownership
 
@@ -50,7 +53,8 @@ This document captures the critical invariants, behavioral requirements, and arc
 
 ### Circuit breaker behavior
 
-- When a circuit is **open**, the publisher MUST do nothing — messages stay in the outbox and will be picked up when the circuit closes. Broker outages must NOT burn retry counts.
+- When a circuit is **open**, the publisher MUST do nothing for the affected topic — messages stay in the outbox and will be picked up when the circuit closes. Broker outages must NOT advance the in-memory attempt counter.
+- The circuit breaker MUST be fed by **transient** transport failures only. Non-transient failures (poison messages) MUST NOT trip the circuit, otherwise a single bad message could block the entire topic.
 - After `CircuitBreakerOpenDurationSeconds`, the circuit transitions to **half-open** and allows one probe batch through.
 - A single success in half-open MUST close the circuit. A failure MUST re-open it.
 
@@ -61,7 +65,7 @@ This document captures the critical invariants, behavioral requirements, and arc
 
 ### Loop coordination via linked CancellationTokenSource
 
-- All 5 loops (publish, heartbeat, rebalance, orphan sweep, dead-letter sweep) share a single linked `CancellationTokenSource`.
+- All 4 loops (publish, heartbeat, rebalance, orphan sweep) share a single linked `CancellationTokenSource`.
 - If ANY loop exits (normally or with exception), `linkedCts.CancelAsync()` MUST be called to signal all other loops to stop.
 - This prevents orphaned loops that continue running after one loop crashes (e.g., heartbeat dies but publish loop keeps leasing).
 
@@ -120,14 +124,12 @@ Any store implementation MUST satisfy:
 
 1. **FetchBatch:** MUST return messages ordered by `event_datetime_utc, event_ordinal, sequence_number`. MUST apply the version ceiling filter (`xmin < pg_snapshot_xmin(pg_current_snapshot())` on PostgreSQL, `RowVer < MIN_ACTIVE_ROWVERSION()` on SQL Server) to withhold rows from in-flight write transactions. MUST only return messages for partitions owned by the requesting publisher (with grace period check). MUST return `payload_content_type` alongside `headers`/`payload`. MUST deserialize `headers` from JSON text to `Dictionary<string, string>?`. This is a pure SELECT — no row locking or UPDATE is performed. **SQL Server: the query MUST use `WITH (NOLOCK)` on the outbox table.** Without it, `READ COMMITTED` takes shared locks during scanning and blocks on rows with exclusive locks from uncommitted transactions, causing timeouts. `NOLOCK` and `MIN_ACTIVE_ROWVERSION()` work together by design: `NOLOCK` prevents reader blocking on writer locks, while `MIN_ACTIVE_ROWVERSION()` filters out uncommitted rows by their row version. Do not remove `NOLOCK` — it is required for non-blocking reads.
 2. **DeletePublished:** MUST delete the message unconditionally for the owning publisher's partition. Does NOT check `lease_owner` (column removed).
-3. **IncrementRetryCount:** MUST increment `retry_count` for the specified message. MUST only be called on transport failure.
-4. **DeadLetter:** MUST atomically delete from outbox and insert into dead_letter (CTE/OUTPUT INTO pattern). Does NOT check `lease_owner` (column removed). MUST carry `payload_content_type` through to the dead letter table.
-5. **Heartbeat:** MUST update `last_heartbeat_utc` AND clear `grace_expires_utc` on owned partitions in the SAME transaction. If either update fails, both must roll back to prevent stale heartbeat with cleared grace periods (or vice versa).
-6. **Rebalance:** MUST calculate fair share, mark stale publishers' partitions with grace period, claim available partitions, release excess. MUST run in a transaction.
-7. **Transient retry:** All store operations MUST go through `ExecuteWithRetryAsync` with exponential backoff + jitter. MUST detect transient errors (deadlocks, timeouts, connection failures).
-8. **Partition count caching:** The cached partition count MUST be refreshed at most once every 60 seconds. Reads and writes to the cache MUST use `Volatile.Read/Write` for cross-thread visibility without heavy locks.
-9. **Dead-letter sweep conditions:** `SweepDeadLettersAsync` MUST dead-letter messages where `retry_count >= MaxRetryCount`. There are no lease columns to check — partition ownership ensures only the owning publisher sweeps its messages.
-10. **Content type propagation:** All operations that move messages between tables (dead-letter, sweep, replay) MUST include `payload_content_type` in both the source SELECT and destination INSERT column lists. Content types default to `'application/json'` in the schema for backward compatibility with inserts that omit them.
+3. **DeadLetter:** MUST atomically delete from outbox and insert into dead_letter (CTE/OUTPUT INTO pattern). Does NOT check `lease_owner` (column removed). MUST carry `payload_content_type` through to the dead letter table. MUST write the supplied `attemptCount` parameter to the dead letter row's `AttemptCount` column.
+4. **Heartbeat:** MUST update `last_heartbeat_utc` AND clear `grace_expires_utc` on owned partitions in the SAME transaction. If either update fails, both must roll back to prevent stale heartbeat with cleared grace periods (or vice versa).
+5. **Rebalance:** MUST calculate fair share, mark stale publishers' partitions with grace period, claim available partitions, release excess. MUST run in a transaction.
+6. **Transient retry:** All store operations MUST go through `ExecuteWithRetryAsync` with exponential backoff + jitter. MUST detect transient errors (deadlocks, timeouts, connection failures).
+7. **Partition count caching:** The cached partition count MUST be refreshed at most once every 60 seconds. Reads and writes to the cache MUST use `Volatile.Read/Write` for cross-thread visibility without heavy locks.
+8. **Content type propagation:** All operations that move messages between tables (dead-letter, replay) MUST include `payload_content_type` in both the source SELECT and destination INSERT column lists. Content types default to `'application/json'` in the schema for backward compatibility with inserts that omit them.
 
 ---
 
@@ -137,7 +139,7 @@ Any store implementation MUST satisfy:
 | ----------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------- |
 | `HeartbeatIntervalMs * 3 <= HeartbeatTimeoutSeconds * 1000` | Must tolerate at least 2 missed heartbeats (3 intervals) | Prevents false staleness                     |
 | `CircuitBreakerOpenDurationSeconds > 0`                     | Must eventually probe                                    | Prevents permanent circuit open              |
-| `MaxRetryCount > CircuitBreakerFailureThreshold`            | Retries must outlast circuit threshold                   | Prevents dead-lettering before circuit opens |
+| `RetryBackoffMaxMs >= RetryBackoffBaseMs`                   | Max backoff must be at least the base                    | Prevents invalid backoff configuration       |
 | `TransientRetryBackoffMs * 2^(MaxAttempts-1) > 20000`       | Retry budget must cover DB failover                      | Azure SQL failover takes 20-30s              |
 
 ---
@@ -145,12 +147,15 @@ Any store implementation MUST satisfy:
 ## Anti-Patterns to Watch For
 
 1. **Using `ct` (linked token) for cleanup operations.** Always use `CancellationToken.None` for `UnregisterPublisherAsync` and health state updates in failure paths.
-2. **Incrementing retry count after transport success.** If `SendAsync` succeeded, any subsequent failure (delete, event handler) must NOT increment retry count.
-3. **Tight loops without backoff.** Any loop that processes messages must have a delay when no progress is made (empty batch, all circuits open, all errors).
-4. **Blocking ThreadPool threads.** Synchronous I/O on ThreadPool threads can starve other async operations (heartbeat, rebalance). Use `TaskCreationOptions.LongRunning` for blocking work.
-5. **Catch-all without logging.** Every `catch (Exception)` must log. Silent swallowing hides production issues.
-6. **DI singleton disposal in transport.** Transports must NOT dispose injected producers/clients in `DisposeAsync`.
-7. **Catching generic Exception before PartialSendException.** `PartialSendException` MUST be caught before generic `Exception` in the publish loop. A generic handler would call `IncrementRetryCountAsync` for ALL messages, incorrectly penalizing messages that were already delivered.
-8. **Re-processing messages from event handler failures.** When `OnMessagePublishedAsync` or other handlers throw, do NOT retry or re-process the messages — their fate is already finalized. Each handler call must be individually try/caught to prevent fallthrough to transport-failure handlers.
-9. **Letting poison message handler exceptions block healthy messages.** `OnMessageDeadLetteredAsync` runs before healthy message processing. If it throws unhandled, the entire healthy batch is skipped and stuck with a spurious retry count increment.
-10. **Removing `WITH (NOLOCK)` from the SQL Server FetchBatch query.** `NOLOCK` is intentional and required — it prevents the reader from blocking on exclusive locks held by uncommitted write transactions. The `MIN_ACTIVE_ROWVERSION()` version ceiling filter provides the safety guarantee: it excludes any rows whose `RowVersion` is >= the earliest active transaction's row version, so uncommitted rows are never returned despite `NOLOCK`. Removing `NOLOCK` causes `READ COMMITTED` to block on in-flight inserts, leading to query timeouts. Note: `NOLOCK` is only safe here because the outbox table is append-only (INSERT + DELETE, no UPDATEs to payload columns).
+2. **Tight loops without backoff.** Any loop that processes messages must have a delay when no progress is made (empty batch, all circuits open, all errors).
+3. **Blocking ThreadPool threads.** Synchronous I/O on ThreadPool threads can starve other async operations (heartbeat, rebalance). Use `TaskCreationOptions.LongRunning` for blocking work.
+4. **Catch-all without logging.** Every `catch (Exception)` must log. Silent swallowing hides production issues.
+5. **DI singleton disposal in transport.** Transports must NOT dispose injected producers/clients in `DisposeAsync`.
+6. **Catching generic Exception before PartialSendException.** `PartialSendException` MUST be caught before generic `Exception` in the publish loop. A generic handler that catches all exceptions would incorrectly dead-letter messages that were already delivered.
+7. **Re-processing messages from event handler failures.** When `OnMessagePublishedAsync` or other handlers throw, do NOT retry or re-process the messages — their fate is already finalized. Each handler call must be individually try/caught to prevent fallthrough to transport-failure handlers.
+8. **Letting poison message handler exceptions block healthy messages.** `OnMessageDeadLetteredAsync` runs before healthy message processing. If it throws unhandled, the entire healthy batch is skipped.
+9. **Removing `WITH (NOLOCK)` from the SQL Server FetchBatch query.** `NOLOCK` is intentional and required — it prevents the reader from blocking on exclusive locks held by uncommitted write transactions. The `MIN_ACTIVE_ROWVERSION()` version ceiling filter provides the safety guarantee: it excludes any rows whose `RowVersion` is >= the earliest active transaction's row version, so uncommitted rows are never returned despite `NOLOCK`. Removing `NOLOCK` causes `READ COMMITTED` to block on in-flight inserts, leading to query timeouts. Note: `NOLOCK` is only safe here because the outbox table is append-only (INSERT + DELETE, no UPDATEs to payload columns).
+10. **Burning the attempt counter on transient errors.** The `IOutboxTransport.IsTransient` classifier exists so transient outages don't consume the retry budget. A change that increments the attempt counter on a transient catch reintroduces the bug where outages dead-letter healthy messages.
+11. **Recording a circuit breaker failure on non-transient errors.** Non-transient (message-poison) failures must not trip the circuit. The whole point of the clean separation is that one bad message can't block other groups for the same topic.
+12. **Dead-lettering while the circuit is open.** The retry loop must check `IsOpen(topic)` at the top of every attempt and exit via `CircuitOpened`, not via the DLQ branch. DLQing during an outage produces out-of-order DLQ inserts and confuses operators.
+13. **Reintroducing a long-lived retry-count dictionary.** The attempt counter is a local variable on the worker thread's stack, scoped to one group's processing. A change that promotes it to a `ConcurrentDictionary` keyed by sequence number reintroduces the cross-batch state model this design rejects.

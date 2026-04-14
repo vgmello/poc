@@ -20,22 +20,22 @@ public class IntermittentFailureTests
     }
 
     [Fact]
-    public async Task IntermittentFailures_RetryCountIncrements_MessagesEventuallyPublished()
+    public async Task IntermittentFailures_TransientDefault_MessagesEventuallyPublished()
     {
         var topic = OutboxTestHelper.UniqueTopic("intermittent");
         await OutboxTestHelper.CleanupAsync(_infra.ConnectionString);
 
-        // With intermittent failures (fail 2 out of 3 calls), messages accumulate retries
-        // but eventually publish on the succeeding call. Circuit threshold is high enough
-        // that it never opens (max 2 consecutive failures before a success).
+        // Intermittent failures are transient by default (broker flap simulation).
+        // Transient failures do NOT burn publish attempts — messages will eventually
+        // all succeed. The circuit breaker may open briefly but will recover.
         var (host, transport) = OutboxTestHelper.BuildPublisherHost(
             _infra.ConnectionString, _infra.BootstrapServers,
             o =>
             {
                 OutboxTestHelper.FastTestOptions(o);
-                // MaxRetryCount must be > CircuitBreakerFailureThreshold per validator
-                o.MaxRetryCount = 10;
+                o.MaxPublishAttempts = 10;
                 o.CircuitBreakerFailureThreshold = 5;
+                o.CircuitBreakerOpenDurationSeconds = 3; // Recover quickly
             });
 
         // Fail 2 out of 3 calls (succeed every 3rd)

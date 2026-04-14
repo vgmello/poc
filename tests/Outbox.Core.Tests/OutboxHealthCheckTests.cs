@@ -14,7 +14,7 @@ public class OutboxHealthCheckTests
     private static OutboxPublisherOptions SmallIntervalOptions() => new()
     {
         BatchSize = 100,
-        MaxRetryCount = 10,
+        MaxPublishAttempts = 10,
         CircuitBreakerFailureThreshold = 3,
         CircuitBreakerOpenDurationSeconds = 30,
 
@@ -25,8 +25,7 @@ public class OutboxHealthCheckTests
         MinPollIntervalMs = 10,
         MaxPollIntervalMs = 10,
         RebalanceIntervalMs = 30_000,
-        OrphanSweepIntervalMs = 60_000,
-        DeadLetterSweepIntervalMs = 60_000
+        OrphanSweepIntervalMs = 60_000
     };
 
     private static OutboxHealthCheck CreateHealthCheck(OutboxHealthState state, OutboxPublisherOptions? options = null)
@@ -171,7 +170,7 @@ public class OutboxHealthCheckTests
         var opts = new OutboxPublisherOptions
         {
             BatchSize = 100,
-            MaxRetryCount = 10,
+            MaxPublishAttempts = 10,
             CircuitBreakerFailureThreshold = 3,
             CircuitBreakerOpenDurationSeconds = 30,
     
@@ -181,8 +180,7 @@ public class OutboxHealthCheckTests
             MinPollIntervalMs = 100,
             MaxPollIntervalMs = 10_000,
             RebalanceIntervalMs = 30_000,
-            OrphanSweepIntervalMs = 60_000,
-            DeadLetterSweepIntervalMs = 60_000
+            OrphanSweepIntervalMs = 60_000
         };
         var check = CreateHealthCheck(state, opts);
 

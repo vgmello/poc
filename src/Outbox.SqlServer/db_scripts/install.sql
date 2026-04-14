@@ -24,7 +24,6 @@ BEGIN
         EventDateTimeUtc DATETIME2(3)          NOT NULL,
         EventOrdinal     INT                   NOT NULL  DEFAULT 0,
         PayloadContentType NVARCHAR(100)       NOT NULL  DEFAULT 'application/json',
-        RetryCount       INT                   NOT NULL  DEFAULT 0,
         RowVersion       ROWVERSION            NOT NULL,
         PartitionId      AS (ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 64) PERSISTED,
 
@@ -48,7 +47,7 @@ BEGIN
         Headers           NVARCHAR(2000)        NULL,
         Payload           VARBINARY(MAX)        NOT NULL,
         CreatedAtUtc      DATETIME2(3)          NOT NULL,
-        RetryCount        INT                   NOT NULL,
+        AttemptCount      INT                   NOT NULL,
         EventDateTimeUtc  DATETIME2(3)          NOT NULL,
         EventOrdinal      INT                   NOT NULL  DEFAULT 0,
         PayloadContentType NVARCHAR(100)        NOT NULL  DEFAULT 'application/json',
@@ -118,7 +117,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbo
 BEGIN
     CREATE NONCLUSTERED INDEX IX_Outbox_Pending
     ON dbo.Outbox (PartitionId, EventDateTimeUtc, EventOrdinal)
-    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, RetryCount, CreatedAtUtc, RowVersion);
+    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, CreatedAtUtc, RowVersion);
 END;
 GO
 
@@ -141,7 +140,7 @@ SELECT SequenceNumber, TopicName, PartitionKey, EventType,
        CASE WHEN PayloadContentType IN ('application/json', 'text/plain')
             THEN CAST(Payload AS VARCHAR(MAX))
        END AS PayloadText,
-       RetryCount, CreatedAtUtc, EventDateTimeUtc
+       CreatedAtUtc, EventDateTimeUtc
 FROM dbo.Outbox;
 GO
 
@@ -152,7 +151,7 @@ SELECT DeadLetterSeq, SequenceNumber, TopicName, PartitionKey, EventType,
        CASE WHEN PayloadContentType IN ('application/json', 'text/plain')
             THEN CAST(Payload AS VARCHAR(MAX))
        END AS PayloadText,
-       RetryCount, CreatedAtUtc, EventDateTimeUtc,
+       AttemptCount, CreatedAtUtc, EventDateTimeUtc,
        DeadLetteredAtUtc, LastError
 FROM dbo.OutboxDeadLetter;
 GO

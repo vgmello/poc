@@ -17,7 +17,6 @@ public sealed class OutboxMessageContext
     public string EventType => _original.EventType;
     public DateTimeOffset EventDateTimeUtc => _original.EventDateTimeUtc;
     public int EventOrdinal => _original.EventOrdinal;
-    public int RetryCount => _original.RetryCount;
     public DateTimeOffset CreatedAtUtc => _original.CreatedAtUtc;
 
     // Mutable fields

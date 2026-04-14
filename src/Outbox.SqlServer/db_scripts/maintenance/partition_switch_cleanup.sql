@@ -71,7 +71,6 @@ CREATE TABLE ' + @StagingFull + N'
     EventDateTimeUtc   DATETIME2(3)          NOT NULL,
     EventOrdinal       INT                   NOT NULL  DEFAULT 0,
     PayloadContentType NVARCHAR(100)         NOT NULL  DEFAULT ''application/json'',
-    RetryCount         INT                   NOT NULL  DEFAULT 0,
     RowVersion         ROWVERSION            NOT NULL,
     PartitionId        AS (ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 64) PERSISTED,
 
@@ -84,7 +83,7 @@ PRINT 'Created staging table with matching schema.';
 SET @SQL = N'
 CREATE NONCLUSTERED INDEX IX_' + @StagingTable + N'_Pending
 ON ' + @StagingFull + N' (PartitionId, EventDateTimeUtc, EventOrdinal)
-INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, RetryCount, CreatedAtUtc, RowVersion);';
+INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, CreatedAtUtc, RowVersion);';
 EXEC sp_executesql @SQL;
 PRINT 'Created matching nonclustered index on staging table.';
 

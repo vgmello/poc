@@ -35,13 +35,14 @@ internal sealed class TestOutboxServiceFactory : IDisposable
         Options = new OutboxPublisherOptions
         {
             BatchSize = 10,
-            MaxRetryCount = 5,
+            MaxPublishAttempts = 5,
+            RetryBackoffBaseMs = 1,           // tiny so tests don't sleep
+            RetryBackoffMaxMs = 5,
             MinPollIntervalMs = 10,
             MaxPollIntervalMs = 100,
             HeartbeatIntervalMs = 100_000,
             RebalanceIntervalMs = 100_000,
             OrphanSweepIntervalMs = 100_000,
-            DeadLetterSweepIntervalMs = 100_000,
             CircuitBreakerFailureThreshold = 3,
             CircuitBreakerOpenDurationSeconds = 30
         };
@@ -52,6 +53,9 @@ internal sealed class TestOutboxServiceFactory : IDisposable
 
         Store.GetTotalPartitionsAsync(Arg.Any<CancellationToken>()).Returns(64);
         Store.PublisherId.Returns("test-publisher");
+
+        // Default: transport classifies nothing as transient unless tests override.
+        Transport.IsTransient(Arg.Any<Exception>()).Returns(false);
     }
 
     public OutboxPublisherService CreateService(
@@ -99,7 +103,7 @@ internal sealed class TestOutboxServiceFactory : IDisposable
 
         var callCount = 0;
         Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
                 Interlocked.Increment(ref callCount) == 1
                     ? messages
@@ -108,10 +112,10 @@ internal sealed class TestOutboxServiceFactory : IDisposable
 
     public static OutboxMessage MakeMessage(
         long seq, string topic = "orders", string key = "key-1",
-        int retryCount = 0, DateTimeOffset? eventTime = null, int eventOrdinal = 0) =>
+        DateTimeOffset? eventTime = null, int eventOrdinal = 0) =>
         new(seq, topic, key, "OrderCreated", null,
             System.Text.Encoding.UTF8.GetBytes("{}"), "application/json",
-            eventTime ?? DateTimeOffset.UtcNow, eventOrdinal, retryCount, DateTimeOffset.UtcNow);
+            eventTime ?? DateTimeOffset.UtcNow, eventOrdinal, DateTimeOffset.UtcNow);
 
     public void Dispose()
     {

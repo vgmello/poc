@@ -47,7 +47,6 @@ public class KafkaOutboxTransportSendTests
             PayloadContentType: "application/json",
             EventDateTimeUtc: DateTimeOffset.UtcNow,
             EventOrdinal: 0,
-            RetryCount: 0,
             CreatedAtUtc: DateTimeOffset.UtcNow);
 
     private void SetupProducerSuccess()

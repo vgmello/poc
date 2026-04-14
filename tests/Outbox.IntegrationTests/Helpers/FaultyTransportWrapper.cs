@@ -17,6 +17,7 @@ public sealed class FaultyTransportWrapper : IOutboxTransport
     private int _callCount;
     private volatile int _failEveryN; // 0 = disabled; N = fail all except every Nth call
     private volatile Func<OutboxMessage, bool>? _failPredicate;
+    private volatile bool _simulatedFailuresAreTransient = true;
 
     public FaultyTransportWrapper(IProducer<string, byte[]> producer) => _producer = producer;
 
@@ -33,12 +34,29 @@ public sealed class FaultyTransportWrapper : IOutboxTransport
     public void SetIntermittentPredicate(Func<OutboxMessage, bool> predicate) =>
         _failPredicate = predicate;
 
+    /// <summary>
+    ///     Controls whether simulated failures are classified as transient.
+    ///     Default: true (simulates broker outages — no DLQ).
+    ///     Set to false for poison-message tests where failures should exhaust
+    ///     attempts and cause inline dead-lettering.
+    /// </summary>
+    public void SetSimulatedFailuresTransient(bool transient) =>
+        _simulatedFailuresAreTransient = transient;
+
     public void Reset()
     {
         _failing = false;
         _failEveryN = 0;
         _failPredicate = null;
+        _simulatedFailuresAreTransient = true;
         Interlocked.Exchange(ref _callCount, 0);
+    }
+
+    public bool IsTransient(Exception exception)
+    {
+        // Our simulated InvalidOperationExceptions are classified per the test's setup.
+        // For anything else, fall back to the safe default (non-transient).
+        return exception is InvalidOperationException && _simulatedFailuresAreTransient;
     }
 
     public async Task SendAsync(

@@ -27,7 +27,7 @@ Four tables, one index, two diagnostic views, and a 64-partition seed:
 | Table | Purpose |
 |---|---|
 | `outbox` | Primary event buffer |
-| `outbox_dead_letter` | Messages past `MaxRetryCount` |
+| `outbox_dead_letter` | Messages dead-lettered after exhausting `MaxPublishAttempts` |
 | `outbox_publishers` | Heartbeat registry |
 | `outbox_partitions` | Partition-to-publisher ownership map |
 
@@ -41,7 +41,6 @@ Four tables, one index, two diagnostic views, and a 64-partition seed:
 | `payload` | `BYTEA` | Raw message bytes |
 | `headers` | `VARCHAR(2000)` | JSON-serialized headers (nullable) |
 | `event_ordinal` | `INT` | Tiebreaker for same-timestamp events |
-| `retry_count` | `INT` | Delivery attempts |
 
 ### Indexes
 
@@ -112,7 +111,7 @@ With `TablePrefix = "orders_"`, tables become `public.orders_outbox`, `public.or
 `PostgreSqlDeadLetterManager` implements `IDeadLetterManager`:
 
 - **Get** — Paginated read ordered by `dead_letter_seq`
-- **Replay** — Atomic delete-from-dead-letter + insert-into-outbox with `retry_count = 0`
+- **Replay** — Atomic delete-from-dead-letter + insert-into-outbox (in-memory attempt counter starts fresh on next poll)
 - **Purge/PurgeAll** — Permanent deletion
 
 Replayed messages get a new `sequence_number` (the identity column regenerates).

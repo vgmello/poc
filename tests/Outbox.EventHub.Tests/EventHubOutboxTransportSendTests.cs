@@ -46,7 +46,6 @@ public class EventHubOutboxTransportSendTests
             PayloadContentType: "application/json",
             EventDateTimeUtc: DateTimeOffset.UtcNow,
             EventOrdinal: 0,
-            RetryCount: 0,
             CreatedAtUtc: DateTimeOffset.UtcNow);
 
     [Fact]

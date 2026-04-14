@@ -19,7 +19,7 @@ public sealed class LoopCoordinationContractTests : IDisposable
         _f.Options.HeartbeatIntervalMs = 20;
         _f.Store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(Array.Empty<OutboxMessage>());
 
         _f.Store.HeartbeatAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
@@ -37,7 +37,7 @@ public sealed class LoopCoordinationContractTests : IDisposable
         _f.Options.HeartbeatIntervalMs = 10;
         _f.Store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(Array.Empty<OutboxMessage>());
 
         _f.Store.HeartbeatAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
@@ -55,7 +55,7 @@ public sealed class LoopCoordinationContractTests : IDisposable
         _f.Options.HeartbeatIntervalMs = 10;
         _f.Store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(Array.Empty<OutboxMessage>());
 
         var heartbeatCallCount = 0;

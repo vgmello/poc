@@ -26,6 +26,12 @@ namespace Outbox.Core.Models;
 ///         Consumers must be idempotent. Consider using <see cref="SequenceNumber" /> as a
 ///         deduplication key on the consumer side.
 ///     </para>
+///
+///     <para>
+///         <b>Retry tracking:</b> Retry state is held in process memory by the publisher's
+///         in-batch retry loop. There is no persistent retry counter on this record; restarts
+///         re-fetch failed messages with a fresh attempt budget.
+///     </para>
 /// </remarks>
 public sealed record OutboxMessage(
     long SequenceNumber,
@@ -37,5 +43,4 @@ public sealed record OutboxMessage(
     string PayloadContentType,
     DateTimeOffset EventDateTimeUtc,
     int EventOrdinal,
-    int RetryCount,
     DateTimeOffset CreatedAtUtc);

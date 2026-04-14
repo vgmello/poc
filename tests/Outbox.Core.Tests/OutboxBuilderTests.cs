@@ -43,7 +43,7 @@ public class OutboxBuilderTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Outbox:Publisher:BatchSize"] = "200",
-                ["Outbox:Publisher:MaxRetryCount"] = "10"
+                ["Outbox:Publisher:MaxPublishAttempts"] = "10"
             })
             .Build();
         services.AddSingleton<IConfiguration>(config);
@@ -55,7 +55,7 @@ public class OutboxBuilderTests
         var provider = services.BuildServiceProvider();
         var options = provider.GetRequiredService<IOptionsMonitor<OutboxPublisherOptions>>();
         Assert.Equal(200, options.CurrentValue.BatchSize);
-        Assert.Equal(10, options.CurrentValue.MaxRetryCount);
+        Assert.Equal(10, options.CurrentValue.MaxPublishAttempts);
     }
 
     [Fact]

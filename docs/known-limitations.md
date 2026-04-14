@@ -30,7 +30,7 @@ The Confluent.Kafka `IProducer<K,V>.Flush()` method is synchronous by design —
 
 **Affected:** `KafkaOutboxTransport.SendSubBatchAsync`
 
-**What happens:** Messages are queued via `_producer.Produce()` (non-blocking, enqueues internally). Then `Flush` drains the internal queue. If the cancellation token fires (timeout) before all delivery reports arrive, `ThrowIfCancellationRequested()` throws `OperationCanceledException`. The method exits with an exception. But some messages may have already been delivered to Kafka — their delivery reports just hadn't arrived yet. The caller treats the entire batch as failed (`IncrementRetryCountAsync`), and those already-delivered messages will be re-sent on the next retry cycle.
+**What happens:** Messages are queued via `_producer.Produce()` (non-blocking, enqueues internally). Then `Flush` drains the internal queue. If the cancellation token fires (timeout) before all delivery reports arrive, `ThrowIfCancellationRequested()` throws `OperationCanceledException`. The method exits with an exception. But some messages may have already been delivered to Kafka — their delivery reports just hadn't arrived yet. The caller treats the entire batch as failed (increments the in-memory attempt counter), and those already-delivered messages will be re-sent on the next retry cycle.
 
 **Why EventHub doesn't have this:** EventHub's `_client.SendAsync(batch, ct)` is atomic per batch. Either the entire batch is accepted or it isn't. There is no intermediate state where "some messages are delivered but the SDK doesn't know yet." The Azure SDK handles cancellation internally and provides a clean success/failure boundary.
 
@@ -66,7 +66,7 @@ The key insight: after a timeout, we should NOT assume all messages failed. The 
 
 - **Extra duplicates during timeout scenarios.** Since the outbox pattern already guarantees at-least-once (not exactly-once), duplicates are expected. This issue increases the duplicate rate during Kafka backpressure, but consumers must be idempotent regardless.
 - **Ordering is preserved.** Ghost-written messages are re-fetched in `event_datetime_utc, event_ordinal` order by `FetchBatchAsync`, so the consumer sees duplicates but never out-of-order delivery within a partition key.
-- **False dead-lettering under sustained backpressure.** Each timeout increments `retry_count` via `IncrementRetryCountAsync`, even for messages that were already delivered. Under sustained Kafka backpressure, `retry_count` can reach `MaxRetryCount` and the message gets dead-lettered despite successful delivery. This does not cause data loss (the consumer already received it), but operators should be aware that dead-lettered messages from Kafka timeout scenarios may not actually be undelivered. Tuning `SendTimeoutSeconds` to match realistic Kafka latency reduces this risk.
+- **False dead-lettering under sustained backpressure.** Retry counts are in-memory and reset on publisher restart — failed messages get a fresh attempt budget on the next poll cycle. However, within a single poll cycle, each timeout against a given (topic, partitionKey) group counts as a non-transient failure and increments the in-memory attempt counter, even for messages that were already delivered. Under sustained Kafka backpressure within a single processing cycle, the in-memory attempt counter can reach `MaxPublishAttempts` and the messages get dead-lettered despite successful delivery. This does not cause data loss (the consumer already received them), but operators should be aware that dead-lettered messages from Kafka timeout scenarios may not actually be undelivered. Tuning `SendTimeoutSeconds` to match realistic Kafka latency reduces this risk.
 
 ---
 
@@ -74,7 +74,7 @@ The key insight: after a timeout, we should NOT assume all messages failed. The 
 
 ### Background loops catch all exceptions (by design)
 
-All five background loops (publish, heartbeat, rebalance, orphan sweep, dead-letter sweep) have `catch (Exception ex)` handlers that log and continue. This means:
+All four background loops (publish, heartbeat, rebalance, orphan sweep) have `catch (Exception ex)` handlers that log and continue. This means:
 
 - **No single DB error can kill the publisher.** The service survives transient DB outages, network blips, and unexpected exceptions.
 - **The heartbeat loop is the exception:** after 3 consecutive failures, it re-throws the exception instead of continuing. This is intentional — the heartbeat loop exiting triggers `RunLoopsWithRestartAsync`'s linked CTS to cancel all loops and restart them with exponential backoff. This is the primary mechanism for detecting persistent infrastructure failures.

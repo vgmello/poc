@@ -85,6 +85,42 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
         }
     }
 
+    /// <inheritdoc />
+    public bool IsTransient(Exception exception)
+    {
+        return exception switch
+        {
+            OperationCanceledException => true,
+            AggregateException agg => agg.InnerExceptions.Count > 0
+                && agg.InnerExceptions.All(IsTransient),
+            ProduceException<string, byte[]> pex => IsTransientCode(pex.Error.Code),
+            KafkaException kex => IsTransientCode(kex.Error.Code),
+            _ => false
+        };
+    }
+
+    private static bool IsTransientCode(ErrorCode code) => code switch
+    {
+        // Broker-side transient errors
+        ErrorCode.BrokerNotAvailable => true,
+        ErrorCode.LeaderNotAvailable => true,
+        ErrorCode.NotLeaderForPartition => true,
+        ErrorCode.NotEnoughReplicas => true,
+        ErrorCode.NotEnoughReplicasAfterAppend => true,
+        ErrorCode.NetworkException => true,
+        ErrorCode.RequestTimedOut => true,
+        // Rare on non-idempotent producers; classified transient to avoid
+        // dead-lettering on transient network duplication.
+        ErrorCode.OutOfOrderSequenceNumber => true,
+        // Client-side transient errors (librdkafka local errors)
+        ErrorCode.Local_Transport => true,
+        ErrorCode.Local_AllBrokersDown => true,
+        ErrorCode.Local_TimedOut => true,
+        ErrorCode.Local_QueueFull => true,
+        ErrorCode.Local_MsgTimedOut => true,
+        _ => false
+    };
+
     // Cognitive complexity is inherent to the produce-flush-error-handling flow.
     // Splitting further would obscure the delivery-report callback logic.
 #pragma warning disable S3776

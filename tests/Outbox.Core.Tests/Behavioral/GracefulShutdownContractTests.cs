@@ -36,24 +36,6 @@ public sealed class GracefulShutdownContractTests : IDisposable
     }
 
     [Fact]
-    public async Task IncrementRetryCount_InFailurePath_UsesCancellationTokenNone()
-    {
-        var messages = new[] { TestOutboxServiceFactory.MakeMessage(1) };
-        _f.SetupSingleBatch("p1", messages);
-
-        _f.Transport.SendAsync(
-                Arg.Any<string>(), Arg.Any<string>(),
-                Arg.Any<IReadOnlyList<OutboxMessage>>(), Arg.Any<CancellationToken>())
-            .ThrowsAsync(new InvalidOperationException("Kafka down"));
-
-        var service = _f.CreateService();
-        await TestOutboxServiceFactory.RunServiceAsync(service);
-
-        await _f.Store.Received().IncrementRetryCountAsync(
-            Arg.Any<IReadOnlyList<long>>(), CancellationToken.None);
-    }
-
-    [Fact]
     public async Task DeletePublished_InPartialSendPath_UsesCancellationTokenNone()
     {
         var messages = new[]

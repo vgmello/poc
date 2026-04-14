@@ -17,11 +17,12 @@ public sealed class CircuitBreakerContractTests : IDisposable
     public async Task CircuitOpens_AfterThresholdConsecutiveFailures()
     {
         _f.Store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _f.Transport.IsTransient(Arg.Any<Exception>()).Returns(true);
 
         var messages = new[] { TestOutboxServiceFactory.MakeMessage(1) };
         var callCount = 0;
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
                 Interlocked.Increment(ref callCount) <= _f.Options.CircuitBreakerFailureThreshold + 2
                     ? messages
@@ -42,11 +43,12 @@ public sealed class CircuitBreakerContractTests : IDisposable
     public async Task OpenCircuit_SkipsMessages_WithoutTouchingThem()
     {
         _f.Store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _f.Transport.IsTransient(Arg.Any<Exception>()).Returns(true);
 
         var messages = new[] { TestOutboxServiceFactory.MakeMessage(1) };
         var callCount = 0;
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
                 Interlocked.Increment(ref callCount) <= _f.Options.CircuitBreakerFailureThreshold + 3
                     ? messages
@@ -77,7 +79,7 @@ public sealed class CircuitBreakerContractTests : IDisposable
 
         var callCount = 0;
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 var n = Interlocked.Increment(ref callCount);
@@ -114,11 +116,12 @@ public sealed class CircuitBreakerContractTests : IDisposable
     {
         _f.Options.CircuitBreakerFailureThreshold = 1;
         _f.Store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _f.Transport.IsTransient(Arg.Any<Exception>()).Returns(true);
 
         var messages = new[] { TestOutboxServiceFactory.MakeMessage(1) };
         var callCount = 0;
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
                 Interlocked.Increment(ref callCount) == 1
                     ? messages
@@ -153,10 +156,11 @@ public sealed class CircuitBreakerContractTests : IDisposable
         _f.Options.MaxPollIntervalMs = 50;
 
         _f.Store.RegisterPublisherAsync(Arg.Any<CancellationToken>()).Returns("p1");
+        _f.Transport.IsTransient(Arg.Any<Exception>()).Returns(true);
 
         var messages = new[] { TestOutboxServiceFactory.MakeMessage(1) };
         _f.Store.FetchBatchAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(messages);
 
         var sendCallCount = 0;

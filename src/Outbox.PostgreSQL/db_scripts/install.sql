@@ -21,8 +21,6 @@ CREATE TABLE IF NOT EXISTS outbox
     event_datetime_utc TIMESTAMPTZ(3) NOT NULL,
     event_ordinal      INT            NOT NULL DEFAULT 0,
     payload_content_type VARCHAR(100) NOT NULL DEFAULT 'application/json',
-    retry_count        INT            NOT NULL DEFAULT 0,
-
     CONSTRAINT pk_outbox PRIMARY KEY (sequence_number)
 );
 
@@ -39,7 +37,7 @@ CREATE TABLE IF NOT EXISTS outbox_dead_letter
     headers              VARCHAR(2000)  NULL,
     payload              BYTEA          NOT NULL,
     created_at_utc       TIMESTAMPTZ(3) NOT NULL,
-    retry_count          INT            NOT NULL,
+    attempt_count        INT            NOT NULL,
     event_datetime_utc   TIMESTAMPTZ(3) NOT NULL,
     event_ordinal        INT            NOT NULL DEFAULT 0,
     payload_content_type VARCHAR(100)   NOT NULL DEFAULT 'application/json',
@@ -84,7 +82,7 @@ CREATE TABLE IF NOT EXISTS outbox_partitions
 -- Pending rows in causal order
 CREATE INDEX IF NOT EXISTS ix_outbox_pending
 ON outbox (event_datetime_utc, event_ordinal)
-INCLUDE (sequence_number, topic_name, partition_key, event_type, retry_count, created_at_utc);
+INCLUDE (sequence_number, topic_name, partition_key, event_type, created_at_utc);
 
 -- Dead-letter lookup by original sequence number (used by replay and purge)
 CREATE INDEX IF NOT EXISTS ix_outbox_dead_letter_sequence_number
@@ -100,7 +98,7 @@ SELECT sequence_number, topic_name, partition_key, event_type,
        CASE WHEN payload_content_type IN ('application/json', 'text/plain')
             THEN convert_from(payload, 'UTF8')
        END AS payload_text,
-       retry_count, created_at_utc, event_datetime_utc
+       created_at_utc, event_datetime_utc
 FROM outbox;
 
 CREATE OR REPLACE VIEW vw_outbox_dead_letter AS
@@ -110,7 +108,7 @@ SELECT dead_letter_seq, sequence_number, topic_name, partition_key, event_type,
        CASE WHEN payload_content_type IN ('application/json', 'text/plain')
             THEN convert_from(payload, 'UTF8')
        END AS payload_text,
-       retry_count, created_at_utc, event_datetime_utc,
+       attempt_count, created_at_utc, event_datetime_utc,
        dead_lettered_at_utc, last_error
 FROM outbox_dead_letter;
 

@@ -11,7 +11,9 @@ public class OutboxPublisherOptionsTests
     private static OutboxPublisherOptions ValidOptions() => new()
     {
         BatchSize = 100,
-        MaxRetryCount = 10,
+        MaxPublishAttempts = 10,
+        RetryBackoffBaseMs = 100,
+        RetryBackoffMaxMs = 2000,
         CircuitBreakerFailureThreshold = 3,
         CircuitBreakerOpenDurationSeconds = 30,
         PartitionGracePeriodSeconds = 60,
@@ -21,7 +23,6 @@ public class OutboxPublisherOptionsTests
         MaxPollIntervalMs = 5000,
         RebalanceIntervalMs = 30_000,
         OrphanSweepIntervalMs = 60_000,
-        DeadLetterSweepIntervalMs = 60_000,
         PublishThreadCount = 4
     };
 
@@ -55,13 +56,13 @@ public class OutboxPublisherOptionsTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public void MaxRetryCount_Invalid_ReturnsFailure(int value)
+    public void MaxPublishAttempts_Invalid_ReturnsFailure(int value)
     {
         var options = ValidOptions();
-        options.MaxRetryCount = value;
+        options.MaxPublishAttempts = value;
         var results = Validate(options);
         Assert.NotEmpty(results);
-        Assert.Contains(results, r => r.MemberNames.Contains("MaxRetryCount"));
+        Assert.Contains(results, r => r.MemberNames.Contains("MaxPublishAttempts"));
     }
 
     [Theory]
@@ -151,18 +152,6 @@ public class OutboxPublisherOptionsTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public void DeadLetterSweepIntervalMs_Invalid_ReturnsFailure(int value)
-    {
-        var options = ValidOptions();
-        options.DeadLetterSweepIntervalMs = value;
-        var results = Validate(options);
-        Assert.NotEmpty(results);
-        Assert.Contains(results, r => r.MemberNames.Contains("DeadLetterSweepIntervalMs"));
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
     public void CircuitBreakerFailureThreshold_Invalid_ReturnsFailure(int value)
     {
         var options = ValidOptions();
@@ -236,16 +225,40 @@ public class OutboxPublisherOptionsTests
             r.MemberNames.Contains("HeartbeatIntervalMs"));
     }
 
-    [Fact]
-    public void CrossField_MaxRetryCountNotGreaterThanCircuitBreakerThreshold_ReturnsFailure()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void RetryBackoffBaseMs_Invalid_ReturnsFailure(int value)
     {
         var options = ValidOptions();
-        options.MaxRetryCount = 3;
-        options.CircuitBreakerFailureThreshold = 3;
+        options.RetryBackoffBaseMs = value;
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("RetryBackoffBaseMs"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void RetryBackoffMaxMs_Invalid_ReturnsFailure(int value)
+    {
+        var options = ValidOptions();
+        options.RetryBackoffMaxMs = value;
+        var results = Validate(options);
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.MemberNames.Contains("RetryBackoffMaxMs"));
+    }
+
+    [Fact]
+    public void CrossField_RetryBackoffMaxLessThanBase_ReturnsFailure()
+    {
+        var options = ValidOptions();
+        options.RetryBackoffBaseMs = 1000;
+        options.RetryBackoffMaxMs = 500;
         var results = Validate(options);
         Assert.NotEmpty(results);
         Assert.Contains(results, r =>
-            r.MemberNames.Contains("MaxRetryCount") &&
-            r.MemberNames.Contains("CircuitBreakerFailureThreshold"));
+            r.MemberNames.Contains("RetryBackoffMaxMs") &&
+            r.MemberNames.Contains("RetryBackoffBaseMs"));
     }
 }

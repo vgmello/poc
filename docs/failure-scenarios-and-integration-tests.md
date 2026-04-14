@@ -34,7 +34,7 @@ This document defines all failure/error scenarios that must be validated through
 5. **Assert:** Health check returns `Degraded` with open circuit breaker topics listed
 6. Continue inserting 200 more messages over the next 60 seconds
 7. **Assert:** Messages remain in outbox table (`SELECT COUNT(*) FROM outbox` = ~300)
-8. **Assert:** Retry counts on messages are being incremented via `IncrementRetryCountAsync` (transport failure path)
+8. **Assert:** Messages remain in the outbox without being dead-lettered (circuit breaker opens on transient failures before the in-memory attempt counter is exhausted)
 9. Wait 30 seconds (circuit breaker `OpenDurationSeconds`)
 10. **Assert:** Circuit transitions to HalfOpen, one probe batch is attempted, fails, re-opens
 11. **Restore broker connectivity**
@@ -164,11 +164,11 @@ This document defines all failure/error scenarios that must be validated through
 
 ## Scenario 5: Poison Message (Oversized / Malformed Payload)
 
-**What we're testing:** A message that consistently fails transport send (e.g., too large for EventHub batch) eventually gets dead-lettered instead of retrying infinitely.
+**What we're testing:** A message that consistently fails transport send with a non-transient error (e.g., too large for EventHub batch) is dead-lettered inline within `MaxPublishAttempts * RetryBackoffMaxMs` of being fetched (a few seconds with defaults).
 
 **Setup:**
 
-1. Start a publisher instance with `MaxRetryCount = 3`
+1. Start a publisher instance with `MaxPublishAttempts = 3`
 2. Insert 1 message with a payload larger than `MaxBatchSizeBytes` (e.g., 2MB for EventHub's 1MB limit)
 3. Insert 5 normal messages with the same topic/partition key (to verify they're not blocked)
 
@@ -176,61 +176,60 @@ This document defines all failure/error scenarios that must be validated through
 
 1. Wait for publisher to attempt sending the oversized message
 2. **Assert:** `SendAsync` throws `InvalidOperationException: Message too large`
-3. **Assert:** `IncrementRetryCountAsync` called for the failed message
-4. **Assert:** After 3 failures, message's `retry_count` = 3 (incremented on each transport failure)
-5. **Assert:** `FetchBatchAsync` no longer returns this message (SQL filter: `retry_count < @max_retry_count`)
-6. **Assert:** `DeadLetterSweepLoopAsync` picks up the message and calls `SweepDeadLettersAsync`, which moves it to `outbox_dead_letter` table
-7. **Assert:** `outbox.messages.dead_lettered` metric incremented
-8. **Assert:** The 5 normal messages are published successfully (not blocked by the poison message)
-9. **Assert:** Dead letter table contains the oversized message with `last_error` populated
+3. **Assert:** `IOutboxTransport.IsTransient` classifies this as non-transient — in-memory attempt counter incremented (circuit breaker NOT fed)
+4. **Assert:** After `MaxPublishAttempts` non-transient failures, the publisher calls `DeadLetterAsync` inline — message moves atomically from `outbox` to `outbox_dead_letter`
+5. **Assert:** `outbox.messages.dead_lettered` metric incremented
+6. **Assert:** The 5 normal messages are published successfully (not blocked by the poison message)
+7. **Assert:** Dead letter table contains the oversized message with `last_error` and `attempt_count` populated
+8. **Assert:** Outbox table no longer contains the poison message
 
 **Verify no infinite retry:**
 
-- Track `retry_count` after each transport failure
-- Must increment by 1 each time (via `IncrementRetryCountAsync`)
+- The in-memory attempt counter is a local variable scoped to one group's processing cycle — it cannot grow unbounded across restarts
+- On publisher restart, messages are re-fetched with a fresh attempt budget (acceptable under at-least-once semantics)
 
 ---
 
 ## Scenario 6: Intermittent Transport Failures
 
-**What we're testing:** Under intermittent failures (2 fail, 1 success pattern), messages still eventually dead-letter instead of retrying forever.
+**What we're testing:** Under intermittent non-transient failures (2 fail, 1 success pattern), messages still eventually dead-letter instead of retrying forever.
 
 **Setup:**
 
-1. Start a publisher with `MaxRetryCount = 5`, `CircuitBreakerFailureThreshold = 10` (high to prevent circuit from opening)
-2. Configure transport mock/proxy to fail 2 out of every 3 sends
+1. Start a publisher with `MaxPublishAttempts = 5`, `CircuitBreakerFailureThreshold = 10` (high to prevent circuit from opening)
+2. Configure transport mock/proxy to fail 2 out of every 3 sends with a non-transient error (so `IsTransient` returns false)
 3. Insert 10 messages
 
 **Test steps:**
 
-1. **Assert:** Each failed send increments `retry_count` via `IncrementRetryCountAsync`
-2. **Assert:** Each successful send resets the circuit breaker failure count (but does NOT reset `retry_count` — that only resets on replay from dead letter)
+1. **Assert:** Each failed non-transient send increments the in-memory attempt counter for that (topic, partitionKey) group
+2. **Assert:** Each successful send resets the circuit breaker failure count (in-memory attempt counter is scoped to one processing cycle)
 3. **Assert:** Messages that succeed are deleted from outbox
-4. **Assert:** Messages that accumulate `retry_count >= 5` are dead-lettered
+4. **Assert:** Messages whose in-memory attempt counter reaches `MaxPublishAttempts` are dead-lettered inline via `DeadLetterAsync`
 5. **Assert:** After sufficient iterations, all 10 messages are either published or dead-lettered
 6. **Assert:** Outbox table is eventually empty
 7. **Assert:** No message retries indefinitely
 
 ---
 
-## Scenario 7: Circuit Breaker Does NOT Burn Retry Counts
+## Scenario 7: Circuit Breaker Does NOT Burn the Attempt Counter
 
-**What we're testing:** When the circuit breaker is open, messages are skipped (left in the outbox) WITHOUT incrementing retry count. This prevents messages from being dead-lettered due to broker outage (not message-level failure).
+**What we're testing:** When the circuit breaker is open, messages are skipped (left in the outbox) WITHOUT consuming the in-memory attempt counter. Transient failures trip the circuit but do not advance the attempt counter. This prevents messages from being dead-lettered due to a broker outage.
 
 **Setup:**
 
-1. Start a publisher with `MaxRetryCount = 3`, `CircuitBreakerFailureThreshold = 2`
+1. Start a publisher with `MaxPublishAttempts = 3`, `CircuitBreakerFailureThreshold = 2`
 2. Insert 10 messages
-3. Make the broker unreachable
+3. Make the broker unreachable (transient failure — `IsTransient` returns true)
 
 **Test steps:**
 
-1. Wait for 2 consecutive failures → circuit opens
-2. **Assert:** Subsequent fetches for that topic are skipped—messages stay in the outbox untouched
-3. **Assert:** `retry_count` stays at value from before circuit opened (incremented only during actual send attempts, not during circuit-open skips)
+1. Wait for 2 consecutive transient failures → circuit opens (attempt counter NOT incremented during these failures)
+2. **Assert:** Subsequent fetches for that topic are skipped — messages stay in the outbox untouched
+3. **Assert:** No dead-lettering occurs while circuit is open
 4. Wait for circuit to half-open, then make broker available
-5. **Assert:** Messages sent successfully with `retry_count` ≤ 2 (from the initial failures before circuit opened)
-6. **Assert:** Messages are NOT dead-lettered (retry count did not reach `MaxRetryCount`)
+5. **Assert:** Messages sent successfully — they were never charged against their attempt budget during the outage
+6. **Assert:** Messages are NOT dead-lettered
 7. **Assert:** All 10 messages published
 
 ---
@@ -391,7 +390,7 @@ This document defines all failure/error scenarios that must be validated through
 1. **Assert:** Dead letter table has ≥1 message
 2. Call `IDeadLetterManager.ReplayAsync` with the dead-lettered sequence numbers
 3. **Assert:** Messages moved from `outbox_dead_letter` back to `outbox` table
-4. **Assert:** `retry_count` reset to 0 in the outbox table
+4. **Assert:** Replayed messages enter the outbox with no persisted retry state (the in-memory attempt counter starts fresh on the next poll)
 5. **Assert:** Messages are eventually published to the broker
 6. **Assert:** Consumer receives the replayed messages
 7. **Assert:** Dead letter table no longer contains the replayed messages
@@ -441,9 +440,8 @@ This document defines all failure/error scenarios that must be validated through
 3. **Assert:** Publish attempts fail, circuit opens after threshold
 4. **Assert:** Heartbeat continues successfully (DB is fine)
 5. **Assert:** Health check returns `Degraded` (not `Unhealthy` — loop is running, heartbeat is fine)
-6. **Assert:** Messages accumulate in outbox table
-7. **Assert:** `retry_count` increments on each failed send
-8. **Assert:** Circuit breaker open-close cycles are visible in metrics
+6. **Assert:** Messages accumulate in outbox table without being dead-lettered (circuit opens on transient failures before the in-memory attempt counter is exhausted)
+7. **Assert:** Circuit breaker open-close cycles are visible in metrics
 9. **Restore broker connectivity**
 10. **Assert:** Circuit half-opens, probe succeeds, circuit closes
 11. **Assert:** All 100 accumulated messages published

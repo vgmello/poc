@@ -20,7 +20,6 @@ internal sealed class FetchBatchOutputRow
     public string PayloadContentType { get; set; } = string.Empty;
     public DateTimeOffset EventDateTimeUtc { get; set; }
     public int EventOrdinal { get; set; }
-    public int RetryCount { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
 
     public OutboxMessage ToDomain() =>
@@ -34,6 +33,5 @@ internal sealed class FetchBatchOutputRow
             PayloadContentType,
             EventDateTimeUtc,
             EventOrdinal,
-            RetryCount,
             CreatedAtUtc);
 }

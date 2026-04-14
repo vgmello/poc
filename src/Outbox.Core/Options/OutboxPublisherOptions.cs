@@ -14,8 +14,27 @@ public sealed class OutboxPublisherOptions : IValidatableObject
     [Range(1, int.MaxValue)]
     public int BatchSize { get; set; } = 100;
 
+    /// <summary>
+    ///     Maximum number of times a (topic, partitionKey) group will be sent before
+    ///     the failed messages are dead-lettered. Counts total attempts including the
+    ///     first send. Only non-transient failures consume an attempt; transient
+    ///     failures (broker unreachable, timeouts, etc.) do not.
+    /// </summary>
     [Range(1, int.MaxValue)]
-    public int MaxRetryCount { get; set; } = 5;
+    public int MaxPublishAttempts { get; set; } = 5;
+
+    /// <summary>
+    ///     Initial backoff (ms) between in-batch retry attempts.
+    /// </summary>
+    [Range(1, int.MaxValue)]
+    public int RetryBackoffBaseMs { get; set; } = 100;
+
+    /// <summary>
+    ///     Maximum backoff (ms) between in-batch retry attempts. The actual delay is
+    ///     <c>min(RetryBackoffBaseMs * 2^(attempt-1), RetryBackoffMaxMs)</c>.
+    /// </summary>
+    [Range(1, int.MaxValue)]
+    public int RetryBackoffMaxMs { get; set; } = 2000;
 
     [Range(1, int.MaxValue)]
     public int MinPollIntervalMs { get; set; } = 100;
@@ -37,9 +56,6 @@ public sealed class OutboxPublisherOptions : IValidatableObject
 
     [Range(1, int.MaxValue)]
     public int OrphanSweepIntervalMs { get; set; } = 60_000;
-
-    [Range(1, int.MaxValue)]
-    public int DeadLetterSweepIntervalMs { get; set; } = 60_000;
 
     [Range(1, int.MaxValue)]
     public int CircuitBreakerFailureThreshold { get; set; } = 3;
@@ -73,13 +89,11 @@ public sealed class OutboxPublisherOptions : IValidatableObject
                 new[] { nameof(HeartbeatTimeoutSeconds), nameof(HeartbeatIntervalMs) });
         }
 
-        if (MaxRetryCount <= CircuitBreakerFailureThreshold)
+        if (RetryBackoffMaxMs < RetryBackoffBaseMs)
         {
             yield return new ValidationResult(
-                $"MaxRetryCount ({MaxRetryCount}) should be greater than " +
-                $"CircuitBreakerFailureThreshold ({CircuitBreakerFailureThreshold}) " +
-                "to allow the circuit breaker to activate before dead-lettering.",
-                new[] { nameof(MaxRetryCount), nameof(CircuitBreakerFailureThreshold) });
+                "RetryBackoffMaxMs must be >= RetryBackoffBaseMs.",
+                new[] { nameof(RetryBackoffMaxMs), nameof(RetryBackoffBaseMs) });
         }
     }
 }

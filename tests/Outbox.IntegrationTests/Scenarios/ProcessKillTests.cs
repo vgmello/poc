@@ -115,16 +115,20 @@ public class ProcessKillTests
     }
 
     [Fact]
-    public async Task SigKill_TransportFailure_RetryCountIncrementedByPublisher()
+    public async Task SigKill_MessagesPickedUpByNewPublisher_WithFreshAttemptBudget()
     {
         var topic = OutboxTestHelper.UniqueTopic("sigkill-retry");
         await OutboxTestHelper.CleanupAsync(_infra.ConnectionString);
 
-        // Start publisher A with a failing transport so messages stay in the outbox
+        // Start publisher A with a failing transport so messages stay in the outbox.
+        // Under the in-memory retry model, retry tracking is NOT persisted to the DB.
+        // When A is killed, B picks up the same messages with a fresh attempt budget.
         var (hostA, transportA) = OutboxTestHelper.BuildPublisherHost(
             _infra.ConnectionString, _infra.BootstrapServers);
 
-        // Make transport fail so messages are not deleted (retry_count gets incremented)
+        // Non-transient failures: attempts are consumed and would eventually DLQ,
+        // but we kill A before that happens.
+        transportA.SetSimulatedFailuresTransient(false);
         transportA.SetFailing(true);
 
         await hostA.StartAsync();
@@ -137,21 +141,12 @@ public class ProcessKillTests
             return owners.Values.Any(v => v != null);
         }, TimeSpan.FromSeconds(10), message: "Publisher A should claim partitions");
 
-        // Insert messages — A will fetch them but fail to send, incrementing retry_count
+        // Insert messages — A will fetch them but fail to send.
+        // In the new model, attempt counts are tracked in-memory only.
         await OutboxTestHelper.InsertMessagesAsync(_infra.ConnectionString, 5, topic, "key-1");
 
-        // Wait for A to fetch and fail (retry_count gets incremented via IncrementRetryCountAsync)
-        await OutboxTestHelper.WaitUntilAsync(async () =>
-        {
-            var retryCounts = await OutboxTestHelper.GetRetryCountsAsync(_infra.ConnectionString);
-
-            return retryCounts.Any(r => r.RetryCount > 0);
-        }, TimeSpan.FromSeconds(10), message: "Publisher A should increment retry counts on transport failure");
-
-        // Capture retry counts before simulating kill
-        var retryCountsBeforeKill = await OutboxTestHelper.GetRetryCountsAsync(_infra.ConnectionString);
-        _output.WriteLine(
-            $"Retry counts before kill: {string.Join(", ", retryCountsBeforeKill.Select(r => $"seq={r.Seq}:retry={r.RetryCount}"))}");
+        // Let A attempt a few times, then simulate SIGKILL
+        await Task.Delay(TimeSpan.FromSeconds(3));
 
         // Simulate SIGKILL: stop A gracefully (we can't truly SIGKILL in a test),
         // then re-create stale publisher state to simulate the effect of an abrupt kill.
@@ -174,8 +169,11 @@ public class ProcessKillTests
             await insertCmd.ExecuteNonQueryAsync();
         }
 
-        // In the no-lease architecture, messages are immediately available after A stops —
-        // no need to wait for lease expiry.
+        // Assert: messages are still in the outbox (retry attempts are in-memory, not persisted).
+        // Publisher B will pick them up with a fresh attempt budget.
+        var pendingBeforeB = await OutboxTestHelper.GetOutboxCountAsync(_infra.ConnectionString);
+        Assert.True(pendingBeforeB > 0, "Messages should still be in outbox after A is killed");
+        _output.WriteLine($"Messages in outbox before B starts: {pendingBeforeB} (in-memory attempts are reset)");
 
         // Start publisher B with working transport — it should claim partitions and drain messages
         var (hostB, _) = OutboxTestHelper.BuildPublisherHost(
@@ -191,7 +189,7 @@ public class ProcessKillTests
                 var count = await OutboxTestHelper.GetOutboxCountAsync(_infra.ConnectionString);
 
                 return count == 0;
-            }, TimeSpan.FromSeconds(30), message: "Publisher B should drain all messages");
+            }, TimeSpan.FromSeconds(30), message: "Publisher B should drain all messages with fresh attempt budget");
 
             // Verify messages ended up in Kafka (published) or dead letter
             var consumed = await OutboxTestHelper.ConsumeMessagesAsync(

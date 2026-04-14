@@ -120,7 +120,7 @@ public class ConcurrentTransactionOrderingTests
 
         // --- Assert: FetchBatchAsync should NOT return B, C ---
         var batch1 = await store.FetchBatchAsync(publisherId,
-            batchSize: 10, maxRetryCount: 5,
+            batchSize: 10,
             CancellationToken.None);
 
         _output.WriteLine($"FetchBatch while Txn #1 open: returned {batch1.Count} messages " +
@@ -136,7 +136,7 @@ public class ConcurrentTransactionOrderingTests
         _output.WriteLine("Txn #1: committed (message A now visible)");
 
         var batch2 = await store.FetchBatchAsync(publisherId,
-            batchSize: 10, maxRetryCount: 5,
+            batchSize: 10,
             CancellationToken.None);
 
         _output.WriteLine($"FetchBatch after all committed: returned {batch2.Count} messages " +
@@ -207,7 +207,7 @@ public class ConcurrentTransactionOrderingTests
 
         // --- Act ---
         var batch = await store.FetchBatchAsync(publisherId,
-            batchSize: 10, maxRetryCount: 5,
+            batchSize: 10,
             CancellationToken.None);
 
         _output.WriteLine($"FetchBatch: returned {batch.Count} messages");
@@ -229,7 +229,7 @@ public class ConcurrentTransactionOrderingTests
         }
 
         var batch2 = await store.FetchBatchAsync(publisherId,
-            batchSize: 10, maxRetryCount: 5,
+            batchSize: 10,
             CancellationToken.None);
 
         _output.WriteLine($"FetchBatch after commit: returned {batch2.Count} messages");

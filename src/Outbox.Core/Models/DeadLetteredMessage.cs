@@ -13,7 +13,7 @@ public sealed record DeadLetteredMessage(
     string PayloadContentType,
     DateTimeOffset EventDateTimeUtc,
     int EventOrdinal,
-    int RetryCount,
+    int AttemptCount,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadLetteredAtUtc,
     string? LastError)

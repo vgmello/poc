@@ -28,7 +28,6 @@ public class ModelTests
             PayloadContentType: "application/json",
             EventDateTimeUtc: eventDate,
             EventOrdinal: 3,
-            RetryCount: 2,
             CreatedAtUtc: createdAt);
 
         Assert.Equal(42L, msg.SequenceNumber);
@@ -40,7 +39,6 @@ public class ModelTests
         Assert.Equal("application/json", msg.PayloadContentType);
         Assert.Equal(eventDate, msg.EventDateTimeUtc);
         Assert.Equal(3, msg.EventOrdinal);
-        Assert.Equal(2, msg.RetryCount);
         Assert.Equal(createdAt, msg.CreatedAtUtc);
     }
 
@@ -48,7 +46,7 @@ public class ModelTests
     public void OutboxMessage_NullHeaders_IsAllowed()
     {
         var msg = new OutboxMessage(1L, "topic", "key", "EventType", null, Encoding.UTF8.GetBytes("{}"), "application/json",
-            DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow);
         Assert.Null(msg.Headers);
     }
 
@@ -57,10 +55,10 @@ public class ModelTests
     {
         var ts = DateTimeOffset.UtcNow;
         var payload = Encoding.UTF8.GetBytes("{}");
-        var msg1 = new OutboxMessage(1L, "topic", "key", "EventType", null, payload, "application/json", ts, 0, 0, ts);
-        var msg2 = new OutboxMessage(1L, "topic", "key", "EventType", null, payload, "application/json", ts, 0, 0, ts);
-        var msg3 = new OutboxMessage(1L, "topic", "key", "EventType", null, Encoding.UTF8.GetBytes("{}"), "application/json", ts, 0, 0, ts);
-        var msg4 = new OutboxMessage(2L, "topic", "key", "EventType", null, payload, "application/json", ts, 0, 0, ts);
+        var msg1 = new OutboxMessage(1L, "topic", "key", "EventType", null, payload, "application/json", ts, 0, ts);
+        var msg2 = new OutboxMessage(1L, "topic", "key", "EventType", null, payload, "application/json", ts, 0, ts);
+        var msg3 = new OutboxMessage(1L, "topic", "key", "EventType", null, Encoding.UTF8.GetBytes("{}"), "application/json", ts, 0, ts);
+        var msg4 = new OutboxMessage(2L, "topic", "key", "EventType", null, payload, "application/json", ts, 0, ts);
 
         Assert.Equal(msg1, msg2); // same byte[] reference
         Assert.NotEqual(msg1, msg3); // different byte[] reference
@@ -87,7 +85,7 @@ public class ModelTests
             PayloadContentType: "application/json",
             EventDateTimeUtc: eventDate,
             EventOrdinal: 1,
-            RetryCount: 5,
+            AttemptCount: 5,
             CreatedAtUtc: createdAt,
             DeadLetteredAtUtc: deadLetteredAt,
             LastError: "Max retry count exceeded");
@@ -102,7 +100,7 @@ public class ModelTests
         Assert.Equal("application/json", msg.PayloadContentType);
         Assert.Equal(eventDate, msg.EventDateTimeUtc);
         Assert.Equal(1, msg.EventOrdinal);
-        Assert.Equal(5, msg.RetryCount);
+        Assert.Equal(5, msg.AttemptCount);
         Assert.Equal(createdAt, msg.CreatedAtUtc);
         Assert.Equal(deadLetteredAt, msg.DeadLetteredAtUtc);
         Assert.Equal("Max retry count exceeded", msg.LastError);
@@ -122,7 +120,7 @@ public class ModelTests
             PayloadContentType: "application/json",
             EventDateTimeUtc: DateTimeOffset.UtcNow,
             EventOrdinal: 0,
-            RetryCount: 0,
+            AttemptCount: 0,
             CreatedAtUtc: DateTimeOffset.UtcNow,
             DeadLetteredAtUtc: DateTimeOffset.UtcNow,
             LastError: null);
@@ -168,12 +166,12 @@ public class ModelTests
         // Exercises the default interface method bodies on IOutboxEventHandler (lines with => Task.CompletedTask)
         IOutboxEventHandler handler = new MinimalEventHandler();
 
-        var msg = new OutboxMessage(1L, "t", "k", "E", null, Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow, 0, 0,
+        var msg = new OutboxMessage(1L, "t", "k", "E", null, Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow, 0,
             DateTimeOffset.UtcNow);
 
         await handler.OnMessagePublishedAsync(msg, default);
         await handler.OnMessageDeadLetteredAsync(msg, default);
-        await handler.OnPublishFailedAsync(new[] { msg }, new Exception("fail"), default);
+        await handler.OnPublishFailedAsync(new[] { msg }, new Exception("fail"), PublishFailureReason.RetriesExhausted, default);
         await handler.OnCircuitBreakerStateChangedAsync("topic", CircuitState.Open, default);
         await handler.OnRebalanceAsync("publisher-1", [0, 1], default);
 

@@ -44,7 +44,7 @@ public class KafkaTransportInterceptorTests
     private static OutboxMessage MakeMessage(long seq) =>
         new(seq, "test-topic", "pk", "TestEvent", null,
             Encoding.UTF8.GetBytes("payload"), "application/json",
-            DateTimeOffset.UtcNow, 0, 0, DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow);
 
     private KafkaOutboxTransport CreateTransport(
         IEnumerable<ITransportMessageInterceptor<Message<string, byte[]>>>? interceptors = null) =>

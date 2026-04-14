@@ -15,14 +15,12 @@ internal sealed class SqlServerQueries
     public string UnregisterPublisher { get; }
     public string FetchBatch { get; }
     public string DeletePublished { get; }
-    public string IncrementRetryCount { get; }
     public string DeadLetter { get; }
     public string Heartbeat { get; }
     public string GetTotalPartitions { get; }
     public string GetOwnedPartitions { get; }
     public string Rebalance { get; }
     public string ClaimOrphanPartitions { get; }
-    public string SweepDeadLetters { get; }
     public string GetPendingCount { get; }
 
     // Dead-letter manager queries
@@ -71,7 +69,7 @@ internal sealed class SqlServerQueries
                          o.SequenceNumber, o.TopicName, o.PartitionKey, o.EventType,
                          o.Headers, o.Payload, o.PayloadContentType,
                          o.EventDateTimeUtc, o.EventOrdinal,
-                         o.RetryCount, o.CreatedAtUtc
+                         o.CreatedAtUtc
                      FROM {outboxTable} o WITH (NOLOCK)
                      WHERE o.PartitionId IN (
                          SELECT op.PartitionId
@@ -80,7 +78,6 @@ internal sealed class SqlServerQueries
                            AND op.OwnerPublisherId = @PublisherId
                            AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
                      )
-                       AND o.RetryCount < @MaxRetryCount
                        AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
                      ORDER BY o.PartitionId, o.EventDateTimeUtc, o.EventOrdinal, o.SequenceNumber;
                      """;
@@ -90,23 +87,17 @@ internal sealed class SqlServerQueries
                            WHERE SequenceNumber IN (SELECT SequenceNumber FROM @Ids);
                            """;
 
-        IncrementRetryCount = $"""
-                               UPDATE o SET o.RetryCount = o.RetryCount + 1
-                               FROM {outboxTable} o
-                               INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
-                               """;
-
         DeadLetter = $"""
                       DELETE o
                       OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
                              deleted.EventType, deleted.Headers, deleted.Payload,
                              deleted.PayloadContentType,
-                             deleted.CreatedAtUtc, deleted.RetryCount,
+                             deleted.CreatedAtUtc, @AttemptCount,
                              deleted.EventDateTimeUtc, deleted.EventOrdinal,
                              SYSUTCDATETIME(), @LastError
                       INTO {deadLetterTable}(SequenceNumber, TopicName, PartitionKey, EventType,
                            Headers, Payload, PayloadContentType,
-                           CreatedAtUtc, RetryCount,
+                           CreatedAtUtc, AttemptCount,
                            EventDateTimeUtc, EventOrdinal,
                            DeadLetteredAtUtc, LastError)
                       FROM {outboxTable} o
@@ -256,29 +247,6 @@ internal sealed class SqlServerQueries
                                  END;
                                  """;
 
-        SweepDeadLetters = $"""
-                            DELETE o
-                            OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
-                                   deleted.EventType, deleted.Headers, deleted.Payload,
-                                   deleted.PayloadContentType,
-                                   deleted.CreatedAtUtc, deleted.RetryCount,
-                                   deleted.EventDateTimeUtc, deleted.EventOrdinal,
-                                   SYSUTCDATETIME(), @LastError
-                            INTO {deadLetterTable}(SequenceNumber, TopicName, PartitionKey, EventType,
-                                 Headers, Payload, PayloadContentType,
-                                 CreatedAtUtc, RetryCount,
-                                 EventDateTimeUtc, EventOrdinal,
-                                 DeadLetteredAtUtc, LastError)
-                            FROM {outboxTable} o
-                            WHERE o.RetryCount >= @MaxRetryCount
-                              AND o.PartitionId IN (
-                                  SELECT op.PartitionId
-                                  FROM {partitionsTable} op
-                                  WHERE op.OutboxTableName = @OutboxTableName
-                                    AND op.OwnerPublisherId = @PublisherId
-                              );
-                            """;
-
         GetPendingCount = $"SELECT COUNT_BIG(*) FROM {outboxTable};";
 
         // Dead-letter manager queries
@@ -294,7 +262,7 @@ internal sealed class SqlServerQueries
                              PayloadContentType,
                              EventDateTimeUtc,
                              EventOrdinal,
-                             RetryCount,
+                             AttemptCount,
                              CreatedAtUtc,
                              DeadLetteredAtUtc,
                              LastError
@@ -311,13 +279,11 @@ internal sealed class SqlServerQueries
                                    deleted.Headers, deleted.Payload,
                                    deleted.PayloadContentType,
                                    deleted.CreatedAtUtc,
-                                   deleted.EventDateTimeUtc, deleted.EventOrdinal,
-                                   0
+                                   deleted.EventDateTimeUtc, deleted.EventOrdinal
                             INTO {outboxTable}(TopicName, PartitionKey, EventType,
                                  Headers, Payload, PayloadContentType,
                                  CreatedAtUtc,
-                                 EventDateTimeUtc, EventOrdinal,
-                                 RetryCount)
+                                 EventDateTimeUtc, EventOrdinal)
                             FROM {deadLetterTable} dl
                             INNER JOIN @Ids p ON dl.DeadLetterSeq = p.SequenceNumber;
                             """;

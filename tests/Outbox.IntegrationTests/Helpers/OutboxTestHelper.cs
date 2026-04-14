@@ -21,7 +21,9 @@ public static class OutboxTestHelper
     public static readonly Action<OutboxPublisherOptions> FastTestOptions = o =>
     {
         o.BatchSize = 10;
-        o.MaxRetryCount = 5;
+        o.MaxPublishAttempts = 5;
+        o.RetryBackoffBaseMs = 50;
+        o.RetryBackoffMaxMs = 200;
         o.MinPollIntervalMs = 50;
         o.MaxPollIntervalMs = 500;
         o.HeartbeatIntervalMs = 2_000;
@@ -29,7 +31,6 @@ public static class OutboxTestHelper
         o.PartitionGracePeriodSeconds = 15;
         o.RebalanceIntervalMs = 3_000;
         o.OrphanSweepIntervalMs = 3_000;
-        o.DeadLetterSweepIntervalMs = 3_000;
         o.CircuitBreakerFailureThreshold = 3;
         o.CircuitBreakerOpenDurationSeconds = 5;
     };
@@ -186,23 +187,6 @@ public static class OutboxTestHelper
         await using var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM outbox_dead_letter", conn);
 
         return (long)(await cmd.ExecuteScalarAsync())!;
-    }
-
-    public static async Task<List<(long Seq, int RetryCount)>> GetRetryCountsAsync(string connectionString)
-    {
-        var results = new List<(long, int)>();
-        await using var conn = new NpgsqlConnection(connectionString);
-        await conn.OpenAsync();
-        await using var cmd = new NpgsqlCommand(
-            "SELECT sequence_number, retry_count FROM outbox ORDER BY sequence_number", conn);
-        await using var reader = await cmd.ExecuteReaderAsync();
-
-        while (await reader.ReadAsync())
-        {
-            results.Add((reader.GetInt64(0), reader.GetInt32(1)));
-        }
-
-        return results;
     }
 
     public static async Task<List<string>> GetPublisherIdsAsync(string connectionString)

@@ -27,14 +27,18 @@ public class SqlServerDeadLetterReplayTests
         var topic = OutboxTestHelper.UniqueTopic("ss-replay");
         await SqlServerTestHelper.CleanupAsync(_infra.SqlServerConnectionString);
 
-        // Phase 1: Create dead-lettered messages by using MaxRetryCount=1 and failing transport
+        // Phase 1: Create dead-lettered messages using non-transient failures so
+        // attempts are consumed and DLQ happens inline after MaxPublishAttempts.
         var (host1, transport1) = SqlServerTestHelper.BuildPublisherHost(
             _infra.SqlServerConnectionString, _infra.BootstrapServers,
             o =>
             {
-                o.MaxRetryCount = 2;
-                o.CircuitBreakerFailureThreshold = 1;
+                o.MaxPublishAttempts = 2;
+                o.CircuitBreakerFailureThreshold = 10; // High so circuit never opens
+                o.RetryBackoffBaseMs = 50;
+                o.RetryBackoffMaxMs = 100;
             });
+        transport1.SetSimulatedFailuresTransient(false);
         transport1.SetFailing(true);
 
         await SqlServerTestHelper.InsertMessagesAsync(_infra.SqlServerConnectionString, 3, topic, "key-1");
@@ -71,16 +75,9 @@ public class SqlServerDeadLetterReplayTests
         Assert.Equal(0, await SqlServerTestHelper.GetDeadLetterCountAsync(_infra.SqlServerConnectionString));
         Assert.True(await SqlServerTestHelper.GetOutboxCountAsync(_infra.SqlServerConnectionString) >= 3);
 
-        // Assert: retry_count must be reset to 0 after replay — otherwise replayed messages
-        // would be immediately re-dead-lettered without any delivery attempt
-        var retryCounts = await SqlServerTestHelper.GetRetryCountsAsync(_infra.SqlServerConnectionString);
-
-        foreach (var (seq, retryCount) in retryCounts)
-        {
-            Assert.Equal(0, retryCount);
-        }
-
-        _output.WriteLine("All replayed messages have retry_count = 0");
+        // Note: retry_count column was removed in the in-memory retry rework.
+        // Replayed messages start fresh with a full attempt budget (in-memory, not persisted).
+        _output.WriteLine("Replayed messages are back in the outbox with fresh in-memory attempt budget");
 
         // Phase 3: Start publisher — should publish the replayed messages
         try

@@ -32,7 +32,7 @@ public class OrderingTests
             o =>
             {
                 o.CircuitBreakerFailureThreshold = 100; // Don't open circuit
-                o.MaxRetryCount = 101; // Higher than circuit threshold
+                o.MaxPublishAttempts = 101; // Higher than circuit threshold
             });
 
         // Intermittent failures: succeed every 3rd call
