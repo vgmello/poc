@@ -21,6 +21,13 @@ public sealed class SqlServerOutboxStore : IOutboxStore
 
     private readonly string _optionsName;
 
+    // Partition count only changes during a deliberate schema reconfiguration.
+    // Cached with a 60s TTL so the publisher service's worker assignment doesn't
+    // round-trip the database on every poll.
+    private const long PartitionCountRefreshIntervalMs = 60_000;
+    private int _cachedPartitionCount;
+    private long _partitionCountRefreshedAtTicks;
+
     public string PublisherId { get; }
 
     public SqlServerOutboxStore(
@@ -151,8 +158,19 @@ public sealed class SqlServerOutboxStore : IOutboxStore
 
     public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)
     {
-        return await _db.ScalarAsync<int>(_queries.GetTotalPartitions,
+        var now = Environment.TickCount64;
+        var cached = Volatile.Read(ref _cachedPartitionCount);
+
+        if (cached > 0 && now - Volatile.Read(ref _partitionCountRefreshedAtTicks) < PartitionCountRefreshIntervalMs)
+            return cached;
+
+        var fresh = await _db.ScalarAsync<int>(_queries.GetTotalPartitions,
             new { OutboxTableName = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
+
+        Volatile.Write(ref _cachedPartitionCount, fresh);
+        Volatile.Write(ref _partitionCountRefreshedAtTicks, now);
+
+        return fresh;
     }
 
     public async Task<IReadOnlyList<int>> GetOwnedPartitionsAsync(string publisherId, CancellationToken ct)

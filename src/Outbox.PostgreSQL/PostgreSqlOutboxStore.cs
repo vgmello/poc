@@ -18,6 +18,12 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     private readonly PostgreSqlQueries _queries;
 
     private readonly string _optionsName;
+
+    // Partition count only changes during a deliberate schema reconfiguration.
+    // Cached with a 60s TTL so FetchBatch (which parameterizes its query with the
+    // count) and the publisher service's worker assignment both avoid round-tripping
+    // the database on every poll.
+    private const long PartitionCountRefreshIntervalMs = 60_000;
     private int _cachedPartitionCount;
     private long _partitionCountRefreshedAtTicks;
 
@@ -79,7 +85,7 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
     public async Task<IReadOnlyList<OutboxMessage>> FetchBatchAsync(
         string publisherId, int batchSize, CancellationToken ct)
     {
-        var totalPartitions = await GetCachedPartitionCountAsync(ct).ConfigureAwait(false);
+        var totalPartitions = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
 
         if (totalPartitions == 0)
             return Array.Empty<OutboxMessage>();
@@ -140,26 +146,21 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
         }, ct).ConfigureAwait(false);
     }
 
-    private async Task<int> GetCachedPartitionCountAsync(CancellationToken ct)
+    public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)
     {
-        const long refreshIntervalMs = 60_000; // 60s
         var now = Environment.TickCount64;
         var cached = Volatile.Read(ref _cachedPartitionCount);
 
-        if (cached > 0 && now - Volatile.Read(ref _partitionCountRefreshedAtTicks) < refreshIntervalMs)
+        if (cached > 0 && now - Volatile.Read(ref _partitionCountRefreshedAtTicks) < PartitionCountRefreshIntervalMs)
             return cached;
 
-        var fresh = await GetTotalPartitionsAsync(ct).ConfigureAwait(false);
+        var fresh = await _db.ScalarAsync<int>(_queries.GetTotalPartitions,
+            new { outbox_table_name = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
+
         Volatile.Write(ref _cachedPartitionCount, fresh);
         Volatile.Write(ref _partitionCountRefreshedAtTicks, now);
 
         return fresh;
-    }
-
-    public async Task<int> GetTotalPartitionsAsync(CancellationToken ct)
-    {
-        return await _db.ScalarAsync<int>(_queries.GetTotalPartitions,
-            new { outbox_table_name = _options.GetOutboxTableName() }, ct).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<int>> GetOwnedPartitionsAsync(string publisherId, CancellationToken ct)
@@ -172,44 +173,19 @@ public sealed class PostgreSqlOutboxStore : IOutboxStore
 
     public async Task RebalanceAsync(string publisherId, CancellationToken ct)
     {
-        // Snapshot options once to ensure consistent values across all steps within one transaction.
         var opts = _publisherOptions.Get(_optionsName);
 
         await _db.ExecuteWithRetryAsync(async (conn, token) =>
         {
             await using var tx = await ((NpgsqlConnection)conn).BeginTransactionAsync(token).ConfigureAwait(false);
 
-            // Step 1: Mark stale publishers' partitions as entering grace period
-            await conn.ExecuteAsync(new CommandDefinition(_queries.RebalanceMarkStale,
+            // Mark stale, claim, and release pipelined in a single command.
+            await conn.ExecuteAsync(new CommandDefinition(_queries.Rebalance,
                 new
                 {
                     publisher_id = publisherId,
                     heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds,
                     partition_grace_period_seconds = (double)opts.PartitionGracePeriodSeconds,
-                    outbox_table_name = _options.GetOutboxTableName()
-                },
-                transaction: tx,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-
-            // Step 2: Calculate fair share and claim unowned/grace-expired partitions
-            await conn.ExecuteAsync(new CommandDefinition(_queries.RebalanceClaim,
-                new
-                {
-                    publisher_id = publisherId,
-                    heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds,
-                    outbox_table_name = _options.GetOutboxTableName()
-                },
-                transaction: tx,
-                commandTimeout: _options.CommandTimeoutSeconds,
-                cancellationToken: token)).ConfigureAwait(false);
-
-            // Step 3: Release excess above fair share
-            await conn.ExecuteAsync(new CommandDefinition(_queries.RebalanceRelease,
-                new
-                {
-                    publisher_id = publisherId,
-                    heartbeat_timeout_seconds = (double)opts.HeartbeatTimeoutSeconds,
                     outbox_table_name = _options.GetOutboxTableName()
                 },
                 transaction: tx,

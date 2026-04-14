@@ -13,9 +13,7 @@ internal sealed class PostgreSqlQueries
     public string Heartbeat { get; }
     public string GetTotalPartitions { get; }
     public string GetOwnedPartitions { get; }
-    public string RebalanceMarkStale { get; }
-    public string RebalanceClaim { get; }
-    public string RebalanceRelease { get; }
+    public string Rebalance { get; }
     public string ClaimOrphanPartitions { get; }
     public string GetPendingCount { get; }
 
@@ -115,7 +113,16 @@ FROM   {partitionsTable}
 WHERE  owner_publisher_id = @publisher_id
   AND  outbox_table_name = @outbox_table_name;";
 
-        RebalanceMarkStale = $@"
+        // Consolidated rebalance: mark stale, then claim up to fair share, then release
+        // excess. All three statements are pipelined in a single Npgsql command (one
+        // network round trip) inside the caller's transaction. The claim and release
+        // branches are mutually exclusive in any given rebalance cycle: a publisher is
+        // either under its fair share (claim runs, release is a no-op) or over it
+        // (release runs, claim is a no-op). The `counts` CTE snapshots the pre-statement
+        // state once per UPDATE, and grace-marked partitions remain unclaimable within
+        // the same cycle because their grace_expires_utc is set to a future time —
+        // identical to the previous three-call sequential behavior.
+        Rebalance = $@"
 UPDATE {partitionsTable}
 SET    grace_expires_utc = clock_timestamp() + make_interval(secs => @partition_grace_period_seconds)
 WHERE  owner_publisher_id <> @publisher_id
@@ -127,9 +134,8 @@ WHERE  owner_publisher_id <> @publisher_id
            FROM   {publishersTable}
            WHERE  outbox_table_name = @outbox_table_name
              AND  last_heartbeat_utc >= clock_timestamp() - make_interval(secs => @heartbeat_timeout_seconds)
-       );";
+       );
 
-        RebalanceClaim = $@"
 WITH counts AS (
     SELECT
         (SELECT COUNT(*) FROM {partitionsTable} WHERE outbox_table_name = @outbox_table_name) AS total_partitions,
@@ -162,9 +168,8 @@ SET    owner_publisher_id = @publisher_id,
        grace_expires_utc = NULL
 FROM   to_claim
 WHERE  {partitionsTable}.partition_id = to_claim.partition_id
-  AND  {partitionsTable}.outbox_table_name = @outbox_table_name;";
+  AND  {partitionsTable}.outbox_table_name = @outbox_table_name;
 
-        RebalanceRelease = $@"
 WITH counts AS (
     SELECT
         (SELECT COUNT(*) FROM {partitionsTable} WHERE outbox_table_name = @outbox_table_name) AS total_partitions,

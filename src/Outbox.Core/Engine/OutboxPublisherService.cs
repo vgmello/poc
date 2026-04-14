@@ -243,8 +243,19 @@ internal sealed class OutboxPublisherService : BackgroundService
                     .GroupBy(m => (m.TopicName, m.PartitionKey))
                     .ToList();
 
-                // Snapshot total partitions once for this cycle
+                // Snapshot total partitions once for this cycle. The store caches this
+                // internally with a 60s TTL — partition count only changes during a
+                // deliberate schema reconfiguration.
                 var totalPartitions = await _store.GetTotalPartitionsAsync(ct);
+
+                if (totalPartitions == 0)
+                {
+                    // Schema inconsistency — no partitions registered. Skip this cycle
+                    // and back off; a subsequent rebalance or schema fix will recover.
+                    pollIntervalMs = Math.Min(pollIntervalMs * 2, opts.MaxPollIntervalMs);
+                    await Task.Delay(pollIntervalMs, ct);
+                    continue;
+                }
 
                 // Assign groups to workers by partition affinity
                 var workerCount = opts.PublishThreadCount;
@@ -362,6 +373,11 @@ internal sealed class OutboxPublisherService : BackgroundService
         var publishedAny = false;
         Exception? lastError = null;
 
+        // Defensive sort by sequence_number. Per-(topic, partitionKey) ordering is the
+        // core invariant (see docs/outbox-requirements-invariants.md). Built-in stores
+        // already return messages in sequence order, but this re-sort guards the
+        // invariant against a custom IOutboxStore implementation or a regression in the
+        // FetchBatch query's ORDER BY clause. Covered by OrderingContractTests.
         var remaining = initialGroup
             .OrderBy(m => m.SequenceNumber)
             .ToList();
