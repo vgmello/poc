@@ -41,12 +41,11 @@ Four tables, a TVP type, one index, two diagnostic views, and a 64-partition see
 | `PartitionKey` | `NVARCHAR(256)` | Hash input for partition assignment |
 | `Payload` | `VARBINARY(MAX)` | Raw message bytes |
 | `Headers` | `NVARCHAR(2000)` | JSON-serialized headers (nullable) |
-| `EventOrdinal` | `INT` | Tiebreaker for same-timestamp events |
 | `RowVersion` | `ROWVERSION` | Version ceiling for ordering safety |
 
 ### Indexes
 
-- `IX_Outbox_Pending` — On `(EventDateTimeUtc, EventOrdinal)` for causal-order polling
+- `IX_Outbox_Pending` — On `(PartitionId, SequenceNumber)` for insert-order polling
 
 ### Diagnostic views
 
@@ -64,7 +63,7 @@ ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % @TotalPartitions
 
 ### Fetch mechanism
 
-`FetchBatchAsync` is a pure `SELECT` with `ROWLOCK, READPAST` hints. `READPAST` skips rows locked by other transactions instead of blocking. A version ceiling filter ensures ordering safety:
+`FetchBatchAsync` is a pure `SELECT` with no row-locking hints. Messages are ordered by `SequenceNumber` (equals insert order). A version ceiling filter ensures ordering safety:
 
 ```sql
 WHERE o.RowVersion < MIN_ACTIVE_ROWVERSION()

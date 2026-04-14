@@ -324,23 +324,22 @@ public class RebalanceOrderingTests
 
             while (!insertionCts.Token.IsCancellationRequested)
             {
-                var ordinal = Interlocked.Increment(ref insertedCount) - 1;
+                var index = Interlocked.Increment(ref insertedCount) - 1;
 
                 try
                 {
                     var sql = @"
                         INSERT INTO outbox (topic_name, partition_key, event_type, payload,
-                                            event_datetime_utc, event_ordinal)
-                        VALUES (@topic, @key, 'TestEvent', @payload, clock_timestamp(), @ordinal)";
+                                            event_datetime_utc)
+                        VALUES (@topic, @key, 'TestEvent', @payload, clock_timestamp())";
 
                     await using var cmd = new NpgsqlCommand(sql, conn);
                     cmd.Parameters.AddWithValue("@topic", topic);
                     cmd.Parameters.AddWithValue("@key", partitionKey);
                     cmd.Parameters.Add(new NpgsqlParameter("@payload", NpgsqlTypes.NpgsqlDbType.Bytea)
                     {
-                        Value = Encoding.UTF8.GetBytes($"{{\"index\":{ordinal}}}")
+                        Value = Encoding.UTF8.GetBytes($"{{\"index\":{index}}}")
                     });
-                    cmd.Parameters.AddWithValue("@ordinal", (short)(ordinal % short.MaxValue));
                     await cmd.ExecuteNonQueryAsync(insertionCts.Token);
 
                     await Task.Delay(TimeSpan.FromMilliseconds(50), insertionCts.Token);
@@ -468,7 +467,7 @@ public class RebalanceOrderingTests
                 await using var tx = await conn.BeginTransactionAsync();
 
                 await InsertInTransactionAsync(conn, tx, topic, partitionKey,
-                    eventIndex: 0, ordinal: 0, timestamp: timestampA);
+                    eventIndex: 0, timestamp: timestampA);
 
                 txn1Inserted.Release();
 
@@ -489,9 +488,9 @@ public class RebalanceOrderingTests
                 await using var tx = await conn.BeginTransactionAsync();
 
                 await InsertInTransactionAsync(conn, tx, topic, partitionKey,
-                    eventIndex: 1, ordinal: 1, timestamp: timestampB);
+                    eventIndex: 1, timestamp: timestampB);
                 await InsertInTransactionAsync(conn, tx, topic, partitionKey,
-                    eventIndex: 2, ordinal: 2, timestamp: timestampC);
+                    eventIndex: 2, timestamp: timestampC);
 
                 await tx.CommitAsync();
                 txn2Committed.Release();
@@ -551,13 +550,13 @@ public class RebalanceOrderingTests
 
     private static async Task InsertInTransactionAsync(
         NpgsqlConnection conn, NpgsqlTransaction tx,
-        string topic, string partitionKey, int eventIndex, int ordinal,
+        string topic, string partitionKey, int eventIndex,
         DateTimeOffset timestamp)
     {
         const string sql = @"
             INSERT INTO outbox (topic_name, partition_key, event_type, payload,
-                                event_datetime_utc, event_ordinal)
-            VALUES (@topic, @key, 'TestEvent', @payload, @ts, @ordinal)";
+                                event_datetime_utc)
+            VALUES (@topic, @key, 'TestEvent', @payload, @ts)";
 
         await using var cmd = new NpgsqlCommand(sql, conn, tx);
         cmd.Parameters.AddWithValue("@topic", topic);
@@ -567,7 +566,6 @@ public class RebalanceOrderingTests
             Value = Encoding.UTF8.GetBytes($"{{\"index\":{eventIndex}}}")
         });
         cmd.Parameters.AddWithValue("@ts", timestamp);
-        cmd.Parameters.AddWithValue("@ordinal", (short)ordinal);
         await cmd.ExecuteNonQueryAsync();
     }
 

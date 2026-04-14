@@ -110,17 +110,16 @@ public static class SqlServerTestHelper
         {
             var key = partitionKey ?? $"key-{i % 10}";
             const string sql = @"
-                INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Payload, EventDateTimeUtc, EventOrdinal)
-                VALUES (@topic, @key, 'TestEvent', @payload, SYSUTCDATETIME(), @ordinal)";
+                INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Payload, EventDateTimeUtc)
+                VALUES (@topic, @key, 'TestEvent', @payload, SYSUTCDATETIME())";
 
             await using var cmd = new SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@topic", topic);
             cmd.Parameters.AddWithValue("@key", key);
             cmd.Parameters.Add(new SqlParameter("@Payload", System.Data.SqlDbType.VarBinary)
             {
-                Value = Encoding.UTF8.GetBytes($"{{\"index\":{i}}}")
+                Value = Encoding.UTF8.GetBytes($"{{\"index\":{startOrdinal + i}}}")
             });
-            cmd.Parameters.AddWithValue("@ordinal", (short)(startOrdinal + i));
             await cmd.ExecuteNonQueryAsync();
         }
     }

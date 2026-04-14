@@ -19,7 +19,6 @@ internal sealed class FetchBatchOutputRow
     public byte[] Payload { get; set; } = [];
     public string PayloadContentType { get; set; } = string.Empty;
     public DateTimeOffset EventDateTimeUtc { get; set; }
-    public int EventOrdinal { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
 
     public OutboxMessage ToDomain() =>
@@ -32,6 +31,5 @@ internal sealed class FetchBatchOutputRow
             Payload,
             PayloadContentType,
             EventDateTimeUtc,
-            EventOrdinal,
             CreatedAtUtc);
 }

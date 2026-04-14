@@ -64,7 +64,7 @@ public class SqlServerConcurrentTransactionOrderingTests
             await using var tx = (SqlTransaction)await conn.BeginTransactionAsync();
 
             await InsertInTransactionAsync(conn, tx, topic, partitionKey,
-                eventIndex: 0, ordinal: 0, timestamp: TimestampA);
+                eventIndex: 0, timestamp: TimestampA);
 
             txn1Inserted.Release();
 
@@ -82,9 +82,9 @@ public class SqlServerConcurrentTransactionOrderingTests
             await using var tx = (SqlTransaction)await conn.BeginTransactionAsync();
 
             await InsertInTransactionAsync(conn, tx, topic, partitionKey,
-                eventIndex: 1, ordinal: 1, timestamp: TimestampB);
+                eventIndex: 1, timestamp: TimestampB);
             await InsertInTransactionAsync(conn, tx, topic, partitionKey,
-                eventIndex: 2, ordinal: 2, timestamp: TimestampC);
+                eventIndex: 2, timestamp: TimestampC);
 
             await tx.CommitAsync();
 
@@ -125,13 +125,11 @@ public class SqlServerConcurrentTransactionOrderingTests
             var curr = batch2[i];
 
             Assert.True(
-                curr.EventDateTimeUtc > prev.EventDateTimeUtc ||
-                (curr.EventDateTimeUtc == prev.EventDateTimeUtc &&
-                 curr.EventOrdinal > prev.EventOrdinal),
+                curr.SequenceNumber > prev.SequenceNumber,
                 $"Ordering violation: message at position {i} " +
-                $"(seq={curr.SequenceNumber}, ts={curr.EventDateTimeUtc}, ord={curr.EventOrdinal}) " +
+                $"(seq={curr.SequenceNumber}, ts={curr.EventDateTimeUtc}) " +
                 $"should come after position {i - 1} " +
-                $"(seq={prev.SequenceNumber}, ts={prev.EventDateTimeUtc}, ord={prev.EventOrdinal})");
+                $"(seq={prev.SequenceNumber}, ts={prev.EventDateTimeUtc})");
         }
 
         _output.WriteLine("All 3 messages returned in correct order after both transactions committed");
@@ -161,7 +159,7 @@ public class SqlServerConcurrentTransactionOrderingTests
             await using var tx = (SqlTransaction)await conn.BeginTransactionAsync();
 
             await InsertInTransactionAsync(conn, tx, topic, "slow-key",
-                eventIndex: 0, ordinal: 0, timestamp: TimestampA);
+                eventIndex: 0, timestamp: TimestampA);
 
             txn1Inserted.Release();
 
@@ -253,13 +251,13 @@ public class SqlServerConcurrentTransactionOrderingTests
 
     private static async Task InsertInTransactionAsync(
         SqlConnection conn, SqlTransaction tx,
-        string topic, string partitionKey, int eventIndex, int ordinal,
+        string topic, string partitionKey, int eventIndex,
         DateTime timestamp)
     {
         const string sql = @"
             INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Payload,
-                                    EventDateTimeUtc, EventOrdinal)
-            VALUES (@topic, @key, 'TestEvent', @payload, @ts, @ordinal)";
+                                    EventDateTimeUtc)
+            VALUES (@topic, @key, 'TestEvent', @payload, @ts)";
 
         await using var cmd = new SqlCommand(sql, conn, tx);
         cmd.Parameters.AddWithValue("@topic", topic);
@@ -269,7 +267,6 @@ public class SqlServerConcurrentTransactionOrderingTests
             Value = Encoding.UTF8.GetBytes($"{{\"index\":{eventIndex}}}")
         });
         cmd.Parameters.AddWithValue("@ts", timestamp);
-        cmd.Parameters.AddWithValue("@ordinal", (short)ordinal);
         await cmd.ExecuteNonQueryAsync();
     }
 }

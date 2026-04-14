@@ -27,7 +27,6 @@ public class ModelTests
             Payload: payloadBytes,
             PayloadContentType: "application/json",
             EventDateTimeUtc: eventDate,
-            EventOrdinal: 3,
             CreatedAtUtc: createdAt);
 
         Assert.Equal(42L, msg.SequenceNumber);
@@ -38,7 +37,6 @@ public class ModelTests
         Assert.Equal(payloadBytes, msg.Payload);
         Assert.Equal("application/json", msg.PayloadContentType);
         Assert.Equal(eventDate, msg.EventDateTimeUtc);
-        Assert.Equal(3, msg.EventOrdinal);
         Assert.Equal(createdAt, msg.CreatedAtUtc);
     }
 
@@ -46,7 +44,7 @@ public class ModelTests
     public void OutboxMessage_NullHeaders_IsAllowed()
     {
         var msg = new OutboxMessage(1L, "topic", "key", "EventType", null, Encoding.UTF8.GetBytes("{}"), "application/json",
-            DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
         Assert.Null(msg.Headers);
     }
 
@@ -55,10 +53,10 @@ public class ModelTests
     {
         var ts = DateTimeOffset.UtcNow;
         var payload = Encoding.UTF8.GetBytes("{}");
-        var msg1 = new OutboxMessage(1L, "topic", "key", "EventType", null, payload, "application/json", ts, 0, ts);
-        var msg2 = new OutboxMessage(1L, "topic", "key", "EventType", null, payload, "application/json", ts, 0, ts);
-        var msg3 = new OutboxMessage(1L, "topic", "key", "EventType", null, Encoding.UTF8.GetBytes("{}"), "application/json", ts, 0, ts);
-        var msg4 = new OutboxMessage(2L, "topic", "key", "EventType", null, payload, "application/json", ts, 0, ts);
+        var msg1 = new OutboxMessage(1L, "topic", "key", "EventType", null, payload, "application/json", ts, ts);
+        var msg2 = new OutboxMessage(1L, "topic", "key", "EventType", null, payload, "application/json", ts, ts);
+        var msg3 = new OutboxMessage(1L, "topic", "key", "EventType", null, Encoding.UTF8.GetBytes("{}"), "application/json", ts, ts);
+        var msg4 = new OutboxMessage(2L, "topic", "key", "EventType", null, payload, "application/json", ts, ts);
 
         Assert.Equal(msg1, msg2); // same byte[] reference
         Assert.NotEqual(msg1, msg3); // different byte[] reference
@@ -84,7 +82,6 @@ public class ModelTests
             Payload: payloadBytes,
             PayloadContentType: "application/json",
             EventDateTimeUtc: eventDate,
-            EventOrdinal: 1,
             AttemptCount: 5,
             CreatedAtUtc: createdAt,
             DeadLetteredAtUtc: deadLetteredAt,
@@ -99,7 +96,6 @@ public class ModelTests
         Assert.Equal(payloadBytes, msg.Payload);
         Assert.Equal("application/json", msg.PayloadContentType);
         Assert.Equal(eventDate, msg.EventDateTimeUtc);
-        Assert.Equal(1, msg.EventOrdinal);
         Assert.Equal(5, msg.AttemptCount);
         Assert.Equal(createdAt, msg.CreatedAtUtc);
         Assert.Equal(deadLetteredAt, msg.DeadLetteredAtUtc);
@@ -119,7 +115,6 @@ public class ModelTests
             Payload: Encoding.UTF8.GetBytes("{}"),
             PayloadContentType: "application/json",
             EventDateTimeUtc: DateTimeOffset.UtcNow,
-            EventOrdinal: 0,
             AttemptCount: 0,
             CreatedAtUtc: DateTimeOffset.UtcNow,
             DeadLetteredAtUtc: DateTimeOffset.UtcNow,
@@ -134,11 +129,11 @@ public class ModelTests
     {
         var ts = DateTimeOffset.UtcNow;
         var payload = Encoding.UTF8.GetBytes("{}");
-        var msg1 = new DeadLetteredMessage(1L, 1L, "t", "k", "E", null, payload, "application/json", ts, 0, 0, ts, ts, null);
-        var msg2 = new DeadLetteredMessage(1L, 1L, "t", "k", "E", null, payload, "application/json", ts, 0, 0, ts, ts, null);
-        var msg3 = new DeadLetteredMessage(1L, 1L, "t", "k", "E", null, Encoding.UTF8.GetBytes("{}"), "application/json", ts, 0, 0, ts, ts,
+        var msg1 = new DeadLetteredMessage(1L, 1L, "t", "k", "E", null, payload, "application/json", ts, 0, ts, ts, null);
+        var msg2 = new DeadLetteredMessage(1L, 1L, "t", "k", "E", null, payload, "application/json", ts, 0, ts, ts, null);
+        var msg3 = new DeadLetteredMessage(1L, 1L, "t", "k", "E", null, Encoding.UTF8.GetBytes("{}"), "application/json", ts, 0, ts, ts,
             null);
-        var msg4 = new DeadLetteredMessage(2L, 1L, "t", "k", "E", null, payload, "application/json", ts, 0, 0, ts, ts, null);
+        var msg4 = new DeadLetteredMessage(2L, 1L, "t", "k", "E", null, payload, "application/json", ts, 0, ts, ts, null);
 
         Assert.Equal(msg1, msg2); // same byte[] reference
         Assert.NotEqual(msg1, msg3); // different byte[] reference, same content
@@ -166,7 +161,7 @@ public class ModelTests
         // Exercises the default interface method bodies on IOutboxEventHandler (lines with => Task.CompletedTask)
         IOutboxEventHandler handler = new MinimalEventHandler();
 
-        var msg = new OutboxMessage(1L, "t", "k", "E", null, Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow, 0,
+        var msg = new OutboxMessage(1L, "t", "k", "E", null, Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow,
             DateTimeOffset.UtcNow);
 
         await handler.OnMessagePublishedAsync(msg, default);

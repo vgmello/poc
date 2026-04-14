@@ -69,7 +69,6 @@ CREATE TABLE ' + @StagingFull + N'
     Payload            VARBINARY(MAX)        NOT NULL,
     CreatedAtUtc       DATETIME2(3)          NOT NULL  DEFAULT SYSUTCDATETIME(),
     EventDateTimeUtc   DATETIME2(3)          NOT NULL,
-    EventOrdinal       INT                   NOT NULL  DEFAULT 0,
     PayloadContentType NVARCHAR(100)         NOT NULL  DEFAULT ''application/json'',
     RowVersion         ROWVERSION            NOT NULL,
     PartitionId        AS (ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 64) PERSISTED,
@@ -82,8 +81,8 @@ PRINT 'Created staging table with matching schema.';
 -- Create matching nonclustered index (required for SWITCH)
 SET @SQL = N'
 CREATE NONCLUSTERED INDEX IX_' + @StagingTable + N'_Pending
-ON ' + @StagingFull + N' (PartitionId, EventDateTimeUtc, EventOrdinal)
-INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, CreatedAtUtc, RowVersion);';
+ON ' + @StagingFull + N' (PartitionId, SequenceNumber)
+INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, EventDateTimeUtc, CreatedAtUtc, RowVersion);';
 EXEC sp_executesql @SQL;
 PRINT 'Created matching nonclustered index on staging table.';
 

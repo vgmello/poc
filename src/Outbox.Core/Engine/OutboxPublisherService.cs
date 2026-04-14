@@ -363,9 +363,7 @@ internal sealed class OutboxPublisherService : BackgroundService
         Exception? lastError = null;
 
         var remaining = initialGroup
-            .OrderBy(m => m.EventDateTimeUtc)
-            .ThenBy(m => m.EventOrdinal)
-            .ThenBy(m => m.SequenceNumber)
+            .OrderBy(m => m.SequenceNumber)
             .ToList();
 
         while (attempt < maxAttempts && !ct.IsCancellationRequested && remaining.Count > 0)

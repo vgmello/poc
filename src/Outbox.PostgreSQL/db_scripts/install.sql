@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS outbox
     payload            BYTEA          NOT NULL,
     created_at_utc     TIMESTAMPTZ(3) NOT NULL DEFAULT clock_timestamp(),
     event_datetime_utc TIMESTAMPTZ(3) NOT NULL,
-    event_ordinal      INT            NOT NULL DEFAULT 0,
     payload_content_type VARCHAR(100) NOT NULL DEFAULT 'application/json',
     CONSTRAINT pk_outbox PRIMARY KEY (sequence_number)
 );
@@ -39,7 +38,6 @@ CREATE TABLE IF NOT EXISTS outbox_dead_letter
     created_at_utc       TIMESTAMPTZ(3) NOT NULL,
     attempt_count        INT            NOT NULL,
     event_datetime_utc   TIMESTAMPTZ(3) NOT NULL,
-    event_ordinal        INT            NOT NULL DEFAULT 0,
     payload_content_type VARCHAR(100)   NOT NULL DEFAULT 'application/json',
     dead_lettered_at_utc TIMESTAMPTZ(3) NOT NULL DEFAULT clock_timestamp(),
     last_error           VARCHAR(2000)  NULL,
@@ -79,10 +77,10 @@ CREATE TABLE IF NOT EXISTS outbox_partitions
 -- Indexes
 -- ---------------------------------------------------------------------------
 
--- Pending rows in causal order
+-- Pending rows in sequence order
 CREATE INDEX IF NOT EXISTS ix_outbox_pending
-ON outbox (event_datetime_utc, event_ordinal)
-INCLUDE (sequence_number, topic_name, partition_key, event_type, created_at_utc);
+ON outbox (sequence_number)
+INCLUDE (topic_name, partition_key, event_type, event_datetime_utc, created_at_utc);
 
 -- Dead-letter lookup by original sequence number (used by replay and purge)
 CREATE INDEX IF NOT EXISTS ix_outbox_dead_letter_sequence_number

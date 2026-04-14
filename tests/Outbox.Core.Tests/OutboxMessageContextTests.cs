@@ -16,7 +16,7 @@ public class OutboxMessageContextTests
         Dictionary<string, string>? headers = null,
         string payloadContentType = "application/json") =>
         new(seq, topic, key, eventType, headers, Encoding.UTF8.GetBytes("{}"),
-            payloadContentType, DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow);
+            payloadContentType, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
 
     [Fact]
     public void Constructor_CopiesAllFields()
@@ -32,7 +32,6 @@ public class OutboxMessageContextTests
         Assert.Equal("k", ctx.PartitionKey);
         Assert.Equal("E", ctx.EventType);
         Assert.Equal(msg.EventDateTimeUtc, ctx.EventDateTimeUtc);
-        Assert.Equal(msg.EventOrdinal, ctx.EventOrdinal);
         Assert.Equal(msg.CreatedAtUtc, ctx.CreatedAtUtc);
         Assert.Same(msg.Payload, ctx.Payload);
         Assert.Equal(headers, ctx.Headers);
@@ -59,7 +58,6 @@ public class OutboxMessageContextTests
         Assert.Equal("pk", result.PartitionKey);
         Assert.Equal(original.EventType, result.EventType);
         Assert.Equal(original.EventDateTimeUtc, result.EventDateTimeUtc);
-        Assert.Equal(original.EventOrdinal, result.EventOrdinal);
         Assert.Equal(original.CreatedAtUtc, result.CreatedAtUtc);
         Assert.Same(newPayload, result.Payload);
         Assert.Same(newHeaders, result.Headers);

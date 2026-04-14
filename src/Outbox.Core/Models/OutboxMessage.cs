@@ -8,17 +8,16 @@ namespace Outbox.Core.Models;
 /// <remarks>
 ///     <para>
 ///         <b>Ordering contract:</b> Messages sharing the same <see cref="PartitionKey" /> are
-///         delivered to the broker in <see cref="EventDateTimeUtc" /> then <see cref="EventOrdinal" />
-///         order. This is enforced by the FetchBatch query's ORDER BY clause and the partition-affinity
-///         model (one publisher per logical partition at a time). Callers MUST set both fields
-///         correctly at insert time to achieve causal ordering.
+///         delivered to the broker in <see cref="SequenceNumber" /> order, which equals the
+///         order in which they were INSERTed into the outbox table. <b>Callers MUST insert
+///         messages in the order they want them delivered.</b> The publisher fetches in
+///         <c>sequence_number</c> order within each partition; there is no caller-side override.
 ///     </para>
 ///
 ///     <para>
-///         <b>EventOrdinal:</b> A tie-breaker for events that share the same
-///         <see cref="EventDateTimeUtc" />. Use sequential values (0, 1, 2, ...) within a single
-///         transaction to guarantee deterministic ordering. Stored as SQL INT.
-///         Defaults to 0 in the database schema if omitted.
+///         <b>EventDateTimeUtc:</b> Caller-asserted business timestamp. Stored on the row and
+///         carried through to the dead-letter table for forensics. <b>Not consulted by the
+///         publisher's sort path</b> — it exists for debugging and observability only.
 ///     </para>
 ///
 ///     <para>
@@ -42,5 +41,4 @@ public sealed record OutboxMessage(
     byte[] Payload,
     string PayloadContentType,
     DateTimeOffset EventDateTimeUtc,
-    int EventOrdinal,
     DateTimeOffset CreatedAtUtc);

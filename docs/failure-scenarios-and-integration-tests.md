@@ -403,14 +403,14 @@ This document defines all failure/error scenarios that must be validated through
 
 **Setup:**
 
-1. Insert 100 messages for partition key `order-123`, numbered 1-100 in `EventOrdinal`
+1. Insert 100 messages for partition key `order-123`, in the desired delivery order (insert order = delivery order)
 2. Configure broker to fail intermittently (every 3rd send)
 
 **Test steps:**
 
 1. Start publisher, let it process through failures and retries
 2. Collect all messages received by consumer for partition key `order-123`
-3. **Assert:** Messages are received in order (by `EventOrdinal`), even if some are duplicated
+3. **Assert:** Messages are received in `sequence_number` order, even if some are duplicated
 4. **Assert:** Deduplicating by sequence number produces exactly messages 1-100 in order
 5. **Assert:** No gaps (every message from 1-100 is present)
 

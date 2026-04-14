@@ -86,7 +86,7 @@ public static class MessageProducer
 
         var sb = new StringBuilder();
         sb.Append("""
-            INSERT INTO outbox (topic_name, partition_key, event_type, payload, event_datetime_utc, event_ordinal)
+            INSERT INTO outbox (topic_name, partition_key, event_type, payload, event_datetime_utc)
             VALUES
             """);
 
@@ -97,7 +97,7 @@ public static class MessageProducer
             var key = $"pk-{globalIndex % PartitionKeyCount}";
 
             if (i > 0) sb.Append(',');
-            sb.Append($"('{topic}','{key}','PerfEvent',@p,clock_timestamp(),{i})");
+            sb.Append($"('{topic}','{key}','PerfEvent',@p,clock_timestamp())");
         }
 
         await using var cmd = new NpgsqlCommand(sb.ToString(), conn);
@@ -116,7 +116,7 @@ public static class MessageProducer
 
         var sb = new StringBuilder();
         sb.Append("""
-            INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Payload, EventDateTimeUtc, EventOrdinal)
+            INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Payload, EventDateTimeUtc)
             VALUES
             """);
 
@@ -127,7 +127,7 @@ public static class MessageProducer
             var key = $"pk-{globalIndex % PartitionKeyCount}";
 
             if (i > 0) sb.Append(',');
-            sb.Append($"('{topic}','{key}','PerfEvent',@p,SYSUTCDATETIME(),{i})");
+            sb.Append($"('{topic}','{key}','PerfEvent',@p,SYSUTCDATETIME())");
         }
 
         await using var cmd = new SqlCommand(sb.ToString(), conn);

@@ -1,5 +1,7 @@
 # SQL Server Query Execution Plan Report
 
+> **Historical note (2026-04-14):** The index `IX_Outbox_Pending` referenced in this report has been rebuilt on `(PartitionId, SequenceNumber)` as part of the sequence-number ordering change. The query plans below reflect the previous `(PartitionId, EventDateTimeUtc, EventOrdinal)` index and may not match current behavior. A re-baseline run is pending.
+
 **Date:** 2026-04-02 15:42 UTC
 **Database:** Azure SQL Edge (ARM64) via Docker
 **Data:** 10K messages, 64 partitions, 2 publishers (32 partitions each)

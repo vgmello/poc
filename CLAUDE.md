@@ -29,7 +29,7 @@ A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and st
 ## Review Checklist
 
 Before approving any change, verify against `docs/outbox-requirements-invariants.md`:
-- [ ] **MESSAGE ORDERING MUST NEVER BE CORRUPTED.** Per-(topic, partitionKey) ordering is the core guarantee. Any change that could cause two publishers to process the same partition key simultaneously, or reorder messages within a partition key, is a critical bug. This includes: changing partition counts while publishers are running, changing the hash function, modifying FetchBatch ORDER BY, or breaking the single-writer-per-partition invariant.
+- [ ] **MESSAGE ORDERING MUST NEVER BE CORRUPTED.** Per-(topic, partitionKey) ordering is the core guarantee. Any change that could cause two publishers to process the same partition key simultaneously, or reorder messages within a partition key, is a critical bug. This includes: changing partition counts while publishers are running, changing the hash function, modifying the FetchBatch `ORDER BY sequence_number` clause, breaking the "callers insert in delivery order" stipulation, or breaking the single-writer-per-partition invariant.
 - [ ] Attempt counter only incremented on **non-transient** transport failure; transient failures record circuit failures instead
 - [ ] DLQ never happens while the circuit is open — the retry loop must exit via `CircuitOpened`, not via the DLQ branch
 - [ ] No per-message lease columns remain (partition ownership is the sole isolation mechanism)

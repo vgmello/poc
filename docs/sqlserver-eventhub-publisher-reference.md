@@ -109,7 +109,7 @@ A pure `SELECT` that reads messages from owned partitions without locking or upd
 SELECT TOP (@BatchSize)
     o.SequenceNumber, o.TopicName, o.PartitionKey, o.EventType,
     o.Headers, o.Payload, o.PayloadContentType,
-    o.EventDateTimeUtc, o.EventOrdinal,
+    o.EventDateTimeUtc,
     o.RetryCount, o.CreatedAtUtc
 FROM dbo.Outbox o
 WHERE o.PartitionId IN (
@@ -121,7 +121,7 @@ WHERE o.PartitionId IN (
 )
   AND o.RetryCount < @MaxRetryCount
   AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
-ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
+ORDER BY o.SequenceNumber;
 ```
 
 **Parameters:**
@@ -139,7 +139,7 @@ ORDER BY o.EventDateTimeUtc, o.EventOrdinal;
 | `op.GraceExpiresUtc IS NULL OR < NOW`               | Don't fetch from partitions still in grace period                  |
 | `RowVersion < MIN_ACTIVE_ROWVERSION()`              | Version ceiling — withholds rows from in-flight write transactions |
 | `RetryCount < @MaxRetryCount`                       | Skip poison messages (handled separately)                          |
-| `ORDER BY EventDateTimeUtc, EventOrdinal`           | Strict ordering within a partition key                             |
+| `ORDER BY SequenceNumber`                           | Strict ordering within a partition key (equals insert order)       |
 
 **No row locking:** The query uses no lock hints (`ROWLOCK`, `READPAST`, etc.). Partition ownership is the sole isolation mechanism — each publisher only fetches from its owned partitions, so there is no risk of two publishers reading the same rows. This avoids lock manager overhead, which is the dominant performance cost on SQL Server.
 
@@ -456,12 +456,12 @@ OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
        deleted.EventType, deleted.Headers, deleted.Payload,
        deleted.PayloadContentType,
        deleted.CreatedAtUtc, deleted.RetryCount,
-       deleted.EventDateTimeUtc, deleted.EventOrdinal,
+       deleted.EventDateTimeUtc,
        SYSUTCDATETIME(), @LastError
 INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
      Headers, Payload, PayloadContentType,
      CreatedAtUtc, RetryCount,
-     EventDateTimeUtc, EventOrdinal,
+     EventDateTimeUtc,
      DeadLetteredAtUtc, LastError)
 FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
 WHERE o.RetryCount >= @MaxRetryCount;
@@ -488,12 +488,12 @@ OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
        deleted.EventType, deleted.Headers, deleted.Payload,
        deleted.PayloadContentType,
        deleted.CreatedAtUtc, deleted.RetryCount,
-       deleted.EventDateTimeUtc, deleted.EventOrdinal,
+       deleted.EventDateTimeUtc,
        SYSUTCDATETIME(), @LastError
 INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
      Headers, Payload, PayloadContentType,
      CreatedAtUtc, RetryCount,
-     EventDateTimeUtc, EventOrdinal,
+     EventDateTimeUtc,
      DeadLetteredAtUtc, LastError)
 FROM dbo.Outbox o
 INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;

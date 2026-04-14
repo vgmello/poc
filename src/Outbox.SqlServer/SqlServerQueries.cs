@@ -68,7 +68,7 @@ internal sealed class SqlServerQueries
                      SELECT TOP (@BatchSize)
                          o.SequenceNumber, o.TopicName, o.PartitionKey, o.EventType,
                          o.Headers, o.Payload, o.PayloadContentType,
-                         o.EventDateTimeUtc, o.EventOrdinal,
+                         o.EventDateTimeUtc,
                          o.CreatedAtUtc
                      FROM {outboxTable} o WITH (NOLOCK)
                      WHERE o.PartitionId IN (
@@ -79,7 +79,7 @@ internal sealed class SqlServerQueries
                            AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
                      )
                        AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
-                     ORDER BY o.PartitionId, o.EventDateTimeUtc, o.EventOrdinal, o.SequenceNumber;
+                     ORDER BY o.PartitionId, o.SequenceNumber;
                      """;
 
         DeletePublished = $"""
@@ -93,12 +93,12 @@ internal sealed class SqlServerQueries
                              deleted.EventType, deleted.Headers, deleted.Payload,
                              deleted.PayloadContentType,
                              deleted.CreatedAtUtc, @AttemptCount,
-                             deleted.EventDateTimeUtc, deleted.EventOrdinal,
+                             deleted.EventDateTimeUtc,
                              SYSUTCDATETIME(), @LastError
                       INTO {deadLetterTable}(SequenceNumber, TopicName, PartitionKey, EventType,
                            Headers, Payload, PayloadContentType,
                            CreatedAtUtc, AttemptCount,
-                           EventDateTimeUtc, EventOrdinal,
+                           EventDateTimeUtc,
                            DeadLetteredAtUtc, LastError)
                       FROM {outboxTable} o
                       INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
@@ -261,7 +261,6 @@ internal sealed class SqlServerQueries
                              Payload,
                              PayloadContentType,
                              EventDateTimeUtc,
-                             EventOrdinal,
                              AttemptCount,
                              CreatedAtUtc,
                              DeadLetteredAtUtc,
@@ -279,11 +278,11 @@ internal sealed class SqlServerQueries
                                    deleted.Headers, deleted.Payload,
                                    deleted.PayloadContentType,
                                    deleted.CreatedAtUtc,
-                                   deleted.EventDateTimeUtc, deleted.EventOrdinal
+                                   deleted.EventDateTimeUtc
                             INTO {outboxTable}(TopicName, PartitionKey, EventType,
                                  Headers, Payload, PayloadContentType,
                                  CreatedAtUtc,
-                                 EventDateTimeUtc, EventOrdinal)
+                                 EventDateTimeUtc)
                             FROM {deadLetterTable} dl
                             INNER JOIN @Ids p ON dl.DeadLetterSeq = p.SequenceNumber;
                             """;

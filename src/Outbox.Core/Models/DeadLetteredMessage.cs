@@ -12,12 +12,11 @@ public sealed record DeadLetteredMessage(
     byte[] Payload,
     string PayloadContentType,
     DateTimeOffset EventDateTimeUtc,
-    int EventOrdinal,
     int AttemptCount,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadLetteredAtUtc,
     string? LastError)
 {
     /// <summary>Parameterless constructor for Dapper property-based materialization.</summary>
-    public DeadLetteredMessage() : this(0, 0, "", "", "", null, [], "", default, 0, 0, default, default, null) { }
+    public DeadLetteredMessage() : this(0, 0, "", "", "", null, [], "", default, 0, default, default, null) { }
 }

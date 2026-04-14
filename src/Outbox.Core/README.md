@@ -92,8 +92,7 @@ Immutable record representing a message in the outbox.
 | `Headers` | `Dictionary<string, string>?` | Optional headers |
 | `Payload` | `byte[]` | Raw message bytes |
 | `PayloadContentType` | `string` | MIME type (e.g., `application/json`) |
-| `EventDateTimeUtc` | `DateTimeOffset` | Primary ordering key |
-| `EventOrdinal` | `int` | Tie-breaker within same timestamp |
+| `EventDateTimeUtc` | `DateTimeOffset` | Business event time (debug/forensics; does not affect delivery order) |
 | `CreatedAtUtc` | `DateTimeOffset` | Row insertion time |
 
 ### DeadLetteredMessage

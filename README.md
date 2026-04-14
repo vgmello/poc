@@ -152,14 +152,16 @@ VALUES ('orders', 'order-123', 'OrderCreated',
 
 ### Order multiple events in one transaction
 
-Use `event_ordinal` to order events that share the same `event_datetime_utc`:
+Insert messages in the order you want them delivered. The publisher delivers them in `sequence_number` order, which equals INSERT order within a transaction:
 
 ```sql
-INSERT INTO outbox (topic_name, partition_key, event_type, payload, event_datetime_utc, event_ordinal)
+INSERT INTO outbox (topic_name, partition_key, event_type, payload, event_datetime_utc)
 VALUES
-    ('orders', 'order-123', 'OrderCreated',  '...'::bytea, clock_timestamp(), 0),
-    ('orders', 'order-123', 'OrderApproved', '...'::bytea, clock_timestamp(), 1);
+    ('orders', 'order-123', 'OrderCreated',  '...'::bytea, clock_timestamp()),
+    ('orders', 'order-123', 'OrderApproved', '...'::bytea, clock_timestamp());
 ```
+
+The first row gets a lower `sequence_number` and will always be delivered before the second.
 
 ## Event handlers
 

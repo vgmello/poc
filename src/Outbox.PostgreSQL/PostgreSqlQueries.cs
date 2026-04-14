@@ -59,7 +59,7 @@ WHERE  publisher_id = @publisher_id
         FetchBatch = $@"
 SELECT o.sequence_number, o.topic_name, o.partition_key, o.event_type,
        o.headers, o.payload, o.payload_content_type,
-       o.event_datetime_utc, o.event_ordinal,
+       o.event_datetime_utc,
        o.created_at_utc
 FROM {outboxTable} o
 INNER JOIN {partitionsTable} op
@@ -68,7 +68,7 @@ INNER JOIN {partitionsTable} op
     AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < clock_timestamp())
     AND ((hashtext(o.partition_key) & 2147483647) % @total_partitions) = op.partition_id
 WHERE o.xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint
-ORDER BY o.event_datetime_utc, o.event_ordinal, o.sequence_number
+ORDER BY o.sequence_number
 LIMIT @batch_size;";
 
         DeletePublished = $@"
@@ -82,16 +82,16 @@ WITH dead AS (
     RETURNING sequence_number, topic_name, partition_key, event_type,
               headers, payload, payload_content_type,
               created_at_utc,
-              event_datetime_utc, event_ordinal
+              event_datetime_utc
 )
 INSERT INTO {deadLetterTable}
     (sequence_number, topic_name, partition_key, event_type, headers, payload,
      payload_content_type,
-     created_at_utc, attempt_count, event_datetime_utc, event_ordinal,
+     created_at_utc, attempt_count, event_datetime_utc,
      dead_lettered_at_utc, last_error)
 SELECT sequence_number, topic_name, partition_key, event_type, headers, payload,
        payload_content_type,
-       created_at_utc, @attempt_count, event_datetime_utc, event_ordinal,
+       created_at_utc, @attempt_count, event_datetime_utc,
        clock_timestamp(), @last_error
 FROM dead;";
 
@@ -241,7 +241,7 @@ WHERE  {partitionsTable}.partition_id = to_claim.partition_id
         DeadLetterGet = $@"
 SELECT dead_letter_seq, sequence_number, topic_name, partition_key, event_type, headers, payload,
        payload_content_type,
-       event_datetime_utc, event_ordinal, attempt_count, created_at_utc,
+       event_datetime_utc, attempt_count, created_at_utc,
        dead_lettered_at_utc, last_error
 FROM   {deadLetterTable}
 ORDER  BY dead_letter_seq
@@ -253,15 +253,15 @@ WITH replayed AS (
     WHERE  dead_letter_seq = ANY(@ids)
     RETURNING sequence_number, topic_name, partition_key, event_type, headers, payload,
               payload_content_type,
-              created_at_utc, event_datetime_utc, event_ordinal
+              created_at_utc, event_datetime_utc
 )
 INSERT INTO {outboxTable}
     (topic_name, partition_key, event_type, headers, payload,
      payload_content_type,
-     created_at_utc, event_datetime_utc, event_ordinal)
+     created_at_utc, event_datetime_utc)
 SELECT topic_name, partition_key, event_type, headers, payload,
        payload_content_type,
-       created_at_utc, event_datetime_utc, event_ordinal
+       created_at_utc, event_datetime_utc
 FROM replayed;";
 
         DeadLetterPurge = $@"

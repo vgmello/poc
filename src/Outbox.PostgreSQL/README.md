@@ -40,11 +40,9 @@ Four tables, one index, two diagnostic views, and a 64-partition seed:
 | `partition_key` | `VARCHAR(256)` | Hash input for partition assignment |
 | `payload` | `BYTEA` | Raw message bytes |
 | `headers` | `VARCHAR(2000)` | JSON-serialized headers (nullable) |
-| `event_ordinal` | `INT` | Tiebreaker for same-timestamp events |
-
 ### Indexes
 
-- `ix_outbox_pending` — On `(event_datetime_utc, event_ordinal)` for causal-order polling
+- `ix_outbox_pending` — On `(partition_id, sequence_number)` for insert-order polling
 
 ### Diagnostic views
 
@@ -62,7 +60,7 @@ Four tables, one index, two diagnostic views, and a 64-partition seed:
 
 ### Fetch mechanism
 
-`FetchBatchAsync` is a pure `SELECT` — no row locking or updating. It reads messages from owned partitions ordered by `(event_datetime_utc, event_ordinal)` with a version ceiling filter:
+`FetchBatchAsync` is a pure `SELECT` — no row locking or updating. It reads messages from owned partitions ordered by `sequence_number` (equals insert order) with a version ceiling filter:
 
 ```sql
 WHERE o.xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint

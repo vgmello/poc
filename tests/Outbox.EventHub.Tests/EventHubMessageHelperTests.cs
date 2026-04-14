@@ -21,7 +21,6 @@ public class EventHubMessageHelperTests
             Payload: Encoding.UTF8.GetBytes(payload),
             PayloadContentType: "application/json",
             EventDateTimeUtc: DateTimeOffset.UtcNow,
-            EventOrdinal: 0,
             CreatedAtUtc: DateTimeOffset.UtcNow);
 
     [Fact]

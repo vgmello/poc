@@ -577,7 +577,7 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 
 1. **Batch splitting in EventHub:** First sub-batch sent, second fails. On retry, first sub-batch messages are re-sent before second sub-batch → consumers see first-batch duplicates interleaved
 2. **In-group ordering:** Messages within a `(TopicName, PartitionKey)` group are now explicitly sorted, but ordering may still be affected by retry/redelivery scenarios
-3. **Cross-batch ordering:** Preserved by the unified poll query (`ORDER BY event_datetime_utc, event_ordinal`), assuming single-publisher-per-partition
+3. **Cross-batch ordering:** Preserved by the unified poll query (`ORDER BY sequence_number`), assuming single-publisher-per-partition
 4. **Partition handover:** During rebalance, if the old and new publisher both process messages for the same partition (grace period violation), order is not guaranteed
 
 **Operator actions:**
@@ -671,9 +671,9 @@ ALTER TABLE dbo.Outbox ADD PartitionId AS
 
 -- 4. Recreate the index
 CREATE NONCLUSTERED INDEX IX_Outbox_Pending
-ON dbo.Outbox (PartitionId, EventDateTimeUtc, EventOrdinal)
-INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload,
-         PayloadContentType, RetryCount, CreatedAtUtc, RowVersion);
+ON dbo.Outbox (PartitionId, SequenceNumber)
+INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload,
+         PayloadContentType, RetryCount, CreatedAtUtc, EventDateTimeUtc, RowVersion);
 
 -- 5. Reseed partitions
 DELETE FROM dbo.OutboxPartitions WHERE OutboxTableName = 'Outbox';
@@ -734,7 +734,7 @@ Messages remain safely in the outbox table. Resume by scaling back up.
 
 ```sql
 -- Export pending messages
-COPY (SELECT * FROM outbox ORDER BY event_datetime_utc, event_ordinal) TO '/tmp/outbox_export.csv' CSV HEADER;
+COPY (SELECT * FROM outbox ORDER BY sequence_number) TO '/tmp/outbox_export.csv' CSV HEADER;
 -- Then process via a custom script that sends to the broker
 ```
 

@@ -108,17 +108,16 @@ public static class OutboxTestHelper
             var key = partitionKey ?? $"key-{i % 10}";
             var sql = @"
                 INSERT INTO outbox (topic_name, partition_key, event_type, payload,
-                                    event_datetime_utc, event_ordinal)
-                VALUES (@topic, @key, 'TestEvent', @payload, clock_timestamp(), @ordinal)";
+                                    event_datetime_utc)
+                VALUES (@topic, @key, 'TestEvent', @payload, clock_timestamp())";
 
             await using var cmd = new NpgsqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@topic", topic);
             cmd.Parameters.AddWithValue("@key", key);
             cmd.Parameters.Add(new NpgsqlParameter("@payload", NpgsqlTypes.NpgsqlDbType.Bytea)
             {
-                Value = Encoding.UTF8.GetBytes($"{{\"index\":{i}}}")
+                Value = Encoding.UTF8.GetBytes($"{{\"index\":{startOrdinal + i}}}")
             });
-            cmd.Parameters.AddWithValue("@ordinal", (short)(startOrdinal + i));
             await cmd.ExecuteNonQueryAsync();
         }
     }

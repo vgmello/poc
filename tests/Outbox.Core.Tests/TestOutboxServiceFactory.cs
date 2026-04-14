@@ -112,10 +112,10 @@ internal sealed class TestOutboxServiceFactory : IDisposable
 
     public static OutboxMessage MakeMessage(
         long seq, string topic = "orders", string key = "key-1",
-        DateTimeOffset? eventTime = null, int eventOrdinal = 0) =>
+        DateTimeOffset? eventTime = null) =>
         new(seq, topic, key, "OrderCreated", null,
             System.Text.Encoding.UTF8.GetBytes("{}"), "application/json",
-            eventTime ?? DateTimeOffset.UtcNow, eventOrdinal, DateTimeOffset.UtcNow);
+            eventTime ?? DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
 
     public void Dispose()
     {

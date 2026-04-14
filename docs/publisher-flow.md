@@ -26,7 +26,7 @@ flowchart TB
                 L1 --> L2["Filter: grace period expired or NULL"]
                 L2 --> L3["Filter: retry_count < MaxRetryCount"]
                 L3 --> L4["Version ceiling filter\nPG: xmin < pg_snapshot_xmin\nSQL: RowVersion < MIN_ACTIVE_ROWVERSION()"]
-                L4 --> L5["ORDER BY event_datetime_utc,\nevent_ordinal"]
+                L4 --> L5["ORDER BY sequence_number"]
                 L5 --> L6["Pure SELECT — no row locking"]
             end
 
@@ -143,7 +143,7 @@ Messages map to partitions via `hash(partition_key) % total_partitions`. Each pa
 - **Partition ownership** ensures one publisher per partition—the sole isolation mechanism
 - **Version ceiling filter** prevents publishing rows from in-flight write transactions
 - **Grace period** on partition handover prevents overlap between old and new owners
-- **Ordering** within `(topic, partitionKey)` is strict (`ORDER BY event_datetime_utc, event_ordinal`)
+- **Ordering** within `(topic, partitionKey)` is strict (`ORDER BY sequence_number`, which equals insert order)
 
 ### Background loops
 
@@ -178,17 +178,16 @@ The primary event buffer. Messages are inserted here inside the same transaction
 | `headers`              | `VARCHAR(2000)` / `NVARCHAR(2000)` | JSON-serialized headers (nullable)               |
 | `payload`              | `BYTEA` / `VARBINARY(MAX)`         | Binary event payload                             |
 | `created_at_utc`       | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Insertion timestamp (default `NOW()`)            |
-| `event_datetime_utc`   | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Business event time, primary sort key            |
-| `event_ordinal`        | `INT`                              | Tiebreaker for same-timestamp events (default 0) |
+| `event_datetime_utc`   | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Business event time (debug/forensics; does not affect delivery order) |
 | `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)`   | MIME type (default `application/json`)           |
 | `retry_count`          | `INT`                              | Delivery attempts (default 0)                    |
 | `RowVersion`           | `ROWVERSION` (SQL Server only)     | Version ceiling for ordering safety              |
 
 **Indexes:**
 
-| Index               | Columns                                          | Purpose                                         |
-| ------------------- | ------------------------------------------------ | ----------------------------------------------- |
-| `ix_outbox_pending` | `(event_datetime_utc, event_ordinal)` + includes | Fast lookup of pending messages in causal order |
+| Index               | Columns                         | Purpose                                              |
+| ------------------- | ------------------------------- | ---------------------------------------------------- |
+| `ix_outbox_pending` | `(partition_id, sequence_number)` + includes | Fast lookup of pending messages in insert order |
 
 A single index replaces the previous lease-based partial indexes. Since there are no lease columns, all rows in the outbox are pending—the index covers the full table. On SQL Server, the INCLUDE columns contain all SELECT columns (including `Headers`, `Payload`, `PayloadContentType`) to form a covering index that eliminates key lookups to the clustered index. PostgreSQL's index includes only the smaller columns.
 
@@ -207,9 +206,8 @@ Archive for messages that exceeded `MaxRetryCount`. Messages arrive here via the
 | `payload`              | `BYTEA` / `VARBINARY(MAX)`         | Original payload                      |
 | `created_at_utc`       | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Original insertion time               |
 | `retry_count`          | `INT`                              | Final retry count at dead-letter time |
-| `event_datetime_utc`   | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Original business event time          |
-| `event_ordinal`        | `INT`                              | Original ordinal                      |
-| `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)`   | Original MIME type                    |
+| `event_datetime_utc`   | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Original business event time (forensics) |
+| `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)`   | Original MIME type                       |
 | `dead_lettered_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | When the message was dead-lettered    |
 | `last_error`           | `VARCHAR(2000)` / `NVARCHAR(2000)` | Final error message (nullable)        |
 

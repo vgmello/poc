@@ -77,7 +77,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
 
     private static OutboxMessage MakeMessage(long seq, string topic = "orders", string key = "key-1") =>
         new(seq, topic, key, "OrderCreated", null, Encoding.UTF8.GetBytes("{}"),
-            "application/json", DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow);
+            "application/json", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
 
     [Fact]
     public async Task NoInterceptors_MessagePassedUnchanged()
@@ -230,7 +230,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
         {
             new OutboxMessage(1, "orders", "key-1", "OrderCreated", null,
                 originalPayload, "application/json",
-                DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow)
+                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)
         };
         var callCount = 0;
         _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -324,7 +324,7 @@ public sealed class OutboxMessageInterceptorOrchestrationTests : IDisposable
             new OutboxMessage(1, "orders", "key-1", "OrderCreated",
                 new Dictionary<string, string> { ["original"] = "value" },
                 Encoding.UTF8.GetBytes("{}"), "application/json",
-                DateTimeOffset.UtcNow, 0, DateTimeOffset.UtcNow)
+                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)
         };
         var callCount = 0;
         _store.FetchBatchAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())

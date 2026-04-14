@@ -65,7 +65,7 @@ The key insight: after a timeout, we should NOT assume all messages failed. The 
 **Impact if not resolved:**
 
 - **Extra duplicates during timeout scenarios.** Since the outbox pattern already guarantees at-least-once (not exactly-once), duplicates are expected. This issue increases the duplicate rate during Kafka backpressure, but consumers must be idempotent regardless.
-- **Ordering is preserved.** Ghost-written messages are re-fetched in `event_datetime_utc, event_ordinal` order by `FetchBatchAsync`, so the consumer sees duplicates but never out-of-order delivery within a partition key.
+- **Ordering is preserved.** Ghost-written messages are re-fetched in `sequence_number` order by `FetchBatchAsync`, so the consumer sees duplicates but never out-of-order delivery within a partition key.
 - **False dead-lettering under sustained backpressure.** Retry counts are in-memory and reset on publisher restart — failed messages get a fresh attempt budget on the next poll cycle. However, within a single poll cycle, each timeout against a given (topic, partitionKey) group counts as a non-transient failure and increments the in-memory attempt counter, even for messages that were already delivered. Under sustained Kafka backpressure within a single processing cycle, the in-memory attempt counter can reach `MaxPublishAttempts` and the messages get dead-lettered despite successful delivery. This does not cause data loss (the consumer already received them), but operators should be aware that dead-lettered messages from Kafka timeout scenarios may not actually be undelivered. Tuning `SendTimeoutSeconds` to match realistic Kafka latency reduces this risk.
 
 ---

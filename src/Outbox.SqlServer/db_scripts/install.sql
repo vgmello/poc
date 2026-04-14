@@ -22,7 +22,6 @@ BEGIN
         Payload          VARBINARY(MAX)        NOT NULL,
         CreatedAtUtc     DATETIME2(3)          NOT NULL  DEFAULT SYSUTCDATETIME(),
         EventDateTimeUtc DATETIME2(3)          NOT NULL,
-        EventOrdinal     INT                   NOT NULL  DEFAULT 0,
         PayloadContentType NVARCHAR(100)       NOT NULL  DEFAULT 'application/json',
         RowVersion       ROWVERSION            NOT NULL,
         PartitionId      AS (ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % 64) PERSISTED,
@@ -49,7 +48,6 @@ BEGIN
         CreatedAtUtc      DATETIME2(3)          NOT NULL,
         AttemptCount      INT                   NOT NULL,
         EventDateTimeUtc  DATETIME2(3)          NOT NULL,
-        EventOrdinal      INT                   NOT NULL  DEFAULT 0,
         PayloadContentType NVARCHAR(100)        NOT NULL  DEFAULT 'application/json',
         DeadLetteredAtUtc DATETIME2(3)          NOT NULL  DEFAULT SYSUTCDATETIME(),
         LastError         NVARCHAR(2000)        NULL,
@@ -116,8 +114,8 @@ GO
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Outbox') AND name = N'IX_Outbox_Pending')
 BEGIN
     CREATE NONCLUSTERED INDEX IX_Outbox_Pending
-    ON dbo.Outbox (PartitionId, EventDateTimeUtc, EventOrdinal)
-    INCLUDE (SequenceNumber, TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, CreatedAtUtc, RowVersion);
+    ON dbo.Outbox (PartitionId, SequenceNumber)
+    INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload, PayloadContentType, EventDateTimeUtc, CreatedAtUtc, RowVersion);
 END;
 GO
 

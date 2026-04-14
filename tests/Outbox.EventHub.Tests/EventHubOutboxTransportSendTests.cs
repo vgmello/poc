@@ -45,7 +45,6 @@ public class EventHubOutboxTransportSendTests
             Payload: Encoding.UTF8.GetBytes("{}"),
             PayloadContentType: "application/json",
             EventDateTimeUtc: DateTimeOffset.UtcNow,
-            EventOrdinal: 0,
             CreatedAtUtc: DateTimeOffset.UtcNow);
 
     [Fact]

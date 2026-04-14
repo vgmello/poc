@@ -85,8 +85,8 @@ public class PoisonMessageTests
         await using var conn = new Npgsql.NpgsqlConnection(connectionString);
         await conn.OpenAsync();
         await using var cmd = new Npgsql.NpgsqlCommand(@"
-            INSERT INTO outbox (topic_name, partition_key, event_type, payload, event_datetime_utc, event_ordinal)
-            VALUES (@topic, @key, 'PoisonEvent', @payload, clock_timestamp(), 0)", conn);
+            INSERT INTO outbox (topic_name, partition_key, event_type, payload, event_datetime_utc)
+            VALUES (@topic, @key, 'PoisonEvent', @payload, clock_timestamp())", conn);
         cmd.Parameters.AddWithValue("@topic", topic);
         cmd.Parameters.AddWithValue("@key", partitionKey);
         cmd.Parameters.Add(new Npgsql.NpgsqlParameter("@payload", NpgsqlTypes.NpgsqlDbType.Bytea)

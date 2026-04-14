@@ -86,8 +86,8 @@ public class SqlServerPoisonMessageTests
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync();
         const string sql = @"
-            INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Payload, EventDateTimeUtc, EventOrdinal)
-            VALUES (@topic, @key, 'PoisonEvent', @payload, SYSUTCDATETIME(), 0)";
+            INSERT INTO dbo.Outbox (TopicName, PartitionKey, EventType, Payload, EventDateTimeUtc)
+            VALUES (@topic, @key, 'PoisonEvent', @payload, SYSUTCDATETIME())";
         await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@topic", topic);
         cmd.Parameters.AddWithValue("@key", partitionKey);

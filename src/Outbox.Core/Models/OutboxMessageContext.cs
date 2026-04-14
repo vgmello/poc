@@ -16,7 +16,6 @@ public sealed class OutboxMessageContext
     public string PartitionKey => _original.PartitionKey;
     public string EventType => _original.EventType;
     public DateTimeOffset EventDateTimeUtc => _original.EventDateTimeUtc;
-    public int EventOrdinal => _original.EventOrdinal;
     public DateTimeOffset CreatedAtUtc => _original.CreatedAtUtc;
 
     // Mutable fields

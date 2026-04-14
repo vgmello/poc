@@ -39,7 +39,7 @@ The publisher doesn't receive push notifications. It **polls** the database on a
 
 3. **Check circuit breaker** — If the circuit is open for a topic, the group is skipped without incrementing the retry count. Messages stay in the outbox and will be picked up when the circuit closes.
 
-4. **Send to broker** — For each group, messages are sent via `IOutboxTransport.SendAsync`, ordered by `EventDateTimeUtc, EventOrdinal, SequenceNumber`.
+4. **Send to broker** — For each group, messages are sent via `IOutboxTransport.SendAsync`, ordered by `SequenceNumber` (equals insert order).
 
 5. **Delete on success** — Successfully sent messages are deleted from the outbox.
 
@@ -63,19 +63,19 @@ Ordering is guaranteed within a `(topic, partition_key)` pair. Three mechanisms 
 
 ### 1. Store-level ordering
 
-`FetchBatchAsync` orders by `(event_datetime_utc, event_ordinal)`. The `event_ordinal` field (an `INT`) breaks ties when multiple events share the same timestamp—common when a single transaction inserts several events.
+`FetchBatchAsync` orders by `sequence_number`, which equals the order in which rows were INSERTed (since `sequence_number` is a `BIGINT IDENTITY` / `bigserial` that increments monotonically at insert and is never modified by retries). Callers MUST insert messages in the order they want them delivered — `event_datetime_utc` is preserved on the row as a debug/forensics field but does NOT influence delivery order.
 
 A version ceiling filter ensures rows from in-flight write transactions aren't visible yet. PostgreSQL uses `xmin < pg_snapshot_xmin(pg_current_snapshot())` and SQL Server uses `RowVersion < MIN_ACTIVE_ROWVERSION()`. This prevents the scenario where Transaction #2 commits before Transaction #1 and its rows are published out of order.
 
 ### 2. Batch-level ordering
 
-Before sending each group to the transport, the publish loop sorts by causal time with `SequenceNumber` as a tiebreaker:
+Before sending each group to the transport, the publish loop sorts by `SequenceNumber`:
 
 ```csharp
-var groupMessages = group.OrderBy(m => m.EventDateTimeUtc).ThenBy(m => m.EventOrdinal).ThenBy(m => m.SequenceNumber).ToList();
+var groupMessages = group.OrderBy(m => m.SequenceNumber).ToList();
 ```
 
-This guarantees causal ordering within each group, consistent with the store-level `FetchBatchAsync` ordering.
+This guarantees insert-order delivery within each group, consistent with the store-level `FetchBatchAsync` ordering.
 
 ### 3. Partition ownership (single-writer guarantee)
 

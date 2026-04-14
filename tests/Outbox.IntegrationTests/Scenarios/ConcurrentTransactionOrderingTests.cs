@@ -82,7 +82,7 @@ public class ConcurrentTransactionOrderingTests
             await using var tx = await conn.BeginTransactionAsync();
 
             await InsertInTransactionAsync(conn, tx, topic, partitionKey,
-                eventIndex: 0, ordinal: 0, timestamp: TimestampA);
+                eventIndex: 0, timestamp: TimestampA);
 
             // Signal: A is inserted (uncommitted)
             txn1Inserted.Release();
@@ -103,9 +103,9 @@ public class ConcurrentTransactionOrderingTests
             await using var tx = await conn.BeginTransactionAsync();
 
             await InsertInTransactionAsync(conn, tx, topic, partitionKey,
-                eventIndex: 1, ordinal: 1, timestamp: TimestampB);
+                eventIndex: 1, timestamp: TimestampB);
             await InsertInTransactionAsync(conn, tx, topic, partitionKey,
-                eventIndex: 2, ordinal: 2, timestamp: TimestampC);
+                eventIndex: 2, timestamp: TimestampC);
 
             await tx.CommitAsync();
 
@@ -145,20 +145,18 @@ public class ConcurrentTransactionOrderingTests
         // All 3 messages should now be returned
         Assert.Equal(3, batch2.Count);
 
-        // Messages must be in correct event_datetime_utc order (A before B before C)
+        // Messages must be in sequence_number order (insert order = delivery order)
         for (var i = 1; i < batch2.Count; i++)
         {
             var prev = batch2[i - 1];
             var curr = batch2[i];
 
             Assert.True(
-                curr.EventDateTimeUtc > prev.EventDateTimeUtc ||
-                (curr.EventDateTimeUtc == prev.EventDateTimeUtc &&
-                 curr.EventOrdinal > prev.EventOrdinal),
+                curr.SequenceNumber > prev.SequenceNumber,
                 $"Ordering violation: message at position {i} " +
-                $"(seq={curr.SequenceNumber}, ts={curr.EventDateTimeUtc}, ord={curr.EventOrdinal}) " +
+                $"(seq={curr.SequenceNumber}, ts={curr.EventDateTimeUtc}) " +
                 $"should come after position {i - 1} " +
-                $"(seq={prev.SequenceNumber}, ts={prev.EventDateTimeUtc}, ord={prev.EventOrdinal})");
+                $"(seq={prev.SequenceNumber}, ts={prev.EventDateTimeUtc})");
         }
 
         _output.WriteLine("All 3 messages returned in correct order after both transactions committed");
@@ -189,7 +187,7 @@ public class ConcurrentTransactionOrderingTests
             await using var tx = await conn.BeginTransactionAsync();
 
             await InsertInTransactionAsync(conn, tx, topic, "slow-key",
-                eventIndex: 0, ordinal: 0, timestamp: TimestampA);
+                eventIndex: 0, timestamp: TimestampA);
 
             txn1Inserted.Release();
 
@@ -287,13 +285,13 @@ public class ConcurrentTransactionOrderingTests
 
     private static async Task InsertInTransactionAsync(
         NpgsqlConnection conn, NpgsqlTransaction tx,
-        string topic, string partitionKey, int eventIndex, int ordinal,
+        string topic, string partitionKey, int eventIndex,
         DateTimeOffset timestamp)
     {
         const string sql = @"
             INSERT INTO outbox (topic_name, partition_key, event_type, payload,
-                                event_datetime_utc, event_ordinal)
-            VALUES (@topic, @key, 'TestEvent', @payload, @ts, @ordinal)";
+                                event_datetime_utc)
+            VALUES (@topic, @key, 'TestEvent', @payload, @ts)";
 
         await using var cmd = new NpgsqlCommand(sql, conn, tx);
         cmd.Parameters.AddWithValue("@topic", topic);
@@ -303,7 +301,6 @@ public class ConcurrentTransactionOrderingTests
             Value = Encoding.UTF8.GetBytes($"{{\"index\":{eventIndex}}}")
         });
         cmd.Parameters.AddWithValue("@ts", timestamp);
-        cmd.Parameters.AddWithValue("@ordinal", (short)ordinal);
         await cmd.ExecuteNonQueryAsync();
     }
 

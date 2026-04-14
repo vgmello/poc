@@ -15,17 +15,14 @@ public sealed class OrderingContractTests : IDisposable
     public void Dispose() => _f.Dispose();
 
     [Fact]
-    public async Task MessagesWithinGroup_SentOrdered_ByEventDateTimeUtc_ThenEventOrdinal_ThenSequenceNumber()
+    public async Task MessagesWithinGroup_SentOrdered_BySequenceNumber()
     {
-        var t1 = DateTimeOffset.UtcNow;
-        var t2 = t1.AddSeconds(1);
-
-        // Deliberately insert out of order to verify sorting
+        // Deliberately supply messages in reverse sequence order to verify sorting
         var messages = new[]
         {
-            TestOutboxServiceFactory.MakeMessage(3, eventTime: t2, eventOrdinal: 0),
-            TestOutboxServiceFactory.MakeMessage(1, eventTime: t1, eventOrdinal: 0),
-            TestOutboxServiceFactory.MakeMessage(2, eventTime: t1, eventOrdinal: 1),
+            TestOutboxServiceFactory.MakeMessage(3),
+            TestOutboxServiceFactory.MakeMessage(1),
+            TestOutboxServiceFactory.MakeMessage(2),
         };
         _f.SetupSingleBatch("p1", messages);
 
@@ -41,7 +38,6 @@ public sealed class OrderingContractTests : IDisposable
 
         Assert.NotNull(sentMessages);
         Assert.Equal(3, sentMessages!.Count);
-        // Expected order: seq 1 (t1, ord 0), seq 2 (t1, ord 1), seq 3 (t2, ord 0)
         Assert.Equal(1L, sentMessages[0].SequenceNumber);
         Assert.Equal(2L, sentMessages[1].SequenceNumber);
         Assert.Equal(3L, sentMessages[2].SequenceNumber);

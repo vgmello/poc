@@ -84,7 +84,7 @@ public sealed class OutboxPublisherServiceTests : IDisposable
 
     private static OutboxMessage MakeMessage(
         long seq, string topic = "orders", string key = "key-1") =>
-        new(seq, topic, key, "OrderCreated", null, System.Text.Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow, 0,
+        new(seq, topic, key, "OrderCreated", null, System.Text.Encoding.UTF8.GetBytes("{}"), "application/json", DateTimeOffset.UtcNow,
             DateTimeOffset.UtcNow);
 
     [Fact]
