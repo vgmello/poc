@@ -62,7 +62,7 @@ Add to `appsettings.json`:
     "Outbox": {
         "Publisher": {
             "BatchSize": 100,
-            "MaxRetryCount": 5,
+            "MaxPublishAttempts": 5,
             "PublishThreadCount": 4
         },
         "PostgreSql": {

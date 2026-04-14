@@ -6,21 +6,23 @@ Step-by-step breakdown of everything the outbox publisher does when backed by SQ
 
 Before diving in, here are the options that drive the timings referenced throughout:
 
-| Option                              | Default            | Used by                          |
-| ----------------------------------- | ------------------ | -------------------------------- |
-| `PublisherName`                     | `outbox-publisher` | Publisher ID generation          |
-| `BatchSize`                         | 100                | Fetch query `TOP`                |
-| `MaxRetryCount`                     | 5                  | Poison threshold                 |
-| `MinPollIntervalMs`                 | 100                | Publish loop (busy)              |
-| `MaxPollIntervalMs`                 | 5000               | Publish loop (idle)              |
-| `HeartbeatIntervalMs`               | 10,000             | Heartbeat loop delay             |
-| `HeartbeatTimeoutSeconds`           | 30                 | Staleness detection              |
-| `PartitionGracePeriodSeconds`       | 60                 | Partition takeover safety window |
-| `RebalanceIntervalMs`               | 30,000             | Rebalance loop delay             |
-| `OrphanSweepIntervalMs`             | 60,000             | Orphan sweep loop delay          |
-| `DeadLetterSweepIntervalMs`         | 60,000             | Dead-letter sweep loop delay     |
-| `CircuitBreakerFailureThreshold`    | 3                  | Consecutive failures to trip     |
-| `CircuitBreakerOpenDurationSeconds` | 30                 | How long the circuit stays open  |
+| Option                              | Default            | Used by                                  |
+| ----------------------------------- | ------------------ | ---------------------------------------- |
+| `PublisherName`                     | `outbox-publisher` | Publisher ID generation                  |
+| `BatchSize`                         | 100                | Fetch query `TOP`                        |
+| `MaxPublishAttempts`                | 5                  | Non-transient attempts before DLQ        |
+| `RetryBackoffBaseMs`                | 100                | Base delay for in-memory retry loop      |
+| `RetryBackoffMaxMs`                 | 2,000              | Ceiling for exponential retry backoff    |
+| `PublishThreadCount`                | 4                  | Concurrent publish workers per poll      |
+| `MinPollIntervalMs`                 | 100                | Publish loop (busy)                      |
+| `MaxPollIntervalMs`                 | 5000               | Publish loop (idle)                      |
+| `HeartbeatIntervalMs`               | 10,000             | Heartbeat loop delay                     |
+| `HeartbeatTimeoutSeconds`           | 30                 | Staleness detection                      |
+| `PartitionGracePeriodSeconds`       | 60                 | Partition takeover safety window         |
+| `RebalanceIntervalMs`               | 30,000             | Rebalance loop delay                     |
+| `OrphanSweepIntervalMs`             | 60,000             | Orphan sweep loop delay                  |
+| `CircuitBreakerFailureThreshold`    | 3                  | Consecutive transient failures to trip   |
+| `CircuitBreakerOpenDurationSeconds` | 30                 | How long the circuit stays open          |
 
 Event Hub transport options:
 
@@ -83,7 +85,7 @@ A `TopicCircuitBreaker` is created in memory (not persisted). It tracks failures
 
 ### 1.4 Launch parallel loops
 
-After successful registration, the publisher creates a linked `CancellationTokenSource` and starts five parallel `Task`s. If any loop exits—whether from a crash or an unexpected return—all loops are cancelled and the entire set restarts with exponential backoff (`2s → 4s → 8s → 16s → 32s`). After five consecutive restarts without 30 seconds of healthy operation, the publisher stops the host application.
+After successful registration, the publisher creates a linked `CancellationTokenSource` and starts four parallel `Task`s (publish, heartbeat, rebalance, orphan sweep). If any loop exits—whether from a crash or an unexpected return—all loops are cancelled and the entire set restarts with exponential backoff (`2s → 4s → 8s → ...` capped at 2 minutes). After five consecutive restarts without 30 seconds of healthy operation, the publisher stops the host application.
 
 ---
 
@@ -110,8 +112,8 @@ SELECT TOP (@BatchSize)
     o.SequenceNumber, o.TopicName, o.PartitionKey, o.EventType,
     o.Headers, o.Payload, o.PayloadContentType,
     o.EventDateTimeUtc,
-    o.RetryCount, o.CreatedAtUtc
-FROM dbo.Outbox o
+    o.CreatedAtUtc
+FROM dbo.Outbox o WITH (NOLOCK)
 WHERE o.PartitionId IN (
     SELECT op.PartitionId
     FROM dbo.OutboxPartitions op
@@ -119,27 +121,26 @@ WHERE o.PartitionId IN (
       AND op.OwnerPublisherId = @PublisherId
       AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
 )
-  AND o.RetryCount < @MaxRetryCount
   AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
-ORDER BY o.SequenceNumber;
+ORDER BY o.PartitionId, o.SequenceNumber;
 ```
 
 **Parameters:**
 
 - `@BatchSize` — max messages to fetch (default 100)
 - `@PublisherId` — this publisher's ID
-- `@MaxRetryCount` — poison threshold (default 5)
 - `@OutboxTableName` — the outbox table name for this publisher group
 
 **What the filters do:**
 
-| Filter                                              | Purpose                                                            |
-| --------------------------------------------------- | ------------------------------------------------------------------ |
-| `o.PartitionId IN (subquery)`                       | Only fetch from partitions this publisher owns (precomputed hash)  |
-| `op.GraceExpiresUtc IS NULL OR < NOW`               | Don't fetch from partitions still in grace period                  |
-| `RowVersion < MIN_ACTIVE_ROWVERSION()`              | Version ceiling — withholds rows from in-flight write transactions |
-| `RetryCount < @MaxRetryCount`                       | Skip poison messages (handled separately)                          |
-| `ORDER BY SequenceNumber`                           | Strict ordering within a partition key (equals insert order)       |
+| Filter                                         | Purpose                                                            |
+| ---------------------------------------------- | ------------------------------------------------------------------ |
+| `o.PartitionId IN (subquery)`                  | Only fetch from partitions this publisher owns (precomputed hash)  |
+| `op.GraceExpiresUtc IS NULL OR < NOW`          | Don't fetch from partitions still in grace period                  |
+| `RowVersion < MIN_ACTIVE_ROWVERSION()`         | Version ceiling — withholds rows from in-flight write transactions |
+| `ORDER BY PartitionId, SequenceNumber`         | Strict ordering within a partition key (equals insert order)       |
+
+There is no retry-count filter — retry state lives in memory, so every row in the outbox is a candidate for delivery. Messages that burned attempts on a previous fetch simply restart their budget when re-fetched after a crash.
 
 **No row locking:** The query uses no lock hints (`ROWLOCK`, `READPAST`, etc.). Partition ownership is the sole isolation mechanism — each publisher only fetches from its owned partitions, so there is no risk of two publishers reading the same rows. This avoids lock manager overhead, which is the dominant performance cost on SQL Server.
 
@@ -151,25 +152,21 @@ ORDER BY o.SequenceNumber;
 
 If the batch is empty, the poll interval doubles (up to `MaxPollIntervalMs`). When messages are found, it resets to `MinPollIntervalMs`.
 
-### 2.4 Separate poison messages
+### 2.4 Group by topic and partition key
 
-Messages where `RetryCount >= MaxRetryCount` are split from the batch and dead-lettered immediately (see [phase 7](#phase-7-dead-lettering)).
+Messages are grouped by `(TopicName, PartitionKey)`. Each group is processed independently on a worker thread, so a failure in one topic doesn't affect others. Each group starts a fresh in-memory `attempt` counter at 0.
 
-### 2.5 Group by topic and partition key
+### 2.5 Check circuit breaker
 
-Healthy messages are grouped by `(TopicName, PartitionKey)`. Each group is processed independently so a failure in one topic doesn't affect others.
+If the circuit breaker is **open** for a topic, the group is skipped entirely. Messages stay in the outbox untouched — the in-memory attempt counter isn't touched and no database write happens. They'll be picked up on the next poll once the circuit closes, and `IOutboxEventHandler.OnPublishFailedAsync` fires with `PublishFailureReason.CircuitOpened`.
 
-### 2.6 Check circuit breaker
+This prevents attempt exhaustion during broker outages.
 
-If the circuit breaker is **open** for a topic, the group is skipped entirely. Messages stay in the outbox untouched — no retry count increment, no database write. They'll be picked up on the next poll once the circuit closes.
-
-This prevents retry-count exhaustion during broker outages.
-
-### 2.7 Apply interceptors
+### 2.6 Apply interceptors
 
 If any `IOutboxMessageInterceptor` instances are registered, they run against each message. Interceptors can modify headers, payload, or event type before sending. Transport-level interceptors (`ITransportMessageInterceptor<EventData>`) run in the next step.
 
-### 2.8 Send to Event Hub
+### 2.7 Send to Event Hub
 
 The Event Hub transport resolves an `EventHubProducerClient` per topic name from an internal cache (`ConcurrentDictionary<string, EventHubProducerClient>`). Clients are created lazily on first use via the `EventHubClientFactory` delegate—by default this creates a client from the namespace-level connection string + topic name, but it can be replaced with `UseClientFactory()` for custom auth (e.g., `DefaultAzureCredential`). Created clients are reused for subsequent sends to the same topic. It then creates an `EventDataBatch` and adds messages one by one.
 
@@ -213,39 +210,38 @@ If sub-batches 1 and 2 succeed but sub-batch 3 fails, the transport throws a `Pa
 - `SucceededSequenceNumbers` — messages already sent (can't be unsent)
 - `FailedSequenceNumbers` — messages that weren't sent
 
-### 2.9 Finalize outcomes
+### 2.8 Finalize outcomes
 
-Three possible outcomes:
-
-**Success—all messages sent:**
-
-Delete from the outbox table and record circuit breaker success:
+On `SendAsync` success:
 
 ```sql
 DELETE FROM dbo.Outbox
 WHERE SequenceNumber IN (SELECT SequenceNumber FROM @Ids);
 ```
 
-If the delete fails (database error), messages remain in the outbox and will be re-delivered on the next poll (at-least-once guarantee). No retry count increment since the transport already succeeded.
+Circuit breaker records a success. If the delete fails (database error), messages remain in the outbox and will be re-delivered on the next poll (at-least-once guarantee).
 
-**Partial send:**
+On a `SendAsync` exception, the transport's `IsTransient(Exception)` decides what happens next:
 
-- Succeeded messages → delete (same query as success)
-- Failed messages → increment retry count:
+**Transient failure** (connection reset, timeout, broker unavailable):
 
-```sql
-UPDATE o SET o.RetryCount = o.RetryCount + 1
-FROM dbo.Outbox o
-INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
-```
+- The circuit breaker records a transient failure. After `CircuitBreakerFailureThreshold` consecutive hits, the circuit opens for `CircuitBreakerOpenDurationSeconds`.
+- The in-memory `attempt` counter is **not** touched.
+- The retry loop sleeps `min(RetryBackoffBaseMs × 2^(attempt-1), RetryBackoffMaxMs)` milliseconds, then either retries the same group or exits if the circuit has opened.
+- No database write happens.
 
-Circuit breaker records a failure.
+**Non-transient failure** (serialization error, permission denied, message too large):
 
-**Full failure:**
+- `attempt += 1`.
+- If `attempt < MaxPublishAttempts`, the loop retries the remaining messages after backoff.
+- If `attempt >= MaxPublishAttempts`, the group is dead-lettered inline via `DeadLetterAsync` (see [phase 6](#phase-6-dead-lettering-inline)) and `OnPublishFailedAsync` fires with `PublishFailureReason.RetriesExhausted`.
 
-All messages get their retry count incremented (same query as failed messages above). Circuit breaker records a failure.
+**Partial send** (Kafka transport only — Event Hub batches are atomic):
 
-### 2.10 No safety net needed
+- Succeeded messages → delete with the query above.
+- Failed messages → `SendAsync` throws `PartialSendException` and the retry loop continues with only the failed subset, classifying the underlying error via `IsTransient`.
+
+### 2.9 No safety net needed
 
 Since there are no per-message leases, cancellation doesn't require cleanup. Partition ownership is the sole isolation mechanism—when the publisher shuts down, `UnregisterPublisherAsync` releases partitions, and unprocessed messages are simply picked up by the next owner.
 
@@ -446,53 +442,21 @@ The key difference from rebalance: this only claims `NULL`-owner partitions. It 
 
 ---
 
-## Phase 6: dead-letter sweep loop
+## Phase 6: dead-lettering (inline)
 
-Runs every `DeadLetterSweepIntervalMs` (default 60s). A background safety net that catches poison messages the publish loop's inline check might have missed (e.g., if `DeadLetterAsync` itself failed earlier).
-
-```sql
-DELETE o
-OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
-       deleted.EventType, deleted.Headers, deleted.Payload,
-       deleted.PayloadContentType,
-       deleted.CreatedAtUtc, deleted.RetryCount,
-       deleted.EventDateTimeUtc,
-       SYSUTCDATETIME(), @LastError
-INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
-     Headers, Payload, PayloadContentType,
-     CreatedAtUtc, RetryCount,
-     EventDateTimeUtc,
-     DeadLetteredAtUtc, LastError)
-FROM dbo.Outbox o WITH (ROWLOCK, READPAST)
-WHERE o.RetryCount >= @MaxRetryCount;
-```
-
-**Parameters:**
-
-- `@MaxRetryCount` — poison threshold (default 5)
-- `@LastError` — always `"Max retry count exceeded (background sweep)"`
-
-The condition is simple: any message with `RetryCount >= MaxRetryCount` is swept. Since there are no lease columns, partition ownership ensures only the owning publisher processes its messages.
-
-The `DELETE...OUTPUT INTO` is atomic—the message is moved from `Outbox` to `OutboxDeadLetter` in a single statement.
-
----
-
-## Phase 7: dead-lettering (inline)
-
-During the publish loop (phase 2), messages with `RetryCount >= MaxRetryCount` are dead-lettered immediately, before any transport work:
+There is no background dead-letter sweep loop. Dead-lettering happens inline from the publish loop (phase 2.8) when the in-memory `attempt` counter hits `MaxPublishAttempts` after a non-transient failure. A single atomic statement moves the rows from `dbo.Outbox` to `dbo.OutboxDeadLetter`:
 
 ```sql
 DELETE o
 OUTPUT deleted.SequenceNumber, deleted.TopicName, deleted.PartitionKey,
        deleted.EventType, deleted.Headers, deleted.Payload,
        deleted.PayloadContentType,
-       deleted.CreatedAtUtc, deleted.RetryCount,
+       deleted.CreatedAtUtc, @AttemptCount,
        deleted.EventDateTimeUtc,
        SYSUTCDATETIME(), @LastError
 INTO dbo.OutboxDeadLetter(SequenceNumber, TopicName, PartitionKey, EventType,
      Headers, Payload, PayloadContentType,
-     CreatedAtUtc, RetryCount,
+     CreatedAtUtc, AttemptCount,
      EventDateTimeUtc,
      DeadLetteredAtUtc, LastError)
 FROM dbo.Outbox o
@@ -501,22 +465,25 @@ INNER JOIN @Ids p ON o.SequenceNumber = p.SequenceNumber;
 
 **Parameters:**
 
-- `@Ids` — table-valued parameter (`dbo.SequenceNumberList`) containing the poison message sequence numbers
-- `@LastError` — `"Max retry count exceeded"`
+- `@Ids` — table-valued parameter (`dbo.SequenceNumberList`) containing the exhausted group's sequence numbers
+- `@AttemptCount` — the final in-memory attempt count (equals `MaxPublishAttempts` at this point)
+- `@LastError` — the message from the last non-transient exception
 
-Uses `CancellationToken.None`—this must complete even during shutdown. After dead-lettering, `IOutboxEventHandler.OnMessageDeadLetteredAsync` fires for each message.
+The call uses `CancellationToken.None` so it completes even during shutdown. After dead-lettering, `IOutboxEventHandler.OnMessageDeadLetteredAsync` fires for each message and `OnPublishFailedAsync` fires for the group with `PublishFailureReason.RetriesExhausted`.
+
+If the publisher crashes mid-retry before dead-lettering runs, the rows stay in the outbox. The next fetch picks them up with a fresh `attempt = 0` budget — retry state never survives a process restart.
 
 ---
 
-## Phase 8: shutdown
+## Phase 7: shutdown
 
 When the host signals cancellation:
 
-### 8.1 Cancel all loops
+### 7.1 Cancel all loops
 
 The linked `CancellationTokenSource` is cancelled. Each loop catches `OperationCanceledException` and exits cleanly.
 
-### 8.2 Unregister publisher
+### 7.2 Unregister publisher
 
 ```sql
 UPDATE dbo.OutboxPartitions
@@ -555,7 +522,7 @@ SQL Server uses a custom type for passing sequence number arrays:
 CREATE TYPE dbo.SequenceNumberList AS TABLE (SequenceNumber BIGINT NOT NULL PRIMARY KEY);
 ```
 
-Used by `DeletePublishedAsync`, `IncrementRetryCountAsync`, and `DeadLetterAsync` for the `@Ids` parameter. The .NET code creates a `DataTable` with a single `SequenceNumber` column and passes it as a `SqlDbType.Structured` parameter.
+Used by `DeletePublishedAsync` and `DeadLetterAsync` for the `@Ids` parameter. The .NET code creates a `DataTable` with a single `SequenceNumber` column and passes it as a `SqlDbType.Structured` parameter.
 
 ---
 
@@ -565,12 +532,11 @@ A typical lifecycle with one publisher and 64 partitions:
 
 ```
 t=0s     RegisterPublisherAsync (MERGE into OutboxPublishers)
-         Launch 5 parallel loops
+         Launch 4 parallel loops
          ├── Publish loop starts polling (100ms intervals)
          ├── Heartbeat loop starts (10s intervals)
          ├── Rebalance loop starts (30s intervals)
-         ├── Orphan sweep loop starts (60s intervals)
-         └── Dead-letter sweep loop starts (60s intervals)
+         └── Orphan sweep loop starts (60s intervals)
 
 t=0.1s   FetchBatchAsync → 0 messages (no partitions owned yet)
          Poll interval backs off to 200ms
@@ -588,7 +554,6 @@ t=30s    HeartbeatAsync
 ...
 
 t=60s    OrphanSweepAsync (no orphans—all owned)
-         DeadLetterSweepAsync (sweeps any missed poison messages)
          RebalanceAsync (no change—still 1 publisher)
 
 --- Publisher B comes online ---
@@ -614,17 +579,15 @@ t=???    UnregisterPublisherAsync
 
 ## Query-to-loop cheat sheet
 
-| Query                                                       | Loop              | Frequency                  | Uses transaction?     |
-| ----------------------------------------------------------- | ----------------- | -------------------------- | --------------------- |
-| `MERGE OutboxPublishers`                                    | Startup           | Once                       | No                    |
-| `SELECT COUNT(*) FROM OutboxPartitions`                     | Publish           | Cached (60s refresh)       | No                    |
-| `SELECT TOP ... FROM Outbox` (FetchBatch)                   | Publish           | Every poll (100ms–5s)      | No                    |
-| `DELETE FROM Outbox WHERE SequenceNumber IN ...`            | Publish           | After each successful send | No                    |
-| `UPDATE Outbox SET RetryCount = RetryCount + 1`             | Publish           | On transport failure       | No                    |
-| `DELETE Outbox OUTPUT INTO OutboxDeadLetter` (by IDs)       | Publish           | When poison messages found | No                    |
-| `UPDATE OutboxPublishers SET LastHeartbeatUtc`              | Heartbeat         | Every 10s                  | Yes                   |
-| `SELECT COUNT_BIG(*) FROM Outbox`                           | Heartbeat         | Every 10s                  | No                    |
-| Rebalance (multi-step)                                      | Rebalance         | Every 30s                  | Yes                   |
-| Orphan claim (multi-step)                                   | Orphan sweep      | Every 60s                  | Yes                   |
-| `DELETE Outbox OUTPUT INTO OutboxDeadLetter` (by threshold) | Dead-letter sweep | Every 60s                  | No (single statement) |
-| `UPDATE OutboxPartitions ... DELETE OutboxPublishers`       | Shutdown          | Once                       | Yes                   |
+| Query                                                  | Loop         | Frequency                        | Uses transaction? |
+| ------------------------------------------------------ | ------------ | -------------------------------- | ----------------- |
+| `MERGE OutboxPublishers`                               | Startup      | Once                             | No                |
+| `SELECT COUNT(*) FROM OutboxPartitions`                | Publish      | Cached (60s refresh)             | No                |
+| `SELECT TOP ... FROM Outbox` (FetchBatch)              | Publish      | Every poll (100ms–5s)            | No                |
+| `DELETE FROM Outbox WHERE SequenceNumber IN ...`       | Publish      | After each successful send       | No                |
+| `DELETE Outbox OUTPUT INTO OutboxDeadLetter` (by IDs)  | Publish      | When retries exhausted in-memory | No                |
+| `UPDATE OutboxPublishers SET LastHeartbeatUtc`         | Heartbeat    | Every 10s                        | Yes               |
+| `SELECT COUNT_BIG(*) FROM Outbox`                      | Heartbeat    | Every 10s                        | No                |
+| Rebalance (multi-step)                                 | Rebalance    | Every 30s                        | Yes               |
+| Orphan claim (multi-step)                              | Orphan sweep | Every 60s                        | Yes               |
+| `UPDATE OutboxPartitions ... DELETE OutboxPublishers`  | Shutdown     | Once                             | Yes               |

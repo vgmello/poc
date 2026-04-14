@@ -54,9 +54,9 @@ Continuous message insertion at 1,000 msg/sec for 5 minutes.
 
 ## Query Execution Plan
 
-The FetchBatch query uses an ordered Index Seek on `IX_Outbox_Pending (PartitionId, EventDateTimeUtc, EventOrdinal)` — a fully covering nonclustered index. The `ORDER BY` clause matches the index key order exactly, eliminating any Sort operator. No missing index suggestions.
+The FetchBatch query uses an ordered Index Seek on `IX_Outbox_Pending (PartitionId, SequenceNumber)` — a fully covering nonclustered index. The `ORDER BY` clause matches the index key order exactly, eliminating any Sort operator. No missing index suggestions.
 
-> **Historical note (2026-04-14):** The index `IX_Outbox_Pending` has since been rebuilt on `(PartitionId, SequenceNumber)` as part of the sequence-number ordering change. The query plan observation above reflects the previous index. A re-baseline run is pending.
+> **Note:** The throughput numbers in this report were measured against the old `(PartitionId, EventDateTimeUtc, EventOrdinal)` index. A re-baseline run on the current index is pending.
 
 ## Design Notes
 

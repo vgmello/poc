@@ -12,7 +12,7 @@ flowchart TB
         S3 --> LOOPS
     end
 
-    subgraph LOOPS["5 parallel loops (linked CancellationToken)"]
+    subgraph LOOPS["4 parallel loops (linked CancellationToken)"]
         direction TB
 
         subgraph PUBLISH["Loop 1: Publish loop"]
@@ -24,8 +24,7 @@ flowchart TB
                 direction TB
                 L1["Filter: partition owned by this publisher"]
                 L1 --> L2["Filter: grace period expired or NULL"]
-                L2 --> L3["Filter: retry_count < MaxRetryCount"]
-                L3 --> L4["Version ceiling filter\nPG: xmin < pg_snapshot_xmin\nSQL: RowVersion < MIN_ACTIVE_ROWVERSION()"]
+                L2 --> L4["Version ceiling filter\nPG: xmin < pg_snapshot_xmin\nSQL: RowVersion < MIN_ACTIVE_ROWVERSION()"]
                 L4 --> L5["ORDER BY sequence_number"]
                 L5 --> L6["Pure SELECT — no row locking"]
             end
@@ -33,7 +32,7 @@ flowchart TB
             P2 --> FETCH
             FETCH --> P3{"Batch empty?"}
             P3 -->|Yes| P3B["Increase poll interval\n(adaptive backoff)"] --> P1
-            P3 -->|No| P7["Group by (TopicName, PartitionKey)\n(poison messages already filtered\nby FetchBatch WHERE clause)"]
+            P3 -->|No| P7["Group by (TopicName, PartitionKey)\nattempt = 0 (in-memory, per group)"]
 
             P7 --> P8{"Circuit breaker\nopen for topic?"}
             P8 -->|Open| P9["Skip — messages stay\nin outbox"]
@@ -42,12 +41,17 @@ flowchart TB
 
             P11 --> P12{"Result?"}
             P12 -->|Success| P13["DeletePublishedAsync\n+ circuit RecordSuccess"]
-            P12 -->|Partial| P14["Delete succeeded msgs\nIncrementRetryCount for failed\ncircuit RecordFailure"]
-            P12 -->|Failure| P15["IncrementRetryCount ALL\ncircuit RecordFailure"]
+            P12 -->|Failure| PCL{"IsTransient?"}
+            PCL -->|Yes| PT["Circuit RecordFailure\n(attempt NOT incremented)\nbackoff + retry remaining"]
+            PCL -->|No| PN["attempt += 1"]
+            PN --> PNM{"attempt >=\nMaxPublishAttempts?"}
+            PNM -->|No| PNB["Backoff + retry\nremaining messages"]
+            PNM -->|Yes| PDLQ["DeadLetterAsync inline\n(atomic move to DLQ)\n+ OnMessageDeadLetteredAsync"]
 
             P13 --> P1
-            P14 --> P1
-            P15 --> P1
+            PT --> P1
+            PNB --> P1
+            PDLQ --> P1
             P9 --> P1
         end
 
@@ -69,11 +73,6 @@ flowchart TB
 
         subgraph ORPHAN["Loop 4: Orphan sweep\n(every 60s)"]
             O1["Claim partitions\nwith owner = NULL"]
-        end
-
-        subgraph DLS["Loop 5: Dead-letter sweep\n(every 60s)"]
-            D1["Find: retry >= Max"]
-            D1 --> D2["Atomic DELETE from outbox\nINSERT into dead_letter"]
         end
     end
 
@@ -119,7 +118,7 @@ flowchart TB
 
 ### Startup
 
-Each publisher generates a unique publisher ID (`{PublisherName}-{GUID}`), registers itself in the `outbox_publishers` table with exponential backoff, and spins up five parallel loops tied to a shared `CancellationToken`.
+Each publisher generates a unique publisher ID (`{PublisherName}-{GUID}`), registers itself in the `outbox_publishers` table with exponential backoff, and spins up four parallel loops tied to a shared `CancellationToken`.
 
 ### Partition hashing and ownership
 
@@ -131,12 +130,15 @@ Messages map to partitions via `hash(partition_key) % total_partitions`. Each pa
 ### Publish loop
 
 1. **Poll** the store at an adaptive interval (100ms when busy, backs off to 5s when idle)
-2. **Fetch** a batch of messages—only from owned partitions, under max retry count, with version ceiling filter
-3. **Group** messages by `(topic, partitionKey)` (poison messages with `retry_count >= MaxRetryCount` are already filtered out by the `FetchBatchAsync` WHERE clause — they are handled by the background dead-letter sweep)
-4. **Check circuit breaker**—if open, skip the group (messages stay in the outbox)
-6. **Apply interceptors** (modify headers, payload, event type)
-7. **Send** via transport with sub-batching
-8. **Finalize**—delete on success, increment retry count on failure
+2. **Fetch** a batch of messages—only from owned partitions, with version ceiling filter
+3. **Group** messages by `(topic, partitionKey)`. Each group starts with an in-memory `attempt = 0` counter and enters a retry loop on the worker thread's stack
+4. **Check circuit breaker**—if open, exit the retry loop without touching `attempt`. Messages stay in the outbox
+5. **Apply interceptors** (modify headers, payload, event type)
+6. **Send** via transport with sub-batching
+7. **Classify failures** via `IOutboxTransport.IsTransient(Exception)`:
+   - **Transient** → circuit records a failure, `attempt` is NOT incremented, loop retries after exponential backoff
+   - **Non-transient** → `attempt += 1`. If `attempt >= MaxPublishAttempts`, the group is dead-lettered inline via `DeadLetterAsync` in the same iteration
+8. **Finalize**—delete on full success, leave rows in the outbox on circuit open, move to dead letter on retries exhausted
 
 ### Concurrency controls
 
@@ -147,16 +149,15 @@ Messages map to partitions via `hash(partition_key) % total_partitions`. Each pa
 
 ### Background loops
 
-| Loop              | Interval | Purpose                                                                                          |
-| ----------------- | -------- | ------------------------------------------------------------------------------------------------ |
-| Heartbeat         | 10s      | Updates `last_heartbeat_utc`, clears grace periods. Cancels all loops after 3 consecutive errors |
-| Rebalance         | 30s      | Marks stale partitions, claims fair share, releases excess—all in one transaction                |
-| Orphan sweep      | 60s      | Claims partitions with no owner (recovery after crashes)                                         |
-| Dead-letter sweep | 60s      | Moves max-retry messages to the dead-letter table atomically                                     |
+| Loop         | Interval | Purpose                                                                                          |
+| ------------ | -------- | ------------------------------------------------------------------------------------------------ |
+| Heartbeat    | 10s      | Updates `last_heartbeat_utc`, clears grace periods. Cancels all loops after 3 consecutive errors |
+| Rebalance    | 30s      | Marks stale partitions, claims fair share, releases excess—all in one transaction                |
+| Orphan sweep | 60s      | Claims partitions with no owner (recovery after crashes)                                         |
 
 ### Circuit breaker
 
-Each topic has its own circuit breaker: **Closed → Open → HalfOpen → Closed**. When open, messages are skipped (left in the outbox) without burning retry counts—this prevents retry exhaustion during broker outages.
+Each topic has its own circuit breaker: **Closed → Open → HalfOpen → Closed**. When open, messages are skipped (left in the outbox) without burning attempts—this prevents retry exhaustion during broker outages. The `IsTransient` classification is what feeds the circuit breaker; non-transient failures never trip it.
 
 ### Transport layer
 
@@ -180,7 +181,6 @@ The primary event buffer. Messages are inserted here inside the same transaction
 | `created_at_utc`       | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Insertion timestamp (default `NOW()`)            |
 | `event_datetime_utc`   | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Business event time (debug/forensics; does not affect delivery order) |
 | `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)`   | MIME type (default `application/json`)           |
-| `retry_count`          | `INT`                              | Delivery attempts (default 0)                    |
 | `RowVersion`           | `ROWVERSION` (SQL Server only)     | Version ceiling for ordering safety              |
 
 **Indexes:**
@@ -193,27 +193,27 @@ A single index replaces the previous lease-based partial indexes. Since there ar
 
 ### outbox_dead_letter
 
-Archive for messages that exceeded `MaxRetryCount`. Messages arrive here via the background dead-letter sweep loop, which atomically moves rows from the outbox to this table.
+Archive for messages that exhausted `MaxPublishAttempts` non-transient attempts. Messages arrive here inline from the publish loop—there is no background sweep.
 
-| Column                 | Type (PG / SQL Server)             | Description                           |
-| ---------------------- | ---------------------------------- | ------------------------------------- |
-| `dead_letter_seq`      | `BIGINT IDENTITY`                  | PK, auto-incremented                  |
-| `sequence_number`      | `BIGINT`                           | Original outbox sequence number       |
-| `topic_name`           | `VARCHAR(256)` / `NVARCHAR(256)`   | Original target topic                 |
-| `partition_key`        | `VARCHAR(256)` / `NVARCHAR(256)`   | Original partition key                |
-| `event_type`           | `VARCHAR(256)` / `NVARCHAR(256)`   | Original event type                   |
-| `headers`              | `VARCHAR(2000)` / `NVARCHAR(2000)` | Original headers (nullable)           |
-| `payload`              | `BYTEA` / `VARBINARY(MAX)`         | Original payload                      |
-| `created_at_utc`       | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Original insertion time               |
-| `retry_count`          | `INT`                              | Final retry count at dead-letter time |
-| `event_datetime_utc`   | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Original business event time (forensics) |
-| `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)`   | Original MIME type                       |
-| `dead_lettered_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | When the message was dead-lettered    |
-| `last_error`           | `VARCHAR(2000)` / `NVARCHAR(2000)` | Final error message (nullable)        |
+| Column                 | Type (PG / SQL Server)             | Description                                |
+| ---------------------- | ---------------------------------- | ------------------------------------------ |
+| `dead_letter_seq`      | `BIGINT IDENTITY`                  | PK, auto-incremented                       |
+| `sequence_number`      | `BIGINT`                           | Original outbox sequence number            |
+| `topic_name`           | `VARCHAR(256)` / `NVARCHAR(256)`   | Original target topic                      |
+| `partition_key`        | `VARCHAR(256)` / `NVARCHAR(256)`   | Original partition key                     |
+| `event_type`           | `VARCHAR(256)` / `NVARCHAR(256)`   | Original event type                        |
+| `headers`              | `VARCHAR(2000)` / `NVARCHAR(2000)` | Original headers (nullable)                |
+| `payload`              | `BYTEA` / `VARBINARY(MAX)`         | Original payload                           |
+| `created_at_utc`       | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Original insertion time                    |
+| `attempt_count`        | `INT`                              | Final non-transient attempt count          |
+| `event_datetime_utc`   | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | Original business event time (forensics)   |
+| `payload_content_type` | `VARCHAR(100)` / `NVARCHAR(100)`   | Original MIME type                         |
+| `dead_lettered_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | When the message was dead-lettered         |
+| `last_error`           | `VARCHAR(2000)` / `NVARCHAR(2000)` | Final error message (nullable)             |
 
 **Index:** `ix_outbox_dead_letter_sequence_number` on `(sequence_number)` for lookups by original ID.
 
-The move from `outbox` to `outbox_dead_letter` is atomic—a single CTE/OUTPUT deletes from one and inserts into the other in the same transaction.
+The move from `outbox` to `outbox_dead_letter` is atomic—a single CTE/OUTPUT deletes from one and inserts into the other in the same transaction. `DeadLetterAsync(sequenceNumbers, attemptCount, lastError, ct)` is called from inside the publish loop when the in-memory attempt counter hits `MaxPublishAttempts`.
 
 ### outbox_publishers
 
@@ -260,7 +260,7 @@ Both providers include read-only views for debugging:
 
 ### SQL Server TVP
 
-SQL Server uses a table-valued parameter type `dbo.SequenceNumberList` (`TABLE (SequenceNumber BIGINT NOT NULL PRIMARY KEY)`) to pass sequence number arrays to `DeletePublishedAsync`, `IncrementRetryCountAsync`, and `DeadLetterAsync`. PostgreSQL uses native `BIGINT[]` arrays instead.
+SQL Server uses a table-valued parameter type `dbo.SequenceNumberList` (`TABLE (SequenceNumber BIGINT NOT NULL PRIMARY KEY)`) to pass sequence number arrays to `DeletePublishedAsync` and `DeadLetterAsync`. PostgreSQL uses native `BIGINT[]` arrays instead.
 
 ## Data flow between tables
 
@@ -270,9 +270,8 @@ flowchart LR
 
     OUTBOX -->|"FetchBatchAsync\n(pure SELECT)"| PUB["Publisher"]
     PUB -->|"SendAsync success\n→ DeletePublishedAsync"| BROKER["Broker\n(Kafka/EventHub)"]
-    PUB -->|"Transport failure\n→ IncrementRetryCountAsync"| OUTBOX
-    PUB -->|"retry >= max\n→ DeadLetterAsync\n(atomic CTE)"| DL[(outbox_dead_letter)]
-    OUTBOX -->|"Dead-letter sweep\n(atomic CTE)"| DL
+    PUB -->|"Transient failure\n→ circuit open,\nattempt NOT burned"| OUTBOX
+    PUB -->|"attempt >= MaxPublishAttempts\n→ DeadLetterAsync\n(atomic CTE)"| DL[(outbox_dead_letter)]
 
     PROD[(outbox_publishers)] -->|"HeartbeatAsync"| PROD
     PROD -->|"Stale detection\n→ RebalanceAsync"| PART[(outbox_partitions)]

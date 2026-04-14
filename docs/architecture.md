@@ -15,12 +15,11 @@ Your application writes a business event to an `outbox` table inside the same da
                  ↓
 ┌─────────────────────────────────────┐
 │  OutboxPublisherService             │
-│  (BackgroundService, 5 loops)       │
+│  (BackgroundService, 4 loops)       │
 │  ├── PublishLoop                    │
 │  ├── HeartbeatLoop                  │
 │  ├── RebalanceLoop                  │
-│  ├── OrphanSweepLoop               │
-│  └── DeadLetterSweepLoop           │
+│  └── OrphanSweepLoop                │
 └─────────────────────────────────────┘
                  ↓
          Message broker
@@ -35,17 +34,19 @@ The publisher doesn't receive push notifications. It **polls** the database on a
 
 1. **Fetch a batch** — `FetchBatchAsync` selects up to `BatchSize` (default 100) messages from partitions owned by this publisher. This is a pure `SELECT`—no row locking or lease stamping. A version ceiling filter (`xmin` on PostgreSQL, `RowVersion` on SQL Server) withholds rows from in-flight write transactions to prevent out-of-order publishing.
 
-2. **Group by destination** — Messages are grouped by `(topic_name, partition_key)`. (Poison messages with `retry_count >= MaxRetryCount` are never returned by `FetchBatchAsync` — they are handled exclusively by the background dead-letter sweep loop.)
+2. **Group by destination** — Messages are grouped by `(topic_name, partition_key)`. Each group runs through its own in-memory retry loop.
 
-3. **Check circuit breaker** — If the circuit is open for a topic, the group is skipped without incrementing the retry count. Messages stay in the outbox and will be picked up when the circuit closes.
+3. **Check circuit breaker** — If the circuit is open for a topic, the group is skipped without burning an attempt. Messages stay in the outbox and will be picked up when the circuit closes.
 
 4. **Send to broker** — For each group, messages are sent via `IOutboxTransport.SendAsync`, ordered by `SequenceNumber` (equals insert order).
 
 5. **Delete on success** — Successfully sent messages are deleted from the outbox.
 
-6. **Increment retry on failure** — Failed messages have their `retry_count` incremented via `IncrementRetryCountAsync`.
+6. **Classify failures** — On a send exception, the transport's `IsTransient(Exception)` decides what happens next:
+   - **Transient** (broker unreachable, timeout) — the circuit breaker records a failure. The attempt counter stays where it is. The retry loop sleeps with exponential backoff and tries again.
+   - **Non-transient** (serialization error, permission denied, message too large) — the in-memory attempt counter is incremented. Once it reaches `MaxPublishAttempts`, the group is dead-lettered inline via `DeadLetterAsync` in the same publish loop iteration.
 
-7. **No safety net needed** — Partition ownership is the sole isolation mechanism. There are no leases to release on cancellation or crash.
+7. **No safety net needed** — Partition ownership is the sole isolation mechanism. There are no leases to release on cancellation or crash. All retry state lives on the worker thread's stack, so a crash just restarts the attempt budget on the next fetch.
 
 ### Adaptive polling
 
@@ -158,7 +159,7 @@ services.AddOutbox("notifications", config, outbox =>
 });
 ```
 
-Each `AddOutbox` call registers a fully independent `OutboxPublisherService` instance with its own 5 background loops, its own circuit breakers, its own health check, and its own metrics. Groups don't share any runtime state.
+Each `AddOutbox` call registers a fully independent `OutboxPublisherService` instance with its own 4 background loops, its own circuit breakers, its own health check, and its own metrics. Groups don't share any runtime state.
 
 ### Database layout with groups
 
@@ -216,7 +217,7 @@ worker_index = (hash(partition_key) % total_partitions) % PublishThreadCount
 
 This guarantees that messages with the same partition key are always processed by the same worker, preserving ordering. Different partition keys can be processed concurrently across workers.
 
-The 4 housekeeping loops (heartbeat, rebalance, orphan sweep, dead-letter sweep) remain single-instance. Only the publish work is parallelized.
+The 3 housekeeping loops (heartbeat, rebalance, orphan sweep) remain single-instance. Only the publish work is parallelized.
 
 When using [publisher groups](#publisher-groups), each group has its own independent `PublishThreadCount`. Configure it per group in the `AddOutbox` registration.
 
@@ -231,7 +232,7 @@ Each topic has its own circuit breaker that prevents retry-count burn during bro
 | State        | Behavior                                                                                             |
 | ------------ | ---------------------------------------------------------------------------------------------------- |
 | **Closed**   | Normal operation. Failures are counted.                                                              |
-| **Open**     | Messages are skipped—they stay in the outbox without incrementing `retry_count`. No sends attempted. |
+| **Open**     | Messages are skipped—they stay in the outbox, the in-memory attempt counter isn't touched. No sends attempted. |
 | **HalfOpen** | Timer expired. One probe batch is allowed through.                                                   |
 
 ### Transitions
@@ -243,13 +244,15 @@ Each topic has its own circuit breaker that prevents retry-count burn during bro
 
 ### Why it matters
 
-Without the circuit breaker, a broker outage would burn through every message's retry budget. Messages would get dead-lettered even though they're perfectly valid. The circuit breaker holds messages in place until the broker recovers.
+Without the circuit breaker, a broker outage would burn through every message's retry budget. Valid messages would get dead-lettered for infrastructure problems that had nothing to do with the message. The circuit breaker holds messages in place until the broker recovers, and the `IsTransient` classification backs it up by making sure broker timeouts never burn a non-transient attempt either.
 
 ## Dead-lettering
 
-Messages that exhaust their retry budget (`retry_count >= MaxRetryCount`) are moved to a `dead_letter` table by the **background dead-letter sweep loop** (every 60s). The `FetchBatchAsync` query filters `retry_count < MaxRetryCount`, so poison messages are never returned to the publish loop — they remain in the outbox until the sweep picks them up and moves them atomically.
+Retry state lives entirely in memory. Each `(topic, partition_key)` group tracks an `attempt` counter on the worker thread's stack. Only **non-transient** failures (the transport's `IsTransient` returned `false`) increment it. Once it reaches `MaxPublishAttempts` (default 5), the group is dead-lettered inline in the same publish loop iteration — no background sweep, no separate pass.
 
-Dead-lettered messages can be replayed via `IDeadLetterManager.ReplayAsync`, which moves them back to the outbox with `retry_count` reset to 0.
+The inline path calls `IOutboxStore.DeadLetterAsync(sequenceNumbers, attemptCount, lastError, ct)`, which atomically deletes the rows from the outbox and inserts them into the dead-letter table with the final attempt count and last error message. If the publisher crashes mid-retry, the messages stay in the outbox and the next fetch starts over with a fresh attempt budget.
+
+Dead-lettered messages can be replayed via `IDeadLetterManager.ReplayAsync`, which moves them back to the outbox so the publish loop picks them up again.
 
 ## Health checks
 
@@ -270,7 +273,7 @@ When using publisher groups, each group registers its own health check (e.g., `"
 
 ## Loop coordination and restart
 
-All five loops run inside a shared cancellation scope. If any loop exits (crash or completion), the linked `CancellationTokenSource` cancels the others. After all loops stop:
+All four loops run inside a shared cancellation scope. If any loop exits (crash or completion), the linked `CancellationTokenSource` cancels the others. After all loops stop:
 
 1. If the service is shutting down, exit cleanly.
 2. Otherwise, increment `ConsecutiveLoopRestarts` and apply exponential backoff (2s, 4s, 8s, ..., capped at 2 minutes).
@@ -300,13 +303,13 @@ An `ActivitySource` named `"Outbox"` (or `"{groupName}.Outbox"` when using publi
 
 Implement `IOutboxEventHandler` to receive lifecycle notifications:
 
-| Callback                            | When                                           |
-| ----------------------------------- | ---------------------------------------------- |
-| `OnMessagePublishedAsync`           | After successful send, before delete           |
-| `OnPublishFailedAsync`              | After transport failure, after retry increment |
-| `OnMessageDeadLetteredAsync`        | After a message is dead-lettered               |
-| `OnCircuitBreakerStateChangedAsync` | After any circuit state change                 |
-| `OnRebalanceAsync`                  | After partition rebalance                      |
+| Callback                            | When                                                                                       |
+| ----------------------------------- | ------------------------------------------------------------------------------------------ |
+| `OnMessagePublishedAsync`           | After successful send, before delete                                                       |
+| `OnPublishFailedAsync`              | After a publish failure, carrying a `PublishFailureReason` (`RetriesExhausted`, `CircuitOpened`) |
+| `OnMessageDeadLetteredAsync`        | After a message is dead-lettered inline                                                    |
+| `OnCircuitBreakerStateChangedAsync` | After any circuit state change                                                             |
+| `OnRebalanceAsync`                  | After partition rebalance                                                                  |
 
 All callbacks are individually try/caught—exceptions never affect message fate. Health state is always updated _before_ the callback fires.
 
@@ -323,21 +326,23 @@ Both use lazy context allocation—zero overhead when no interceptor matches a m
 
 All publisher options are in the `"Outbox:Publisher"` configuration section and support hot-reload via `IOptionsMonitor`.
 
-| Option                              | Default | Description                            |
-| ----------------------------------- | ------- | -------------------------------------- |
-| `GroupName`                         | null    | Publisher group name (null = default)  |
-| `BatchSize`                         | 100     | Messages per poll                      |
-| `MaxRetryCount`                     | 5       | Retries before dead-lettering          |
-| `MinPollIntervalMs`                 | 100     | Fastest poll rate                      |
-| `MaxPollIntervalMs`                 | 5000    | Slowest poll rate                      |
-| `HeartbeatIntervalMs`               | 10000   | Heartbeat frequency                    |
-| `HeartbeatTimeoutSeconds`           | 30      | Staleness threshold                    |
-| `PartitionGracePeriodSeconds`       | 60      | Grace period before partition takeover |
-| `RebalanceIntervalMs`               | 30000   | Rebalance frequency                    |
-| `OrphanSweepIntervalMs`             | 60000   | Orphan sweep frequency                 |
-| `DeadLetterSweepIntervalMs`         | 60000   | Dead-letter sweep frequency            |
-| `CircuitBreakerFailureThreshold`    | 3       | Failures before circuit opens          |
-| `CircuitBreakerOpenDurationSeconds` | 30      | Open duration before half-open probe   |
+| Option                              | Default | Description                                                       |
+| ----------------------------------- | ------- | ----------------------------------------------------------------- |
+| `GroupName`                         | null    | Publisher group name (null = default)                             |
+| `BatchSize`                         | 100     | Messages per poll                                                 |
+| `MaxPublishAttempts`                | 5       | Max non-transient attempts before dead-lettering                  |
+| `RetryBackoffBaseMs`                | 100     | Base delay for exponential retry backoff                          |
+| `RetryBackoffMaxMs`                 | 2000    | Ceiling for exponential retry backoff                             |
+| `PublishThreadCount`                | 4       | Concurrent publish workers per poll                               |
+| `MinPollIntervalMs`                 | 100     | Fastest poll rate                                                 |
+| `MaxPollIntervalMs`                 | 5000    | Slowest poll rate                                                 |
+| `HeartbeatIntervalMs`               | 10000   | Heartbeat frequency                                               |
+| `HeartbeatTimeoutSeconds`           | 30      | Staleness threshold                                               |
+| `PartitionGracePeriodSeconds`       | 60      | Grace period before partition takeover                            |
+| `RebalanceIntervalMs`               | 30000   | Rebalance frequency                                               |
+| `OrphanSweepIntervalMs`             | 60000   | Orphan sweep frequency                                            |
+| `CircuitBreakerFailureThreshold`    | 3       | Transient failures before circuit opens                           |
+| `CircuitBreakerOpenDurationSeconds` | 30      | Open duration before half-open probe                              |
 
 ### Store options
 
@@ -367,4 +372,4 @@ This lets you set shared defaults at the top level and override per group—for 
 These are enforced at startup and will fail fast if violated:
 
 - `HeartbeatTimeoutSeconds × 1000 ≥ HeartbeatIntervalMs × 3` — tolerates at least 2 missed heartbeats
-- `MaxRetryCount > CircuitBreakerFailureThreshold` — circuit breaker can activate before dead-lettering
+- `MaxPollIntervalMs ≥ MinPollIntervalMs` — poll interval range is valid

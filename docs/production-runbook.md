@@ -39,12 +39,11 @@ Application Transaction
 ├── Write business data
 └── Write event to outbox table (same transaction)
          ↓
-OutboxPublisherService (5 concurrent loops):
-├── PublishLoop    — Fetch → Send → Delete (core path)
+OutboxPublisherService (4 concurrent loops):
+├── PublishLoop    — Fetch → Send → Delete (core path, inline retry + DLQ)
 ├── HeartbeatLoop  — Keep publisher alive (10s)
 ├── RebalanceLoop  — Redistribute partitions (30s)
-├── OrphanSweep    — Claim unowned partitions (60s)
-└── DeadLetterSweep — Quarantine poison messages (60s)
+└── OrphanSweep    — Claim unowned partitions (60s)
          ↓
 Broker (EventHub / Kafka)
          ↓
@@ -55,7 +54,9 @@ Consumer
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
 | BatchSize | 100 | Messages per fetch cycle |
-| MaxRetryCount | 5 | Retries before dead-lettering |
+| MaxPublishAttempts | 5 | Non-transient attempts before dead-lettering |
+| RetryBackoffBaseMs | 100 | Base delay for in-memory retry backoff |
+| RetryBackoffMaxMs | 2,000 | Ceiling for exponential retry backoff |
 | HeartbeatIntervalMs | 10,000 | Heartbeat frequency |
 | HeartbeatTimeoutSeconds | 30 | Stale publisher detection |
 | PartitionGracePeriodSeconds | 60 | Safety window on partition handover |
@@ -112,7 +113,7 @@ The health check at `/health` reports three states:
 
 1. Publisher attempts to send, fails (3 consecutive failures by default)
 2. Circuit breaker opens for the affected topic
-3. Messages are skipped—they stay in the outbox **without** incrementing `retry_count` (preserves retry budget)
+3. Messages are skipped—they stay in the outbox **without** burning in-memory attempts (preserves retry budget)
 4. Publisher continues heartbeating and managing partitions normally
 5. After 30s (`CircuitBreakerOpenDurationSeconds`), circuit transitions to HalfOpen
 6. One probe batch is sent — if it fails, circuit re-opens; if it succeeds, circuit closes
@@ -134,7 +135,7 @@ The health check at `/health` reports three states:
 
 - Outbox table grows with incoming messages — monitor disk space
 - Burst on recovery may overwhelm downstream consumers — consider consumer auto-scaling
-- Messages from the initial 3 failures (before circuit opened) WILL have their `retry_count` incremented
+- Initial failures that didn't trip the circuit are classified by `IOutboxTransport.IsTransient`. If they look transient, the circuit eats them and no attempts are burned. If any were non-transient (e.g., oversized payload), those groups did burn attempts before the circuit opened
 
 ---
 
@@ -149,7 +150,7 @@ The health check at `/health` reports three states:
 
 **What happens automatically:**
 
-1. All 5 loops catch exceptions and continue retrying
+1. All 4 loops catch exceptions and continue retrying
 2. HeartbeatLoop retries every 10s, PublishLoop backs off to `MaxPollIntervalMs` (5s)
 3. No messages are lost — they remain safely in the outbox table
 4. When DB recovers, all loops resume normal operation
@@ -267,10 +268,12 @@ The health check at `/health` reports three states:
 **What happens automatically:**
 
 1. Transport `SendAsync` throws for the message (e.g., too large for EventHub batch)
-2. `IncrementRetryCountAsync` increments `retry_count`
-3. After `MaxRetryCount` (5) failures, message is moved to `outbox_dead_letter` table
-4. `last_error` column populated with exception message
-5. Remaining healthy messages in the batch continue processing
+2. `IOutboxTransport.IsTransient` returns `false` (payload problems are non-transient)
+3. The in-memory `attempt` counter for the group increments
+4. After `MaxPublishAttempts` (5) non-transient attempts, `DeadLetterAsync` moves the group to `outbox_dead_letter` inline, in the same publish iteration
+5. `attempt_count` and `last_error` columns on the dead-letter row record the final state
+6. The circuit breaker is untouched — non-transient failures don't count toward it
+7. Other groups in the batch continue processing
 
 **Auto-recovery:** Message is automatically quarantined. No manual intervention needed unless the message needs to be delivered.
 
@@ -341,22 +344,24 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 **Symptoms:**
 
 - `outbox.publish.failures` incrementing sporadically
-- `retry_count` on some messages increasing
+- `outbox.messages.dead_lettered` increments for some groups
 - Some messages dead-lettered despite being individually valid
-- Circuit breaker may or may not open (depends on failure pattern)
+- Circuit breaker may or may not open (depends on the mix of transient vs. non-transient failures the transport classifies)
 
 **What happens automatically:**
 
-1. Each failed send increments `retry_count` via `IncrementRetryCountAsync`
-2. Each successful send deletes the message from outbox
-3. Messages that accumulate `retry_count >= MaxRetryCount` are dead-lettered
-4. Circuit breaker tracks consecutive failures per topic
+1. Each failure goes through `IOutboxTransport.IsTransient`:
+   - **Transient** (timeout, connection reset) → circuit breaker records a failure, no attempt burned, retry loop backs off
+   - **Non-transient** (payload rejected, auth error) → in-memory `attempt` counter increments
+2. Successful sends delete the group and reset the circuit
+3. If a group hits `MaxPublishAttempts` consecutive non-transient failures within a single publish iteration, it's dead-lettered inline via `DeadLetterAsync`
 
-**Risk:** Under a pattern of 2 fails → 1 success → 2 fails, `retry_count` grows steadily. A valid message can be dead-lettered if it happens to be fetched during failure windows enough times. The `retry_count` is **per-message**, not per-send-attempt, and is not reset on successful sends of other messages.
+**Risk:** The in-memory counter resets every time a group is re-fetched, so a group can survive many non-transient failures over time as long as it never accumulates `MaxPublishAttempts` within a single retry loop. If your transport misclassifies a transient error as non-transient, that's when valid messages risk being dead-lettered.
 
 **Operator actions:**
 
-- If seeing valid messages dead-lettered due to intermittent failures, increase `MaxRetryCount`
+- If seeing valid messages dead-lettered due to intermittent failures, check the transport's `IsTransient` classification — the underlying error may need to be added to the transient set
+- Bump `MaxPublishAttempts` or `RetryBackoffMaxMs` for more in-batch headroom
 - Investigate root cause of intermittent failures (network, broker load, message size variance)
 - Replay dead-lettered messages after root cause is resolved
 
@@ -409,7 +414,7 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 1. Publisher owns no partitions (rebalance not completed)
 2. All messages hash to partitions owned by a dead publisher
 3. Grace period not expired on newly assigned partitions
-4. All messages have `retry_count >= MaxRetryCount` but haven't been swept yet
+4. All messages are sitting behind an open circuit that never closes (persistent transient failure on the topic)
 
 **Operator actions:**
 
@@ -485,7 +490,7 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 3. Publisher not running
 4. Partition ownership stuck → FS-10
 5. Incoming message rate exceeds processing capacity
-6. `MaxRetryCount` too high + intermittent failures = slow drain
+6. `MaxPublishAttempts` too high + aggressive `RetryBackoffMaxMs` = slow drain under intermittent failures
 
 **Operator actions:**
 
@@ -512,9 +517,9 @@ Same as FS-2. The publisher cannot function without the DB even if the broker is
 
 **Possible causes:**
 
-1. Poison messages (payload too large, malformed headers)
-2. Intermittent failures exhausting `MaxRetryCount` for valid messages
-3. `MaxRetryCount` too low for the failure pattern
+1. Poison messages (payload too large, malformed headers) — classified as non-transient and dead-lettered after `MaxPublishAttempts`
+2. A transport misclassifying transient errors as non-transient, burning attempts on valid messages
+3. `MaxPublishAttempts` too low for the failure pattern
 4. Broker rejecting messages (authorization, topic config)
 
 **Operator actions:**
@@ -673,7 +678,7 @@ ALTER TABLE dbo.Outbox ADD PartitionId AS
 CREATE NONCLUSTERED INDEX IX_Outbox_Pending
 ON dbo.Outbox (PartitionId, SequenceNumber)
 INCLUDE (TopicName, PartitionKey, EventType, Headers, Payload,
-         PayloadContentType, RetryCount, CreatedAtUtc, EventDateTimeUtc, RowVersion);
+         PayloadContentType, CreatedAtUtc, EventDateTimeUtc, RowVersion);
 
 -- 5. Reseed partitions
 DELETE FROM dbo.OutboxPartitions WHERE OutboxTableName = 'Outbox';
