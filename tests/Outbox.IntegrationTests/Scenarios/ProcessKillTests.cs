@@ -126,9 +126,11 @@ public class ProcessKillTests
         var (hostA, transportA) = OutboxTestHelper.BuildPublisherHost(
             _infra.ConnectionString, _infra.BootstrapServers);
 
-        // Non-transient failures: attempts are consumed and would eventually DLQ,
-        // but we kill A before that happens.
-        transportA.SetSimulatedFailuresTransient(false);
+        // Transient failures: trip the circuit breaker without burning the attempt
+        // counter, so messages stay in the outbox while A is alive. With the default
+        // MaxPublishAttempts=5 + sub-second backoff, non-transient failures would DLQ
+        // all 5 messages well before we kill A — defeating the purpose of the test.
+        transportA.SetSimulatedFailuresTransient(true);
         transportA.SetFailing(true);
 
         await hostA.StartAsync();
