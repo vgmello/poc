@@ -26,6 +26,13 @@ A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and st
 - Run performance tests: `dotnet test tests/Outbox.PerformanceTests/` (takes ~60 minutes, requires Docker)
 - Run all: `dotnet test src/Outbox.slnx`
 
+## Git workflow
+
+- Feature branches MUST be merged into `main` via **squash merge**. Never fast-forward, never create a merge commit.
+- The squash commit message must be substantial: motivation, behavioral model, API/schema changes, test status, and any out-of-scope manual follow-ups.
+- After the squash merge, force-delete the feature branch (`git branch -D <branch>`); the per-task commits are intentionally discarded from `main`'s history.
+- Do NOT push to `origin` without explicit instruction. The user owns when changes leave the local clone.
+
 ## Review Checklist
 
 Before approving any change, verify against `docs/outbox-requirements-invariants.md`:
