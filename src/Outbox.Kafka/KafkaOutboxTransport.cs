@@ -59,8 +59,9 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
                 // Merge inner succeeded sequences with prior sub-batch successes
                 succeededSequences.AddRange(pex.SucceededSequenceNumbers);
 
+                var succeededSet = succeededSequences.ToHashSet();
                 var failedSequences = messages
-                    .Where(m => !succeededSequences.Contains(m.SequenceNumber))
+                    .Where(m => !succeededSet.Contains(m.SequenceNumber))
                     .Select(m => m.SequenceNumber)
                     .ToList();
 
@@ -72,8 +73,9 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
             catch (Exception ex) when (succeededSequences.Count > 0)
             {
                 // Non-partial failure after prior sub-batches succeeded
+                var succeededSet = succeededSequences.ToHashSet();
                 var failedSequences = messages
-                    .Where(m => !succeededSequences.Contains(m.SequenceNumber))
+                    .Where(m => !succeededSet.Contains(m.SequenceNumber))
                     .Select(m => m.SequenceNumber)
                     .ToList();
 
@@ -208,8 +210,9 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
 
         if (deliveryErrors.Count > 0)
         {
+            var succeededSet = succeededInBatch.ToHashSet();
             var failedSequences = messages
-                .Where(m => !succeededInBatch.Contains(m.SequenceNumber))
+                .Where(m => !succeededSet.Contains(m.SequenceNumber))
                 .Select(m => m.SequenceNumber)
                 .ToList();
 

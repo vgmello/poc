@@ -115,9 +115,10 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
         }
         catch (Exception ex) when (sentSequenceNumbers.Count > 0 && ex is not PartialSendException)
         {
+            var sentSet = sentSequenceNumbers.ToHashSet();
             var failedSequences = messages
                 .Select(m => m.SequenceNumber)
-                .Where(sn => !sentSequenceNumbers.Contains(sn))
+                .Where(sn => !sentSet.Contains(sn))
                 .ToList();
 
             throw new PartialSendException(

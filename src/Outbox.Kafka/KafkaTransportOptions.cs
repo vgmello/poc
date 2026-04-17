@@ -6,7 +6,17 @@ public sealed class KafkaTransportOptions
 {
     public string BootstrapServers { get; set; } = string.Empty;
     public string Acks { get; set; } = "All";
+
+    /// <summary>
+    ///     Idempotence is a hard requirement for the outbox library — it is what prevents the
+    ///     Kafka producer from committing a non-prefix success pattern on partial sends, which
+    ///     would corrupt per-partition-key ordering when the library retries the failed subset.
+    ///     This property is retained for binding compatibility but is IGNORED; the producer is
+    ///     always built with <c>EnableIdempotence = true</c>.
+    /// </summary>
+    [Obsolete("Idempotence is required for ordering and is always enabled; this property is ignored.")]
     public bool EnableIdempotence { get; set; } = true;
+
     public int MessageSendMaxRetries { get; set; } = 3;
     public int RetryBackoffMs { get; set; } = 500;
     public int LingerMs { get; set; } = 5;

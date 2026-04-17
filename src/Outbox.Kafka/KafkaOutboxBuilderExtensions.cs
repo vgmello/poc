@@ -20,6 +20,7 @@ public static class KafkaOutboxBuilderExtensions
         Action<KafkaTransportOptions>? configure = null)
     {
         var groupName = builder.GroupName;
+        RegisterGracePeriodValidator(builder);
 
         if (groupName is not null)
         {
@@ -37,7 +38,7 @@ public static class KafkaOutboxBuilderExtensions
                 {
                     BootstrapServers = opts.BootstrapServers,
                     Acks = Enum.Parse<Acks>(opts.Acks, ignoreCase: true),
-                    EnableIdempotence = opts.EnableIdempotence,
+                    EnableIdempotence = true, // hard requirement — see KafkaTransportOptions.EnableIdempotence
                     MessageSendMaxRetries = opts.MessageSendMaxRetries,
                     RetryBackoffMs = opts.RetryBackoffMs,
                     LingerMs = opts.LingerMs,
@@ -77,7 +78,7 @@ public static class KafkaOutboxBuilderExtensions
                 {
                     BootstrapServers = opts.BootstrapServers,
                     Acks = Enum.Parse<Acks>(opts.Acks, ignoreCase: true),
-                    EnableIdempotence = opts.EnableIdempotence,
+                    EnableIdempotence = true, // hard requirement — see KafkaTransportOptions.EnableIdempotence
                     MessageSendMaxRetries = opts.MessageSendMaxRetries,
                     RetryBackoffMs = opts.RetryBackoffMs,
                     LingerMs = opts.LingerMs,
@@ -99,6 +100,7 @@ public static class KafkaOutboxBuilderExtensions
         Action<KafkaTransportOptions>? configure = null)
     {
         var groupName = builder.GroupName;
+        RegisterGracePeriodValidator(builder);
 
         if (groupName is not null)
         {
@@ -140,6 +142,12 @@ public static class KafkaOutboxBuilderExtensions
         }
 
         return new KafkaOutboxBuilder(builder);
+    }
+
+    private static void RegisterGracePeriodValidator(IOutboxBuilder builder)
+    {
+        builder.Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IValidateOptions<KafkaTransportOptions>, KafkaTransportOptionsValidator>());
     }
 }
 

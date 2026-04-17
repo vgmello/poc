@@ -20,6 +20,9 @@ public static class EventHubOutboxBuilderExtensions
     {
         var groupName = builder.GroupName;
 
+        builder.Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IValidateOptions<EventHubTransportOptions>, EventHubTransportOptionsValidator>());
+
         if (groupName is not null)
         {
             builder.Services.AddOptions<EventHubTransportOptions>(groupName)

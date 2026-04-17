@@ -25,8 +25,7 @@ public class KafkaOutboxTransportSendTests
             SendTimeoutSeconds = 10,
             MaxBatchSizeBytes = 1_048_576,
             BootstrapServers = "localhost:9092",
-            Acks = "All",
-            EnableIdempotence = true
+            Acks = "All"
         });
 
         _transport = new KafkaOutboxTransport(
@@ -215,8 +214,7 @@ public class KafkaOutboxTransportSendTests
             SendTimeoutSeconds = 10,
             MaxBatchSizeBytes = 200, // forces 1 message per sub-batch
             BootstrapServers = "localhost:9092",
-            Acks = "All",
-            EnableIdempotence = true
+            Acks = "All"
         });
 
         var transport = new KafkaOutboxTransport(

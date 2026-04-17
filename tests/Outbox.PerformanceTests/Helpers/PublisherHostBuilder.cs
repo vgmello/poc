@@ -78,7 +78,6 @@ public static class PublisherHostBuilder
                 {
                     options.BootstrapServers = bootstrapServers;
                     options.Acks = "All";
-                    options.EnableIdempotence = true;
                     options.LingerMs = 5;
                 });
                 break;

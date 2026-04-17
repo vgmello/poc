@@ -109,6 +109,7 @@ Any transport implementation MUST satisfy:
 - Delivery report errors MUST be collected and thrown as `AggregateException`.
 - `MaxBatchSizeBytes` MUST be respected — split into sub-batches before producing.
 - The synchronous `Flush()` call blocks a thread. Callers should be aware.
+- **`EnableIdempotence` MUST be `true` on the producer (hard-wired in `KafkaOutboxBuilderExtensions`).** The library's partial-send retry path assumes delivery-report successes are always a contiguous prefix. Without idempotence, librdkafka can commit `seqN` after `seqN+1` under retries, producing a gapped success set; when the library then re-sends the failed subset, those messages land on the broker *after* later successes and per-partition-key ordering is corrupted. `KafkaTransportOptions.EnableIdempotence` is retained as `[Obsolete]` and is IGNORED — the producer is always built with idempotence on.
 
 ### EventHub-specific requirements
 

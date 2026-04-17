@@ -25,8 +25,7 @@ public class KafkaTransportInterceptorTests
             SendTimeoutSeconds = 10,
             MaxBatchSizeBytes = 1_048_576,
             BootstrapServers = "localhost:9092",
-            Acks = "All",
-            EnableIdempotence = true
+            Acks = "All"
         };
 
         // Simulate successful produce: invoke callback with success

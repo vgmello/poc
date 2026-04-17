@@ -236,7 +236,9 @@ internal sealed class OutboxPublisherService : BackgroundService
                     continue;
                 }
 
-                pollIntervalMs = opts.MinPollIntervalMs;
+                // Do NOT reset pollIntervalMs here — it must accumulate across cycles when
+                // the batch is non-empty but nothing gets published (all circuits open, all
+                // workers faulted). The reset belongs on the successful-publish path below.
 
                 // Group messages by (TopicName, PartitionKey)
                 var groups = batch
@@ -301,12 +303,18 @@ internal sealed class OutboxPublisherService : BackgroundService
 
                 // If no messages were actually published (e.g., all circuits
                 // open or all errored), apply adaptive backoff to avoid a hot loop.
+                // Reset the interval only on a real successful publish so the backoff
+                // genuinely accumulates across consecutive failing cycles.
                 if (!publishedAny && batch.Count > 0)
                 {
                     pollIntervalMs = Math.Min(pollIntervalMs * 2, opts.MaxPollIntervalMs);
 
                     try { await Task.Delay(pollIntervalMs, ct); }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+                }
+                else if (publishedAny)
+                {
+                    pollIntervalMs = opts.MinPollIntervalMs;
                 }
 
                 // If cancellation was requested during group processing, exit now.
@@ -334,25 +342,41 @@ internal sealed class OutboxPublisherService : BackgroundService
     }
 
     private async Task<bool> ProcessGroupsAsync(
-        IReadOnlyList<IGrouping<(string TopicName, string PartitionKey), OutboxMessage>> groups,
+        List<IGrouping<(string TopicName, string PartitionKey), OutboxMessage>> groups,
         TopicCircuitBreaker circuitBreaker,
         CancellationToken ct)
     {
-        var publishedAny = false;
+        // Run each group's retry loop concurrently within this worker. Groups already
+        // share no state — each has a distinct (topic, partitionKey) — so there is no
+        // ordering reason to serialize them, and running them in parallel lets Kafka
+        // pipeline multiple produce requests instead of flushing between each group.
+        // TopicCircuitBreaker is internally thread-safe via per-entry locks.
+        if (groups.Count == 0)
+            return false;
 
-        foreach (var group in groups)
+        if (groups.Count == 1)
         {
-            var topicName = group.Key.TopicName;
-            var partitionKey = group.Key.PartitionKey;
-
-            var groupResult = await ProcessGroupWithRetriesAsync(
-                topicName, partitionKey, group.ToList(), circuitBreaker, ct);
-
-            if (groupResult)
-                publishedAny = true;
+            var group = groups[0];
+            return await ProcessGroupWithRetriesAsync(
+                group.Key.TopicName, group.Key.PartitionKey, group.ToList(), circuitBreaker, ct);
         }
 
-        return publishedAny;
+        var tasks = new Task<bool>[groups.Count];
+        for (var i = 0; i < groups.Count; i++)
+        {
+            var group = groups[i];
+            tasks[i] = ProcessGroupWithRetriesAsync(
+                group.Key.TopicName, group.Key.PartitionKey, group.ToList(), circuitBreaker, ct);
+        }
+
+        var results = await Task.WhenAll(tasks);
+        for (var i = 0; i < results.Length; i++)
+        {
+            if (results[i])
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -755,12 +779,19 @@ internal sealed class OutboxPublisherService : BackgroundService
     {
         var consecutiveFailures = 0;
         const int maxConsecutiveHeartbeatFailures = 3;
+        var firstIteration = true;
 
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(GetOptions().HeartbeatIntervalMs, ct);
+                // Fire the first heartbeat immediately after loop start, then delay between
+                // subsequent beats. This prevents a startup window (HeartbeatIntervalMs wide)
+                // during which other publishers could see this publisher as stale.
+                if (!firstIteration)
+                    await Task.Delay(GetOptions().HeartbeatIntervalMs, ct);
+                firstIteration = false;
+
                 await _store.HeartbeatAsync(publisherId, ct);
                 _healthState.RecordHeartbeat();
                 consecutiveFailures = 0;

@@ -71,7 +71,6 @@ Bind from `"Outbox:Kafka"` in `IConfiguration`.
 |---|---|---|
 | `BootstrapServers` | `""` | Kafka broker addresses |
 | `Acks` | `"All"` | Acknowledgment level |
-| `EnableIdempotence` | `true` | Kafka idempotent producer |
 | `MessageSendMaxRetries` | `3` | Kafka-internal retries |
 | `RetryBackoffMs` | `500` | Kafka-internal retry backoff |
 | `LingerMs` | `5` | Batching linger |
@@ -80,6 +79,8 @@ Bind from `"Outbox:Kafka"` in `IConfiguration`.
 | `MaxBatchSizeBytes` | `1048576` | Sub-batch splitting threshold |
 
 `SendTimeoutSeconds` and `MaxBatchSizeBytes` are captured once at construction—not hot-reloaded.
+
+The Kafka producer is always built with `EnableIdempotence = true`. This is a hard requirement: the library's partial-send retry logic relies on idempotence to guarantee delivery-report successes form a contiguous prefix. The matching property on `KafkaTransportOptions` is `[Obsolete]` and ignored.
 
 ## Transport interceptors
 
