@@ -109,7 +109,7 @@ Any transport implementation MUST satisfy:
 - Delivery report errors MUST be collected and thrown as `AggregateException`.
 - `MaxBatchSizeBytes` MUST be respected — split into sub-batches before producing.
 - The synchronous `Flush()` call blocks a thread. Callers should be aware.
-- **`EnableIdempotence` MUST be `true` on the producer (hard-wired in `KafkaOutboxBuilderExtensions`).** The library's partial-send retry path assumes delivery-report successes are always a contiguous prefix. Without idempotence, librdkafka can commit `seqN` after `seqN+1` under retries, producing a gapped success set; when the library then re-sends the failed subset, those messages land on the broker *after* later successes and per-partition-key ordering is corrupted. `KafkaTransportOptions.EnableIdempotence` is retained as `[Obsolete]` and is IGNORED — the producer is always built with idempotence on.
+- **`EnableIdempotence` MUST be `true` on the producer.** The library's partial-send retry path assumes delivery-report successes are always a contiguous prefix. Without idempotence, librdkafka can commit `seqN` after `seqN+1` under retries, producing a gapped success set; when the library then re-sends the failed subset, those messages land on the broker *after* later successes and per-partition-key ordering is corrupted. Idempotence is hard-wired in `KafkaOutboxBuilderExtensions` — there is no configuration knob to disable it.
 
 ### EventHub-specific requirements
 
@@ -131,7 +131,7 @@ Any store implementation MUST satisfy:
 5. **Rebalance:** MUST calculate fair share, mark stale publishers' partitions with grace period, claim available partitions, release excess. MUST run in a transaction.
 6. **Transient retry:** All store operations MUST go through `ExecuteWithRetryAsync` with exponential backoff + jitter. MUST detect transient errors (deadlocks, timeouts, connection failures).
 7. **Partition count caching:** The cached partition count MUST be refreshed at most once every 60 seconds. Reads and writes to the cache MUST use `Volatile.Read/Write` for cross-thread visibility without heavy locks.
-8. **Content type propagation:** All operations that move messages between tables (dead-letter, replay) MUST include `payload_content_type` in both the source SELECT and destination INSERT column lists. Content types default to `'application/json'` in the schema for backward compatibility with inserts that omit them.
+8. **Content type propagation:** All operations that move messages between tables (dead-letter, replay) MUST include `payload_content_type` in both the source SELECT and destination INSERT column lists. The schema declares `payload_content_type` with `DEFAULT 'application/json'` as an ergonomic convenience for the common case — user-facing inserts that only emit JSON payloads can omit the column. This sits alongside the schema's other ergonomic defaults (`created_at_utc`, `registered_at_utc`, `last_heartbeat_utc`, `dead_lettered_at_utc`) and is not a legacy shim.
 
 ---
 

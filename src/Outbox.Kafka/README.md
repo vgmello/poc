@@ -80,7 +80,7 @@ Bind from `"Outbox:Kafka"` in `IConfiguration`.
 
 `SendTimeoutSeconds` and `MaxBatchSizeBytes` are captured once at construction—not hot-reloaded.
 
-The Kafka producer is always built with `EnableIdempotence = true`. This is a hard requirement: the library's partial-send retry logic relies on idempotence to guarantee delivery-report successes form a contiguous prefix. The matching property on `KafkaTransportOptions` is `[Obsolete]` and ignored.
+The Kafka producer is always built with `EnableIdempotence = true`. This is a hard requirement: the library's partial-send retry logic relies on idempotence to guarantee delivery-report successes form a contiguous prefix. There is no configuration knob to disable it.
 
 ## Transport interceptors
 
