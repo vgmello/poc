@@ -492,3 +492,18 @@ The following scenarios are covered by unit tests in `OutboxPublisherServiceTest
 - **Docker stop/start:** For simulating full service outages
 - **iptables/nftables:** For fine-grained network partition simulation
 - **Testcontainers:** For spinning up PostgreSQL/Kafka/Redpanda per test suite
+
+---
+
+## EventHub Integration Test Coverage
+
+All 14 failure scenarios above have EventHub equivalents in the integration test suite. The EventHub tests exercise the same behavioral invariants using the Microsoft Event Hubs emulator instead of Redpanda/Kafka.
+
+**Test locations:**
+
+- PostgreSQL + EventHub scenarios: `tests/Outbox.IntegrationTests/Scenarios/EventHub/`
+- SQL Server + EventHub scenarios: `tests/Outbox.IntegrationTests/Scenarios/EventHub/SqlServer/`
+
+**Additional EventHub-specific scenario:** `PartialSendTests` — validates the batch-split-retry-partial-send code path that is unique to EventHub's batching API (no Kafka equivalent).
+
+**Total integration test suite:** 63 tests (31 Kafka + 32 EventHub), completing in ~10 minutes.

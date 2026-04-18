@@ -125,6 +125,18 @@ Changing the partition count (the modulus in `hash(partition_key) % total_partit
 
 This asymmetry is intentional: SQL Server's precomputed column enables Index Seek (7ms poll latency) instead of the full table scan (130ms) that runtime hash computation would require. PostgreSQL's query optimizer handles the runtime hash efficiently (3-5ms), so the precomputed column is not needed.
 
+## EventHub integration tests
+
+EventHub integration tests use Microsoft's Event Hubs emulator (`mcr.microsoft.com/azure-messaging/eventhubs-emulator:2.2.0`, multi-arch) plus Azurite as a sidecar, run via Testcontainers alongside Postgres, Redpanda, and SQL Server in the shared `InfrastructureFixture`.
+
+The emulator caps at 10 event hubs per namespace. `EmulatorConfigGenerator` builds `Config.json` at fixture startup with 8 generic 4-partition hubs plus 2 named hubs for ordering/rebalance tests. Tests check out hub names via `EventHubTestHelper.CheckoutHub()` and use unique partition keys (`$"pk-{Guid.NewGuid():N}"`) for isolation since hubs are shared across concurrent tests.
+
+Fault injection uses `EventHubFaultyTransportWrapper`, which wraps the real `EventHubOutboxTransport` and delegates successful sends to it. Unlike the Kafka wrapper (which bypasses `KafkaOutboxTransport`), the EventHub wrapper exercises the batch-split-retry-partial-send code path end-to-end.
+
+The connection string uses `UseDevelopmentEmulator=true`, an Azure SDK sentinel that disables TLS and Entra auth. No real Azure namespace is required.
+
+---
+
 ### SQL Server ghost records from continuous DELETE workload
 
 **Affected:** SQL Server store only (PostgreSQL's VACUUM handles this natively)

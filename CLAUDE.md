@@ -23,6 +23,8 @@ A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and st
 - Integration tests: `tests/Outbox.IntegrationTests/` (requires Docker for Testcontainers)
 - Run unit tests: `dotnet test tests/Outbox.Core.Tests/ && dotnet test tests/Outbox.Kafka.Tests/ && dotnet test tests/Outbox.EventHub.Tests/ && dotnet test tests/Outbox.Store.Tests/`
 - Run integration tests: `dotnet test tests/Outbox.IntegrationTests/` (takes ~3 minutes)
+- Run only EventHub integration tests: `dotnet test tests/Outbox.IntegrationTests/ --filter "FullyQualifiedName~EventHub"`
+- Run only Kafka integration tests: `dotnet test tests/Outbox.IntegrationTests/ --filter "FullyQualifiedName!~EventHub"`
 - Run performance tests: `dotnet test tests/Outbox.PerformanceTests/` (takes ~60 minutes, requires Docker)
 - Run all: `dotnet test src/Outbox.slnx`
 

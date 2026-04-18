@@ -3,6 +3,7 @@
 using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Configurations;
 using DotNet.Testcontainers.Containers;
+using DotNet.Testcontainers.Networks;
 using Microsoft.Data.SqlClient;
 using Npgsql;
 using Testcontainers.PostgreSql;
@@ -32,6 +33,13 @@ public sealed class InfrastructureFixture : IAsyncLifetime
             .AddCustomWaitStrategy(new SqlServerReadyWaitStrategy()))
         .Build();
 
+    private readonly INetwork _eventHubNetwork = new NetworkBuilder()
+        .WithName($"eventhub-network-{Guid.NewGuid():N}")
+        .Build();
+
+    private IContainer? _azurite;
+    private IContainer? _eventHubsEmulator;
+
     public string ConnectionString => _postgres.GetConnectionString();
     public string BootstrapServers => _redpanda.GetBootstrapAddress();
 
@@ -46,12 +54,55 @@ public sealed class InfrastructureFixture : IAsyncLifetime
         }
     }
 
+    public string EventHubConnectionString
+    {
+        get
+        {
+            if (_eventHubsEmulator is null)
+                throw new InvalidOperationException("EventHubs emulator not initialized");
+
+            var host = _eventHubsEmulator.Hostname;
+            var port = _eventHubsEmulator.GetMappedPublicPort(5672);
+
+            return $"Endpoint=sb://{host}:{port};SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
+        }
+    }
+
     public async Task InitializeAsync()
     {
+        var configJson = EmulatorConfigGenerator.Build(
+            Outbox.IntegrationTests.Helpers.EventHubTestHelper.PoolSize);
+
+        await _eventHubNetwork.CreateAsync();
+
+        _azurite = new ContainerBuilder("mcr.microsoft.com/azure-storage/azurite:latest")
+            .WithNetwork(_eventHubNetwork)
+            .WithNetworkAliases("azurite")
+            .WithWaitStrategy(Wait.ForUnixContainer()
+                .UntilMessageIsLogged("Azurite Blob service is successfully listening"))
+            .Build();
+
         await Task.WhenAll(
             _postgres.StartAsync(),
             _redpanda.StartAsync(),
-            _sqlServer.StartAsync());
+            _sqlServer.StartAsync(),
+            _azurite.StartAsync());
+
+        _eventHubsEmulator = new ContainerBuilder("mcr.microsoft.com/azure-messaging/eventhubs-emulator:2.2.0")
+            .WithNetwork(_eventHubNetwork)
+            .WithNetworkAliases("eventhubs-emulator")
+            .WithPortBinding(5672, true)
+            .WithEnvironment("BLOB_SERVER", "azurite")
+            .WithEnvironment("METADATA_SERVER", "azurite")
+            .WithEnvironment("ACCEPT_EULA", "Y")
+            .WithResourceMapping(
+                System.Text.Encoding.UTF8.GetBytes(configJson),
+                "/Eventhubs_Emulator/ConfigFiles/Config.json")
+            .WithWaitStrategy(Wait.ForUnixContainer()
+                .UntilMessageIsLogged("Emulator Service is Successfully Up"))
+            .Build();
+
+        await _eventHubsEmulator.StartAsync();
 
         await Task.WhenAll(
             RunPostgresSchemaAsync(),
@@ -60,10 +111,21 @@ public sealed class InfrastructureFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        await Task.WhenAll(
+        var tasks = new List<Task>
+        {
             _postgres.DisposeAsync().AsTask(),
             _redpanda.DisposeAsync().AsTask(),
-            _sqlServer.DisposeAsync().AsTask());
+            _sqlServer.DisposeAsync().AsTask(),
+        };
+
+        if (_azurite is not null)
+            tasks.Add(_azurite.DisposeAsync().AsTask());
+
+        if (_eventHubsEmulator is not null)
+            tasks.Add(_eventHubsEmulator.DisposeAsync().AsTask());
+
+        await Task.WhenAll(tasks);
+        await _eventHubNetwork.DeleteAsync();
     }
 
     private async Task RunPostgresSchemaAsync()
