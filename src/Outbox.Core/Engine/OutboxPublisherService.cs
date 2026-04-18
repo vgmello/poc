@@ -533,6 +533,19 @@ internal sealed class OutboxPublisherService : BackgroundService
         if (ct.IsCancellationRequested || remaining.Count == 0)
             return publishedAny;
 
+        // A concurrent group on the same topic can trip the circuit between this
+        // group's final top-of-loop IsOpen check and the while exit. Re-check here
+        // so DLQ never fires during an outage (anti-pattern #12 in docs/outbox-requirements-invariants.md).
+        if (circuitBreaker.IsOpen(topicName))
+        {
+            _instrumentation.PublishFailures.Add(1);
+            await NotifyPublishFailedAsync(
+                topicName, remaining,
+                lastError ?? new InvalidOperationException("Circuit breaker open"),
+                PublishFailureReason.CircuitOpened, ct);
+            return publishedAny;
+        }
+
         // Retries exhausted via non-transient errors → DLQ inline.
         await DeadLetterAndNotifyAsync(
             topicName, remaining, attempt,
@@ -634,7 +647,7 @@ internal sealed class OutboxPublisherService : BackgroundService
         try
         {
             await _store.DeletePublishedAsync(
-                sentMessages.Select(m => m.SequenceNumber).ToList(), ct);
+                sentMessages.Select(m => m.SequenceNumber).ToList(), CancellationToken.None);
         }
         catch (Exception deleteEx)
         {
