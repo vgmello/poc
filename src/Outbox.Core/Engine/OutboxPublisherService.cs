@@ -469,7 +469,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                     foreach (var msg in succeeded)
                     {
                         try { await _eventHandler.OnMessagePublishedAsync(msg, ct); }
-                        catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+                        catch (Exception handlerEx)
                         {
                             _logger.LogWarning(handlerEx,
                                 "OnMessagePublishedAsync handler threw for message {Seq} on topic {Topic}",
@@ -495,7 +495,20 @@ internal sealed class OutboxPublisherService : BackgroundService
                 remaining = remaining.Where(m => !succeededSet.Contains(m.SequenceNumber)).ToList();
                 if (remaining.Count == 0)
                 {
-                    circuitBreaker.RecordSuccess(topicName);
+                    var (stateChanged, newState) = circuitBreaker.RecordSuccess(topicName);
+                    if (stateChanged)
+                    {
+                        _healthState.SetCircuitClosed(topicName);
+                        _instrumentation.CircuitBreakerStateChanges.Add(1);
+
+                        try { await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct); }
+                        catch (Exception handlerEx)
+                        {
+                            _logger.LogWarning(handlerEx,
+                                "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic}", topicName);
+                        }
+                    }
+
                     return publishedAny;
                 }
 
@@ -591,7 +604,7 @@ internal sealed class OutboxPublisherService : BackgroundService
         {
             await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, CircuitState.Open, ct);
         }
-        catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+        catch (Exception handlerEx)
         {
             _logger.LogWarning(handlerEx,
                 "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic}", topicName);
@@ -626,7 +639,7 @@ internal sealed class OutboxPublisherService : BackgroundService
             _instrumentation.CircuitBreakerStateChanges.Add(1);
 
             try { await _eventHandler.OnCircuitBreakerStateChangedAsync(topicName, newState, ct); }
-            catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+            catch (Exception handlerEx)
             {
                 _logger.LogWarning(handlerEx,
                     "OnCircuitBreakerStateChangedAsync handler threw for topic {Topic}", topicName);
@@ -636,7 +649,7 @@ internal sealed class OutboxPublisherService : BackgroundService
         foreach (var msg in sentMessages)
         {
             try { await _eventHandler.OnMessagePublishedAsync(msg, ct); }
-            catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+            catch (Exception handlerEx)
             {
                 _logger.LogWarning(handlerEx,
                     "OnMessagePublishedAsync handler threw for message {Seq} on topic {Topic}",
@@ -691,7 +704,7 @@ internal sealed class OutboxPublisherService : BackgroundService
         foreach (var msg in failed)
         {
             try { await _eventHandler.OnMessageDeadLetteredAsync(msg, ct); }
-            catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+            catch (Exception handlerEx)
             {
                 _logger.LogWarning(handlerEx,
                     "OnMessageDeadLetteredAsync handler threw for message {Seq} on topic {Topic} — " +
@@ -711,7 +724,7 @@ internal sealed class OutboxPublisherService : BackgroundService
         {
             await _eventHandler.OnPublishFailedAsync(failed, lastError, reason, ct);
         }
-        catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+        catch (Exception handlerEx)
         {
             _logger.LogWarning(handlerEx,
                 "OnPublishFailedAsync handler threw for topic {Topic} (reason {Reason})",
@@ -857,7 +870,7 @@ internal sealed class OutboxPublisherService : BackgroundService
                 {
                     await _eventHandler.OnRebalanceAsync(publisherId, ownedPartitions, ct);
                 }
-                catch (Exception handlerEx) when (handlerEx is not OperationCanceledException)
+                catch (Exception handlerEx)
                 {
                     _logger.LogWarning(handlerEx,
                         "OnRebalanceAsync handler threw for publisher {PublisherId} — continuing",

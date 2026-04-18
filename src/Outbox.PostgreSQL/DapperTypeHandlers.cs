@@ -46,14 +46,14 @@ internal sealed class BigintArrayParam : SqlMapper.ICustomQueryParameter
 
 internal static class DapperConfiguration
 {
-    private static volatile bool _initialized;
+    private static int _initialized;
 
     public static void EnsureInitialized()
     {
-        if (_initialized) return;
+        if (Interlocked.CompareExchange(ref _initialized, 1, 0) != 0)
+            return;
 
         SqlMapper.AddTypeHandler(new JsonDictionaryTypeHandler());
         DefaultTypeMap.MatchNamesWithUnderscores = true;
-        _initialized = true;
     }
 }

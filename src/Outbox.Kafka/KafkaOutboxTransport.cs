@@ -68,7 +68,7 @@ internal sealed class KafkaOutboxTransport : IOutboxTransport
                 throw new PartialSendException(
                     succeededSequences, failedSequences,
                     $"Partial send failure: {succeededSequences.Count} messages sent, {failedSequences.Count} failed for topic '{topicName}'",
-                    pex);
+                    pex.InnerException ?? pex);
             }
             catch (Exception ex) when (succeededSequences.Count > 0)
             {

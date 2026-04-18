@@ -63,7 +63,7 @@ FROM {outboxTable} o
 INNER JOIN {partitionsTable} op
     ON  op.outbox_table_name = @outbox_table_name
     AND op.owner_publisher_id = @publisher_id
-    AND (op.grace_expires_utc IS NULL OR op.grace_expires_utc < clock_timestamp())
+    AND op.grace_expires_utc IS NULL
     AND ((hashtext(o.partition_key) & 2147483647) % @total_partitions) = op.partition_id
 WHERE o.xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint
 ORDER BY o.sequence_number

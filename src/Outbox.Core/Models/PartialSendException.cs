@@ -19,6 +19,8 @@ public sealed class PartialSendException : Exception
         Exception innerException)
         : base(message, innerException)
     {
+        ArgumentNullException.ThrowIfNull(succeededSequenceNumbers);
+        ArgumentNullException.ThrowIfNull(failedSequenceNumbers);
         SucceededSequenceNumbers = succeededSequenceNumbers;
         FailedSequenceNumbers = failedSequenceNumbers;
     }

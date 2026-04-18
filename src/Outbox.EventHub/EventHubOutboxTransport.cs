@@ -14,6 +14,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
 {
     private readonly ConcurrentDictionary<string, EventHubProducerClient> _clients = new();
     private readonly EventHubClientFactory _clientFactory;
+    private readonly ILogger<EventHubOutboxTransport> _logger;
     private readonly int _sendTimeoutSeconds;
     private readonly int _maxBatchSizeBytes;
     private readonly List<ITransportMessageInterceptor<EventData>> _interceptors;
@@ -25,6 +26,7 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
         EventHubClientFactory clientFactory)
     {
         _clientFactory = clientFactory;
+        _logger = logger;
         _sendTimeoutSeconds = options.Value.SendTimeoutSeconds;
         _maxBatchSizeBytes = options.Value.MaxBatchSizeBytes;
         _interceptors = interceptors.ToList();
@@ -156,9 +158,9 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
         foreach (var client in _clients.Values)
         {
             try { await client.CloseAsync(); }
-            catch
+            catch (Exception ex)
             {
-                /* best effort during shutdown */
+                _logger.LogWarning(ex, "Error closing EventHubProducerClient during shutdown");
             }
         }
 

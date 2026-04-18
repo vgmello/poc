@@ -76,7 +76,7 @@ internal sealed class SqlServerQueries
                          FROM {partitionsTable} op
                          WHERE op.OutboxTableName = @OutboxTableName
                            AND op.OwnerPublisherId = @PublisherId
-                           AND (op.GraceExpiresUtc IS NULL OR op.GraceExpiresUtc < SYSUTCDATETIME())
+                           AND op.GraceExpiresUtc IS NULL
                      )
                        AND o.RowVersion < MIN_ACTIVE_ROWVERSION()
                      ORDER BY o.PartitionId, o.SequenceNumber;
@@ -165,20 +165,21 @@ internal sealed class SqlServerQueries
                                       AND  LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
                                 );
 
+                         ;WITH Available AS (
+                             SELECT TOP (@ToAcquire) PartitionId
+                             FROM   {partitionsTable} WITH (UPDLOCK, READPAST)
+                             WHERE  OutboxTableName = @OutboxTableName
+                               AND  (OwnerPublisherId IS NULL
+                                     OR GraceExpiresUtc < SYSUTCDATETIME())
+                             ORDER BY PartitionId
+                         )
                          UPDATE op
                          SET    OwnerPublisherId = @PublisherId,
                                 OwnedSinceUtc   = SYSUTCDATETIME(),
                                 GraceExpiresUtc = NULL
-                         FROM   {partitionsTable} op WITH (UPDLOCK, READPAST)
-                         WHERE  op.OutboxTableName = @OutboxTableName
-                           AND  op.PartitionId IN (
-                                    SELECT TOP (@ToAcquire) PartitionId
-                                    FROM   {partitionsTable} WITH (UPDLOCK, READPAST)
-                                    WHERE  OutboxTableName = @OutboxTableName
-                                      AND  (OwnerPublisherId IS NULL
-                                            OR GraceExpiresUtc < SYSUTCDATETIME())
-                                    ORDER BY PartitionId
-                                );
+                         FROM   {partitionsTable} op
+                         INNER JOIN Available a ON op.PartitionId = a.PartitionId
+                           AND op.OutboxTableName = @OutboxTableName;
                      END;
 
                      SELECT @CurrentlyOwned = COUNT(*)
@@ -231,19 +232,20 @@ internal sealed class SqlServerQueries
 
                                  IF @ToAcquire > 0
                                  BEGIN
+                                     ;WITH Available AS (
+                                         SELECT TOP (@ToAcquire) PartitionId
+                                         FROM   {partitionsTable} WITH (UPDLOCK, READPAST)
+                                         WHERE  OutboxTableName = @OutboxTableName
+                                           AND  OwnerPublisherId IS NULL
+                                         ORDER BY PartitionId
+                                     )
                                      UPDATE op
                                      SET    OwnerPublisherId = @PublisherId,
                                             OwnedSinceUtc   = SYSUTCDATETIME(),
                                             GraceExpiresUtc = NULL
-                                     FROM   {partitionsTable} op WITH (UPDLOCK, READPAST)
-                                     WHERE  op.OutboxTableName = @OutboxTableName
-                                       AND  op.PartitionId IN (
-                                                SELECT TOP (@ToAcquire) PartitionId
-                                                FROM   {partitionsTable} WITH (UPDLOCK, READPAST)
-                                                WHERE  OutboxTableName = @OutboxTableName
-                                                  AND  OwnerPublisherId IS NULL
-                                                ORDER BY PartitionId
-                                            );
+                                     FROM   {partitionsTable} op
+                                     INNER JOIN Available a ON op.PartitionId = a.PartitionId
+                                       AND op.OutboxTableName = @OutboxTableName;
                                  END;
                                  """;
 

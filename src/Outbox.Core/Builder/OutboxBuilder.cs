@@ -56,10 +56,23 @@ internal sealed class OutboxBuilder : IOutboxBuilder
         where TInterceptor : class, IOutboxMessageInterceptor
     {
         if (GroupName is not null)
-            Services.AddKeyedSingleton<IOutboxMessageInterceptor, TInterceptor>(GroupName);
+        {
+            // No framework TryAddKeyedEnumerable exists, so deduplicate manually
+            // to match the unnamed-group TryAddEnumerable behavior.
+            var alreadyRegistered = Services.Any(d =>
+                d.IsKeyedService
+                && d.ServiceType == typeof(IOutboxMessageInterceptor)
+                && Equals(d.ServiceKey, GroupName)
+                && d.KeyedImplementationType == typeof(TInterceptor));
+
+            if (!alreadyRegistered)
+                Services.AddKeyedSingleton<IOutboxMessageInterceptor, TInterceptor>(GroupName);
+        }
         else
+        {
             Services.TryAddEnumerable(
                 ServiceDescriptor.Singleton<IOutboxMessageInterceptor, TInterceptor>());
+        }
 
         return this;
     }
