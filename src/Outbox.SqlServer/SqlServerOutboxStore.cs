@@ -39,7 +39,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
         _optionsName = groupName ?? Microsoft.Extensions.Options.Options.DefaultName;
         _options = optionsMonitor.Get(_optionsName);
         _publisherOptions = publisherOptions;
-        _db = new SqlServerDbHelper(serviceProvider, _options);
+        _db = new SqlServerDbHelper(serviceProvider, optionsMonitor, _optionsName);
         _queries = new SqlServerQueries(
             _options.SchemaName, _options.TablePrefix,
             _options.GetSharedSchemaName(), _options.GetOutboxTableName());
@@ -74,7 +74,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             await conn.ExecuteAsync(new CommandDefinition(_queries.UnregisterPublisher,
                 new { PublisherId = publisherId, OutboxTableName = _options.GetOutboxTableName() },
                 transaction: tx,
-                commandTimeout: _options.CommandTimeoutSeconds,
+                commandTimeout: _db.CommandTimeoutSeconds,
                 cancellationToken: cancel)).ConfigureAwait(false);
             await tx.CommitAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
@@ -146,7 +146,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
             await conn.ExecuteAsync(new CommandDefinition(_queries.Heartbeat,
                 new { PublisherId = publisherId, OutboxTableName = _options.GetOutboxTableName() },
                 transaction: tx,
-                commandTimeout: _options.CommandTimeoutSeconds,
+                commandTimeout: _db.CommandTimeoutSeconds,
                 cancellationToken: cancel)).ConfigureAwait(false);
             await tx.CommitAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
@@ -198,7 +198,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
                     OutboxTableName = _options.GetOutboxTableName()
                 },
                 transaction: tx,
-                commandTimeout: _options.CommandTimeoutSeconds,
+                commandTimeout: _db.CommandTimeoutSeconds,
                 cancellationToken: cancel)).ConfigureAwait(false);
             await tx.CommitAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
@@ -219,7 +219,7 @@ public sealed class SqlServerOutboxStore : IOutboxStore
                     OutboxTableName = _options.GetOutboxTableName()
                 },
                 transaction: tx,
-                commandTimeout: _options.CommandTimeoutSeconds,
+                commandTimeout: _db.CommandTimeoutSeconds,
                 cancellationToken: cancel)).ConfigureAwait(false);
             await tx.CommitAsync(cancel).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);

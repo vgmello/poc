@@ -78,12 +78,11 @@ This withholds rows from in-flight write transactions, preventing the scenario w
 ### Rebalance
 
 Single transactional T-SQL batch:
-1. Compute fair share (`CEILING(total / active)`)
-2. Mark stale publishers' partitions with grace period
-3. Claim unowned or grace-expired partitions up to fair share
-4. Release excess partitions
 
-Uses `UPDLOCK, READPAST` to prevent concurrent double-claiming.
+1. Compute fair share (`CEILING(total / active)`).
+2. Grace-mark partitions owned by stale publishers (unconditional — runs every cycle so dead publishers' partitions start their grace timer as soon as any surviving publisher rebalances).
+3. If `@ToAcquire > 0` (publisher is under fair share): claim unowned or grace-expired partitions up to fair share using `UPDLOCK, READPAST` to prevent concurrent double-claiming.
+4. If `@CurrentlyOwned > @FairShare` (publisher is over fair share): release the excess.
 
 ### Transient error handling
 

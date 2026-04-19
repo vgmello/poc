@@ -107,13 +107,13 @@ Both the publisher service and store implementations use `IOptionsMonitor<Outbox
 
 ### No fail-fast validation on transport options
 
-`KafkaTransportOptions.BootstrapServers` and `EventHubTransportOptions.ConnectionString` default to empty strings with no `IValidateOptions<T>` implementation. Misconfigured values are only discovered at the first publish attempt. This is because:
+`KafkaTransportOptionsValidator` and `EventHubTransportOptionsValidator` both implement `IValidateOptions<T>` and are registered via `TryAddEnumerable` in their builder extensions — but they only check *timing* relationships (e.g., `PartitionGracePeriodSeconds` vs in-flight send timeouts). Neither validates that `BootstrapServers` / `ConnectionString` is non-empty, well-formed, or reachable. Misconfigured connection values are only discovered at the first publish attempt. This is by design:
 
 1. Transport options may come from external configuration (Key Vault, environment variables) that isn't available at DI registration time.
 2. Connection validation requires network access, which is inappropriate during startup (it would block the host from starting).
 3. The publisher's retry logic handles startup connectivity issues gracefully.
 
-For fail-fast behavior, consumers of the library can add their own `IValidateOptions<KafkaTransportOptions>` implementation.
+For fail-fast behavior on connection strings, consumers of the library can add their own `IValidateOptions<KafkaTransportOptions>` implementation alongside the built-in timing validator.
 
 ### Partition count changes require publisher downtime (both stores)
 

@@ -3,30 +3,37 @@
 using System.Data;
 using Dapper;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Options;
 
 namespace Outbox.SqlServer;
 
 internal sealed class SqlServerDbHelper
 {
     private readonly IServiceProvider _serviceProvider;
-    private readonly SqlServerStoreOptions _options;
+    private readonly IOptionsMonitor<SqlServerStoreOptions> _optionsMonitor;
+    private readonly string _optionsName;
 
     public SqlServerDbHelper(
         IServiceProvider serviceProvider,
-        SqlServerStoreOptions options)
+        IOptionsMonitor<SqlServerStoreOptions> optionsMonitor,
+        string optionsName)
     {
         _serviceProvider = serviceProvider;
-        _options = options;
+        _optionsMonitor = optionsMonitor;
+        _optionsName = optionsName;
     }
+
+    private SqlServerStoreOptions Current => _optionsMonitor.Get(_optionsName);
 
     public async Task<SqlConnection> OpenConnectionAsync(CancellationToken ct)
     {
+        var opts = Current;
         SqlConnection conn;
 
-        if (_options.ConnectionFactory is not null)
-            conn = (SqlConnection)await _options.ConnectionFactory(_serviceProvider, ct).ConfigureAwait(false);
+        if (opts.ConnectionFactory is not null)
+            conn = (SqlConnection)await opts.ConnectionFactory(_serviceProvider, ct).ConfigureAwait(false);
         else
-            conn = new SqlConnection(_options.ConnectionString);
+            conn = new SqlConnection(opts.ConnectionString);
 
         if (conn.State != ConnectionState.Open)
             await conn.OpenAsync(ct).ConfigureAwait(false);
@@ -38,8 +45,11 @@ internal sealed class SqlServerDbHelper
         Func<SqlConnection, CancellationToken, Task> operation,
         CancellationToken ct)
     {
-        var maxAttempts = _options.TransientRetryMaxAttempts;
-        var backoffMs = _options.TransientRetryBackoffMs;
+        // Snapshot retry parameters at the start of the call so a single logical operation
+        // uses consistent attempt counts and backoff even if options hot-reload mid-retry.
+        var opts = Current;
+        var maxAttempts = opts.TransientRetryMaxAttempts;
+        var backoffMs = opts.TransientRetryBackoffMs;
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
@@ -68,6 +78,8 @@ internal sealed class SqlServerDbHelper
     public Task<T> ScalarAsync<T>(string sql, object? parameters, CancellationToken ct) =>
         CallAsync<T>(sql, parameters, static conn => cmd => conn.ExecuteScalarAsync<T>(cmd)!, ct);
 
+    public int CommandTimeoutSeconds => Current.CommandTimeoutSeconds;
+
     private async Task<TResult> CallAsync<TResult>(
         string sql,
         object? parameters,
@@ -78,7 +90,7 @@ internal sealed class SqlServerDbHelper
         await ExecuteWithRetryAsync(async (conn, cancel) =>
         {
             var command = new CommandDefinition(sql, parameters,
-                commandTimeout: _options.CommandTimeoutSeconds,
+                commandTimeout: Current.CommandTimeoutSeconds,
                 cancellationToken: cancel);
             result = await dbFunction(conn)(command).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);

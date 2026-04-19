@@ -21,8 +21,9 @@ public sealed class SqlServerDeadLetterManager : IDeadLetterManager
         IOptionsMonitor<SqlServerStoreOptions> optionsMonitor,
         string? groupName = null)
     {
-        _options = optionsMonitor.Get(groupName ?? Microsoft.Extensions.Options.Options.DefaultName);
-        _db = new SqlServerDbHelper(serviceProvider, _options);
+        var optionsName = groupName ?? Microsoft.Extensions.Options.Options.DefaultName;
+        _options = optionsMonitor.Get(optionsName);
+        _db = new SqlServerDbHelper(serviceProvider, optionsMonitor, optionsName);
         _queries = new SqlServerQueries(
             _options.SchemaName, _options.TablePrefix,
             _options.GetSharedSchemaName(), _options.GetOutboxTableName());

@@ -453,7 +453,6 @@ internal sealed class OutboxPublisherService : BackgroundService
                     pex.SucceededSequenceNumbers.Count, pex.FailedSequenceNumbers.Count, topicName);
 
                 _instrumentation.PublishFailures.Add(1);
-                publishedAny = true;
                 lastError = pex.InnerException ?? pex;
 
                 // Delete succeeded subset; they're already on the broker.
@@ -461,6 +460,8 @@ internal sealed class OutboxPublisherService : BackgroundService
                 var succeeded = remaining.Where(m => succeededSet.Contains(m.SequenceNumber)).ToList();
                 if (succeeded.Count > 0)
                 {
+                    publishedAny = true;
+
                     // Metrics and handler notifications fire regardless of delete outcome —
                     // transport already delivered these messages.
                     _instrumentation.MessagesPublished.Add(succeeded.Count);

@@ -149,22 +149,22 @@ internal sealed class SqlServerQueries
 
                      SET @ToAcquire = @FairShare - @CurrentlyOwned;
 
+                     UPDATE {partitionsTable}
+                     SET    GraceExpiresUtc = DATEADD(SECOND, @PartitionGracePeriodSeconds, SYSUTCDATETIME())
+                     WHERE  OwnerPublisherId <> @PublisherId
+                       AND  OwnerPublisherId IS NOT NULL
+                       AND  GraceExpiresUtc IS NULL
+                       AND  OutboxTableName = @OutboxTableName
+                       AND  OwnerPublisherId NOT IN
+                            (
+                                SELECT PublisherId
+                                FROM   {publishersTable}
+                                WHERE  OutboxTableName = @OutboxTableName
+                                  AND  LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
+                            );
+
                      IF @ToAcquire > 0
                      BEGIN
-                         UPDATE {partitionsTable}
-                         SET    GraceExpiresUtc = DATEADD(SECOND, @PartitionGracePeriodSeconds, SYSUTCDATETIME())
-                         WHERE  OwnerPublisherId <> @PublisherId
-                           AND  OwnerPublisherId IS NOT NULL
-                           AND  GraceExpiresUtc IS NULL
-                           AND  OutboxTableName = @OutboxTableName
-                           AND  OwnerPublisherId NOT IN
-                                (
-                                    SELECT PublisherId
-                                    FROM   {publishersTable}
-                                    WHERE  OutboxTableName = @OutboxTableName
-                                      AND  LastHeartbeatUtc >= DATEADD(SECOND, -@HeartbeatTimeoutSeconds, SYSUTCDATETIME())
-                                );
-
                          ;WITH Available AS (
                              SELECT TOP (@ToAcquire) PartitionId
                              FROM   {partitionsTable} WITH (UPDLOCK, READPAST)
@@ -249,7 +249,7 @@ internal sealed class SqlServerQueries
                                  END;
                                  """;
 
-        GetPendingCount = $"SELECT COUNT_BIG(*) FROM {outboxTable};";
+        GetPendingCount = $"SELECT COUNT_BIG(*) FROM {outboxTable} WITH (NOLOCK);";
 
         // Dead-letter manager queries
         DeadLetterGet = $"""

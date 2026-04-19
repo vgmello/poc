@@ -75,10 +75,10 @@ public sealed class OutboxPublisherOptions : IValidatableObject
                 new[] { nameof(MaxPollIntervalMs), nameof(MinPollIntervalMs) });
         }
 
-        var heartbeatTimeoutMs = HeartbeatTimeoutSeconds * 1000;
+        var heartbeatTimeoutMs = (long)HeartbeatTimeoutSeconds * 1000;
 
         if (HeartbeatIntervalMs > 0 && heartbeatTimeoutMs > 0 &&
-            heartbeatTimeoutMs < HeartbeatIntervalMs * 3)
+            heartbeatTimeoutMs < (long)HeartbeatIntervalMs * 3)
         {
             yield return new ValidationResult(
                 $"HeartbeatTimeoutSeconds ({HeartbeatTimeoutSeconds}s) should be >= " +

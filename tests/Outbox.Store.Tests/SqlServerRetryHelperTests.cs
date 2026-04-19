@@ -3,6 +3,7 @@
 using System.Data.Common;
 using System.Reflection;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 using Outbox.SqlServer;
 using Xunit;
@@ -16,6 +17,14 @@ public class SqlServerRetryHelperTests
         TransientRetryMaxAttempts = maxAttempts,
         TransientRetryBackoffMs = 1
     };
+
+    private static IOptionsMonitor<SqlServerStoreOptions> Monitor(SqlServerStoreOptions options)
+    {
+        var monitor = Substitute.For<IOptionsMonitor<SqlServerStoreOptions>>();
+        monitor.Get(Arg.Any<string>()).Returns(options);
+        monitor.CurrentValue.Returns(options);
+        return monitor;
+    }
 
     private static SqlException CreateSqlException(int errorNumber)
     {
@@ -62,7 +71,7 @@ public class SqlServerRetryHelperTests
 
         var options = FastOptions(maxAttempts: 3);
         options.ConnectionFactory = factory;
-        var helper = new SqlServerDbHelper(serviceProvider, options);
+        var helper = new SqlServerDbHelper(serviceProvider, Monitor(options), Options.DefaultName);
 
         var ex = await Assert.ThrowsAsync<SqlException>(() =>
             helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));
@@ -86,7 +95,7 @@ public class SqlServerRetryHelperTests
 
         var options = FastOptions(maxAttempts: 3);
         options.ConnectionFactory = factory;
-        var helper = new SqlServerDbHelper(serviceProvider, options);
+        var helper = new SqlServerDbHelper(serviceProvider, Monitor(options), Options.DefaultName);
 
         var ex = await Assert.ThrowsAsync<SqlException>(() =>
             helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));
@@ -112,7 +121,7 @@ public class SqlServerRetryHelperTests
 
         var options = FastOptions(maxAttempts: 1);
         options.ConnectionFactory = factory;
-        var helper = new SqlServerDbHelper(serviceProvider, options);
+        var helper = new SqlServerDbHelper(serviceProvider, Monitor(options), Options.DefaultName);
 
         var ex = await Assert.ThrowsAsync<SqlException>(() =>
             helper.ExecuteWithRetryAsync((_, _) => Task.CompletedTask, CancellationToken.None));

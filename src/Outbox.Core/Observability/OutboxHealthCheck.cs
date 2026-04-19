@@ -49,7 +49,7 @@ public sealed class OutboxHealthCheck : IHealthCheck
         }
 
         // Unhealthy: heartbeat stale (3x interval = missed 2 consecutive heartbeats)
-        var heartbeatStalenessThreshold = TimeSpan.FromMilliseconds(opts.HeartbeatIntervalMs * 3);
+        var heartbeatStalenessThreshold = TimeSpan.FromMilliseconds((long)opts.HeartbeatIntervalMs * 3);
 
         if (_state.LastHeartbeatUtc != DateTimeOffset.MinValue &&
             now - _state.LastHeartbeatUtc > heartbeatStalenessThreshold)
@@ -70,7 +70,7 @@ public sealed class OutboxHealthCheck : IHealthCheck
         }
 
         // Unhealthy: no polls at all for an extended period (3x max poll interval)
-        var pollStalenessThreshold = TimeSpan.FromMilliseconds(opts.MaxPollIntervalMs * 3);
+        var pollStalenessThreshold = TimeSpan.FromMilliseconds((long)opts.MaxPollIntervalMs * 3);
 
         if (_state.LastPollUtc != DateTimeOffset.MinValue &&
             now - _state.LastPollUtc > pollStalenessThreshold)

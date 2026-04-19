@@ -107,7 +107,7 @@ Signals partial batch delivery. Carries `SucceededSequenceNumbers` and `FailedSe
 
 ### OutboxPublisherService
 
-A sealed `BackgroundService` that runs five concurrent loops:
+A sealed `BackgroundService` that runs four concurrent loops:
 
 | Loop | Interval | Purpose |
 |---|---|---|
@@ -155,8 +155,8 @@ Bind from `"Outbox:Publisher"` in `IConfiguration`. Supports hot-reload via `IOp
 |---|---|
 | `BatchSize` | 100 |
 | `MaxPublishAttempts` | 5 |
-| `RetryBackoffBaseMs` | 500 |
-| `RetryBackoffMaxMs` | 5000 |
+| `RetryBackoffBaseMs` | 100 |
+| `RetryBackoffMaxMs` | 2000 |
 | `MinPollIntervalMs` | 100 |
 | `MaxPollIntervalMs` | 5000 |
 | `HeartbeatIntervalMs` | 10000 |

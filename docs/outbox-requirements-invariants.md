@@ -137,12 +137,19 @@ Any store implementation MUST satisfy:
 
 ## Configuration Constraints
 
-| Relationship                                                | Requirement                                              | Why                                          |
-| ----------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------- |
-| `HeartbeatIntervalMs * 3 <= HeartbeatTimeoutSeconds * 1000` | Must tolerate at least 2 missed heartbeats (3 intervals) | Prevents false staleness                     |
-| `CircuitBreakerOpenDurationSeconds > 0`                     | Must eventually probe                                    | Prevents permanent circuit open              |
-| `RetryBackoffMaxMs >= RetryBackoffBaseMs`                   | Max backoff must be at least the base                    | Prevents invalid backoff configuration       |
-| `TransientRetryBackoffMs * 2^(MaxAttempts-1) > 20000`       | Retry budget must cover DB failover                      | Azure SQL failover takes 20-30s              |
+Publisher options (`OutboxPublisherOptions`):
+
+| Relationship                                                | Requirement                                              | Why                                    |
+| ----------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------- |
+| `HeartbeatIntervalMs * 3 <= HeartbeatTimeoutSeconds * 1000` | Must tolerate at least 2 missed heartbeats (3 intervals) | Prevents false staleness               |
+| `CircuitBreakerOpenDurationSeconds > 0`                     | Must eventually probe                                    | Prevents permanent circuit open        |
+| `RetryBackoffMaxMs >= RetryBackoffBaseMs`                   | Max backoff must be at least the base                    | Prevents invalid backoff configuration |
+
+Store options (`SqlServerStoreOptions` / `PostgreSqlStoreOptions`):
+
+| Relationship                                                              | Requirement                         | Why                              |
+| ------------------------------------------------------------------------- | ----------------------------------- | -------------------------------- |
+| `TransientRetryBackoffMs * 2^(TransientRetryMaxAttempts - 1) > 20000`     | Retry budget must cover DB failover | Azure SQL failover takes 20-30s  |
 
 ---
 
