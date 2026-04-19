@@ -22,7 +22,7 @@ Run `db_scripts/install.sql` against your database to create the schema. The scr
 
 ## Schema
 
-Four tables, one index, two diagnostic views, and a 64-partition seed:
+Four tables, two diagnostic views, and a 64-partition seed:
 
 | Table | Purpose |
 |---|---|
@@ -42,7 +42,7 @@ Four tables, one index, two diagnostic views, and a 64-partition seed:
 | `headers` | `VARCHAR(2000)` | JSON-serialized headers (nullable) |
 ### Indexes
 
-- `ix_outbox_pending` — On `(partition_id, sequence_number)` for insert-order polling
+Only the primary keys: `pk_outbox (sequence_number)` and `pk_outbox_dead_letter (dead_letter_seq)`. `FetchBatchAsync` uses `pk_outbox` as its access path — no covering index helps because the query selects `payload`/`headers` (too wide to cover efficiently) and the `xmin` ceiling filter forces a heap visit for MVCC visibility regardless.
 
 ### Diagnostic views
 

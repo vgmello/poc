@@ -22,7 +22,7 @@ Run `db_scripts/install.sql` against your database to create the schema. The scr
 
 ## Schema
 
-Four tables, a TVP type, one index, two diagnostic views, and a 64-partition seed:
+Four tables, a TVP type, one nonclustered index, two diagnostic views, and a 64-partition seed:
 
 | Table | Purpose |
 |---|---|
@@ -63,7 +63,7 @@ ABS(CAST(CHECKSUM(PartitionKey) AS BIGINT)) % @TotalPartitions
 
 ### Fetch mechanism
 
-`FetchBatchAsync` is a pure `SELECT` with no row-locking hints. Messages are ordered by `SequenceNumber` (equals insert order). A version ceiling filter ensures ordering safety:
+`FetchBatchAsync` is a pure `SELECT` with no row-locking hints. The `ORDER BY PartitionId, SequenceNumber` aligns with the composite nonclustered index `IX_Outbox_Pending (PartitionId, SequenceNumber)`, enabling an Index Seek per owned partition with no sort operator. Per-`(topic, partition_key)` ordering is preserved because rows sharing a partition key share a `PartitionId` by construction — the outer `PartitionId` sort never splits a key's messages. A bare `ORDER BY SequenceNumber` would force a clustered-PK scan with per-row partition lookups (measured ~48× more logical reads on a 50k-row table). A version ceiling filter ensures ordering safety:
 
 ```sql
 WHERE o.RowVersion < MIN_ACTIVE_ROWVERSION()

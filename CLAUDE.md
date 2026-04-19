@@ -28,6 +28,12 @@ A .NET outbox pattern library with pluggable transports (Kafka, EventHub) and st
 - Run performance tests: `dotnet test tests/Outbox.PerformanceTests/` (takes ~60 minutes, requires Docker)
 - Run all: `dotnet test src/Outbox.slnx`
 
+## Code and doc conventions
+
+- **This project is pre-release. No migration paths, no backward-compatibility shims.** When code or schema is deleted, it is gone — do not leave comments explaining what used to be there, do not retain `// removed`/`-- No longer needed` markers, do not write SQL comments justifying the absence of dropped indexes/columns. A fresh reader needs to understand current state, not a changelog.
+- Keep `install.sql` minimal: create what exists, nothing more. Design rationale belongs in design docs (`docs/`), not SQL comments.
+- When updating docs that described removed code, rewrite the passage to describe current state — don't frame it as "X was removed because Y."
+
 ## Git workflow
 
 - Feature branches MUST be merged into `main` via **squash merge**. Never fast-forward, never create a merge commit.

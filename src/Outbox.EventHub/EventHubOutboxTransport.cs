@@ -12,7 +12,7 @@ namespace Outbox.EventHub;
 
 internal sealed class EventHubOutboxTransport : IOutboxTransport
 {
-    private readonly ConcurrentDictionary<string, EventHubProducerClient> _clients = new();
+    private readonly ConcurrentDictionary<string, Lazy<EventHubProducerClient>> _clients = new();
     private readonly EventHubClientFactory _clientFactory;
     private readonly ILogger<EventHubOutboxTransport> _logger;
     private readonly int _sendTimeoutSeconds;
@@ -41,7 +41,15 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
         IReadOnlyList<OutboxMessage> messages,
         CancellationToken cancellationToken)
     {
-        var client = _clients.GetOrAdd(topicName, name => _clientFactory(name));
+        // ConcurrentDictionary.GetOrAdd can invoke the value factory more than once when multiple
+        // threads race on the same absent key — only one returned value is stored; the rest are
+        // abandoned. A raw EventHubProducerClient factory would leak AMQP connections on each lost
+        // race (abandoned clients never appear in _clients.Values, so DisposeAsync can't close them).
+        // Lazy<T> with ExecutionAndPublication guarantees the real client is constructed exactly once.
+        var client = _clients.GetOrAdd(topicName,
+            name => new Lazy<EventHubProducerClient>(
+                () => _clientFactory(name),
+                LazyThreadSafetyMode.ExecutionAndPublication)).Value;
 
         var batchOptions = new CreateBatchOptions
         {
@@ -90,10 +98,10 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
                     {
                         await client.SendAsync(batch, ct);
                         sentSequenceNumbers.AddRange(currentBatchSequenceNumbers);
-                        batch.Dispose();
-                        batch = null;
                         currentBatchSequenceNumbers.Clear();
                     }
+
+                    batch.Dispose();
 
                     // Reset timeout for remaining messages.
                     sendCts.CancelAfter(TimeSpan.FromSeconds(_sendTimeoutSeconds));
@@ -155,9 +163,11 @@ internal sealed class EventHubOutboxTransport : IOutboxTransport
 
     public async ValueTask DisposeAsync()
     {
-        foreach (var client in _clients.Values)
+        foreach (var lazy in _clients.Values)
         {
-            try { await client.CloseAsync(); }
+            if (!lazy.IsValueCreated) continue;
+
+            try { await lazy.Value.CloseAsync(); }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Error closing EventHubProducerClient during shutdown");

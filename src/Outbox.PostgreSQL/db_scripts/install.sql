@@ -74,19 +74,6 @@ CREATE TABLE IF NOT EXISTS outbox_partitions
 );
 
 -- ---------------------------------------------------------------------------
--- Indexes
--- ---------------------------------------------------------------------------
-
--- Pending rows in sequence order
-CREATE INDEX IF NOT EXISTS ix_outbox_pending
-ON outbox (sequence_number)
-INCLUDE (topic_name, partition_key, event_type, event_datetime_utc, created_at_utc);
-
--- Dead-letter lookup by original sequence number (used by replay and purge)
-CREATE INDEX IF NOT EXISTS ix_outbox_dead_letter_sequence_number
-ON outbox_dead_letter (sequence_number);
-
--- ---------------------------------------------------------------------------
 -- Diagnostic views — human-readable headers/payload for text content types
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW vw_outbox AS

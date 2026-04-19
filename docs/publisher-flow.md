@@ -185,11 +185,12 @@ The primary event buffer. Messages are inserted here inside the same transaction
 
 **Indexes:**
 
-| Index               | Columns                         | Purpose                                              |
-| ------------------- | ------------------------------- | ---------------------------------------------------- |
-| `ix_outbox_pending` | `(partition_id, sequence_number)` + includes | Fast lookup of pending messages in insert order |
+| Store      | Index               | Columns                                      | Purpose                                                         |
+| ---------- | ------------------- | -------------------------------------------- | --------------------------------------------------------------- |
+| SQL Server | `IX_Outbox_Pending` | `(PartitionId, SequenceNumber)` + INCLUDEs   | Per-partition Index Seek with no key lookups (fully covering)   |
+| PostgreSQL | _(none beyond PK)_  | —                                            | `pk_outbox (sequence_number)` is the access path for FetchBatch |
 
-A single index replaces the previous lease-based partial indexes. Since there are no lease columns, all rows in the outbox are pending—the index covers the full table. On SQL Server, the INCLUDE columns contain all SELECT columns (including `Headers`, `Payload`, `PayloadContentType`) to form a covering index that eliminates key lookups to the clustered index. PostgreSQL's index includes only the smaller columns.
+The two stores diverge here because `partition_id` is a persisted computed column on SQL Server but a runtime expression on PostgreSQL. SQL Server can therefore seek per-partition with a covering nonclustered index (`INCLUDE` carries `Headers`, `Payload`, `PayloadContentType`, `RowVersion`, etc., eliminating clustered-PK lookups). PostgreSQL cannot index a runtime-parameterized expression without baking the modulus into the schema, so it relies on the PK-ordered sequence scan and applies the partition filter via the hash expression during the `outbox_partitions` join. At tested scale the PG plan completes in ~0.4 ms; a covering index would not help because the `xmin` visibility filter forces a heap fetch regardless.
 
 ### outbox_dead_letter
 
@@ -211,7 +212,7 @@ Archive for messages that exhausted `MaxPublishAttempts` non-transient attempts.
 | `dead_lettered_at_utc` | `TIMESTAMPTZ(3)` / `DATETIME2(3)`  | When the message was dead-lettered         |
 | `last_error`           | `VARCHAR(2000)` / `NVARCHAR(2000)` | Final error message (nullable)             |
 
-**Index:** `ix_outbox_dead_letter_sequence_number` on `(sequence_number)` for lookups by original ID.
+**Indexes:** only the PK (`dead_letter_seq` / `DeadLetterSeq`). Library replay/purge queries join against the TVP of `DeadLetterSeq` values; none of them seek by the original `sequence_number`. If operators need forensic lookups by original sequence number at scale, add an out-of-band index.
 
 The move from `outbox` to `outbox_dead_letter` is atomic—a single CTE/OUTPUT deletes from one and inserts into the other in the same transaction. `DeadLetterAsync(sequenceNumbers, attemptCount, lastError, ct)` is called from inside the publish loop when the in-memory attempt counter hits `MaxPublishAttempts`.
 
