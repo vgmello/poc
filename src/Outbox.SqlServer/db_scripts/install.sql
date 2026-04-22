@@ -135,15 +135,6 @@ BEGIN
 END;
 GO
 
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.OutboxPartitions') AND name = N'IX_OutboxPartitions_Grace')
-BEGIN
-    CREATE NONCLUSTERED INDEX IX_OutboxPartitions_Grace
-    ON dbo.OutboxPartitions (OutboxTableName, GraceExpiresUtc, PartitionId)
-    INCLUDE (OwnerPublisherId, OwnedSinceUtc)
-    WHERE GraceExpiresUtc IS NOT NULL;
-END;
-GO
-
 -- =============================================================================
 -- SECTION 4: DIAGNOSTIC VIEWS
 -- =============================================================================

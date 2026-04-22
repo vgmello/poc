@@ -47,19 +47,26 @@
 Outbox data-path indexing was already present for SQL Server message polling (`IX_Outbox_Pending`), but control-plane loops (heartbeat/rebalance/ownership lookups) relied mainly on PK scans. With many publisher groups and frequent loop execution, this can create avoidable CPU/io churn.
 
 ### Added indexes — PostgreSQL
-- `ix_outbox_publishers_heartbeat (outbox_table_name, last_heartbeat_utc)`
-- `ix_outbox_partitions_owner (outbox_table_name, owner_publisher_id, partition_id)`
-- `ix_outbox_partitions_grace (outbox_table_name, grace_expires_utc, partition_id) WHERE grace_expires_utc IS NOT NULL`
+- `ix_outbox_publishers_heartbeat (outbox_table_name, last_heartbeat_utc)` — covers the active-publisher COUNTs and the `NOT IN` subquery in `Rebalance` / `ClaimOrphanPartitions` (`PostgreSqlQueries.cs:132-137, 142-144, 176-178, 211-213`).
+- `ix_outbox_partitions_owner (outbox_table_name, owner_publisher_id, partition_id)` — covers `GetOwnedPartitions`, the partitions `Heartbeat` UPDATE, `UnregisterPublisher` UPDATE, the `currently_owned` COUNTs inside `Rebalance`, and per-owner scans within rebalance/claim.
 
 ### Added indexes — SQL Server
-- `IX_OutboxPublishers_Heartbeat (OutboxTableName, LastHeartbeatUtc) INCLUDE (PublisherId)`
-- `IX_OutboxPartitions_Owner (OutboxTableName, OwnerPublisherId, PartitionId) INCLUDE (OwnedSinceUtc, GraceExpiresUtc)`
-- `IX_OutboxPartitions_Grace (OutboxTableName, GraceExpiresUtc, PartitionId) INCLUDE (OwnerPublisherId, OwnedSinceUtc) WHERE GraceExpiresUtc IS NOT NULL`
+- `IX_OutboxPublishers_Heartbeat (OutboxTableName, LastHeartbeatUtc) INCLUDE (PublisherId)` — same role as above; `INCLUDE (PublisherId)` makes the `NOT IN` subquery index-only.
+- `IX_OutboxPartitions_Owner (OutboxTableName, OwnerPublisherId, PartitionId) INCLUDE (OwnedSinceUtc, GraceExpiresUtc)` — same role as above; the `INCLUDE` columns make the `FetchBatch` subquery at `SqlServerQueries.cs:74-80` fully covering, removing key lookups on the hottest query in the system.
+
+### Considered and rejected
+
+A filtered `(outbox_table_name, grace_expires_utc, partition_id) WHERE grace_expires_utc IS NOT NULL` index was considered and **not added**. It cannot serve the two queries that want grace state most — `FetchBatch` and the `Rebalance` mark-stale UPDATE both require `GraceExpiresUtc IS NULL`, which a `WHERE GraceExpiresUtc IS NOT NULL` predicate excludes by definition. The partitions `Heartbeat` UPDATE leads on a specific `OwnerPublisherId`, where the owner index reaches fair-share rows directly instead of scanning every grace-flagged row in the group. That leaves only the expired-grace branch of the claim CTE in `Rebalance` as a unique beneficiary — a rare, transient state on ≤ 64 rows per group. The write cost (every heartbeat that clears a grace window moves a row out of the filtered index) outweighs that narrow win, and on SQL Server the `INCLUDE` would have duplicated columns already covered by the owner index.
 
 ### Expected impact
 - Lower latency variance in heartbeat/rebalance/orphan-sweep loops as publisher/group count increases.
 - Reduced scan pressure on partition/publisher infrastructure tables.
+- On SQL Server, `FetchBatch`'s partitions subquery becomes index-only via the owner index's `INCLUDE (GraceExpiresUtc)`.
 - No behavior change to message ordering or delivery guarantees.
+
+### Validation still owed
+
+The "lower latency variance" claim has not been measured. Before trusting it in production, capture `EXPLAIN (ANALYZE, BUFFERS)` (PostgreSQL) and `SET STATISTICS IO, TIME ON` (SQL Server) for `FetchBatch`, `Rebalance`, and `Heartbeat` at realistic group/publisher cardinality, before and after. The SQL Server `FetchBatch` subquery is the most load-bearing case to confirm.
 
 ---
 
