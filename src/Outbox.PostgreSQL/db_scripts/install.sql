@@ -104,3 +104,16 @@ INSERT INTO outbox_partitions (outbox_table_name, partition_id, owner_publisher_
 SELECT 'outbox', g, NULL, NULL, NULL
 FROM generate_series(0, 63) AS g
 ON CONFLICT (outbox_table_name, partition_id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- Indexes for publisher/partition management loops
+-- ---------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS ix_outbox_publishers_heartbeat
+    ON outbox_publishers (outbox_table_name, last_heartbeat_utc);
+
+CREATE INDEX IF NOT EXISTS ix_outbox_partitions_owner
+    ON outbox_partitions (outbox_table_name, owner_publisher_id, partition_id);
+
+CREATE INDEX IF NOT EXISTS ix_outbox_partitions_grace
+    ON outbox_partitions (outbox_table_name, grace_expires_utc, partition_id)
+    WHERE grace_expires_utc IS NOT NULL;

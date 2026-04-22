@@ -3,9 +3,11 @@
 using Confluent.Kafka;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 using Outbox.Core.Abstractions;
 using Outbox.Core.Builder;
+using Outbox.Core.Options;
 using Xunit;
 
 namespace Outbox.Kafka.Tests;
@@ -172,5 +174,22 @@ public class KafkaOutboxBuilderExtensionsTests
         var descriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IOutboxTransport));
         Assert.NotNull(descriptor);
         Assert.Equal(typeof(KafkaOutboxTransport), descriptor.ImplementationType);
+    }
+
+    [Fact]
+    public void KafkaTransportOptionsValidator_Fails_WhenBootstrapServersMissing()
+    {
+        var publisherOptions = Substitute.For<IOptionsMonitor<OutboxPublisherOptions>>();
+        publisherOptions.Get(Options.DefaultName).Returns(new OutboxPublisherOptions());
+
+        var sut = new KafkaTransportOptionsValidator(publisherOptions);
+
+        var result = sut.Validate(Options.DefaultName, new KafkaTransportOptions
+        {
+            BootstrapServers = " "
+        });
+
+        Assert.True(result.Failed);
+        Assert.Contains("BootstrapServers", result.FailureMessage);
     }
 }

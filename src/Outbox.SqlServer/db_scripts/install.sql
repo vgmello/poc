@@ -119,6 +119,31 @@ BEGIN
 END;
 GO
 
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.OutboxPublishers') AND name = N'IX_OutboxPublishers_Heartbeat')
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_OutboxPublishers_Heartbeat
+    ON dbo.OutboxPublishers (OutboxTableName, LastHeartbeatUtc)
+    INCLUDE (PublisherId);
+END;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.OutboxPartitions') AND name = N'IX_OutboxPartitions_Owner')
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_OutboxPartitions_Owner
+    ON dbo.OutboxPartitions (OutboxTableName, OwnerPublisherId, PartitionId)
+    INCLUDE (OwnedSinceUtc, GraceExpiresUtc);
+END;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.OutboxPartitions') AND name = N'IX_OutboxPartitions_Grace')
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_OutboxPartitions_Grace
+    ON dbo.OutboxPartitions (OutboxTableName, GraceExpiresUtc, PartitionId)
+    INCLUDE (OwnerPublisherId, OwnedSinceUtc)
+    WHERE GraceExpiresUtc IS NOT NULL;
+END;
+GO
+
 -- =============================================================================
 -- SECTION 4: DIAGNOSTIC VIEWS
 -- =============================================================================

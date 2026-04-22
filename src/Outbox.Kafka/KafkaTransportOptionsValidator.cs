@@ -25,6 +25,12 @@ internal sealed class KafkaTransportOptionsValidator : IValidateOptions<KafkaTra
 
     public ValidateOptionsResult Validate(string? name, KafkaTransportOptions options)
     {
+        if (string.IsNullOrWhiteSpace(options.BootstrapServers))
+        {
+            return ValidateOptionsResult.Fail(
+                "KafkaTransportOptions.BootstrapServers must be configured and non-empty.");
+        }
+
         var publisherName = string.IsNullOrEmpty(name) ? Options.DefaultName : name;
         var pubOpts = _publisherOptions.Get(publisherName);
 
