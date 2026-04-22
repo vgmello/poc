@@ -3,9 +3,11 @@
 using Azure.Messaging.EventHubs.Producer;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 using Outbox.Core.Abstractions;
 using Outbox.Core.Builder;
+using Outbox.Core.Options;
 using Xunit;
 
 namespace Outbox.EventHub.Tests;
@@ -139,5 +141,22 @@ public class EventHubOutboxBuilderExtensionsTests
         var provider = services.BuildServiceProvider();
         var factory = provider.GetRequiredService<EventHubClientFactory>();
         Assert.Same(customFactory, factory);
+    }
+
+    [Fact]
+    public void EventHubTransportOptionsValidator_Fails_WhenConnectionStringMissing()
+    {
+        var publisherOptions = Substitute.For<IOptionsMonitor<OutboxPublisherOptions>>();
+        publisherOptions.Get(Options.DefaultName).Returns(new OutboxPublisherOptions());
+
+        var sut = new EventHubTransportOptionsValidator(publisherOptions);
+
+        var result = sut.Validate(Options.DefaultName, new EventHubTransportOptions
+        {
+            ConnectionString = ""
+        });
+
+        Assert.True(result.Failed);
+        Assert.Contains("ConnectionString", result.FailureMessage);
     }
 }

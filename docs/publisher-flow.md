@@ -231,6 +231,13 @@ A publisher is considered **stale** when `NOW() - last_heartbeat_utc > Heartbeat
 
 On graceful shutdown, `UnregisterPublisherAsync` releases all owned partitions and deletes the publisher row.
 
+**Indexes:**
+
+| Store      | Index                             | Columns                                          | Purpose                                                              |
+| ---------- | --------------------------------- | ------------------------------------------------ | -------------------------------------------------------------------- |
+| PostgreSQL | `ix_outbox_publishers_heartbeat`  | `(outbox_table_name, last_heartbeat_utc)`        | Active-publisher COUNTs and `NOT IN` subquery in `Rebalance`         |
+| SQL Server | `IX_OutboxPublishers_Heartbeat`   | `(OutboxTableName, LastHeartbeatUtc)` + `INCLUDE (PublisherId)` | Same, fully covering the `NOT IN` subquery                           |
+
 ### outbox_partitions
 
 Partition ownership ledger. Maps logical partitions (0–63 by default) to active publishers for work distribution.
@@ -251,6 +258,13 @@ Partition ownership ledger. Maps logical partitions (0–63 by default) to activ
 | In grace | `<stale_publisher_id>` | Future timestamp    | Original owner may still be processing; claimable after expiry |
 
 **Critical invariant:** The grace period gives the original owner time to finish any in-flight work before a new owner takes over. Since there are no per-message leases, partition ownership is the sole mechanism preventing two publishers from processing the same partition simultaneously.
+
+**Indexes:**
+
+| Store      | Index                         | Columns                                                    | Purpose                                                                                                                         |
+| ---------- | ----------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| PostgreSQL | `ix_outbox_partitions_owner`  | `(outbox_table_name, owner_publisher_id, partition_id)`    | `GetOwnedPartitions`, `Heartbeat` partitions UPDATE, `UnregisterPublisher`, `currently_owned` COUNTs, per-owner rebalance scans |
+| SQL Server | `IX_OutboxPartitions_Owner`   | Same keys + `INCLUDE (OwnedSinceUtc, GraceExpiresUtc)`     | Same roles; `INCLUDE` also makes `FetchBatch`'s partitions subquery fully covering                                              |
 
 ### Diagnostic views
 

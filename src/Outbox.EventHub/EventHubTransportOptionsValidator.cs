@@ -22,6 +22,12 @@ internal sealed class EventHubTransportOptionsValidator : IValidateOptions<Event
 
     public ValidateOptionsResult Validate(string? name, EventHubTransportOptions options)
     {
+        if (string.IsNullOrWhiteSpace(options.ConnectionString))
+        {
+            return ValidateOptionsResult.Fail(
+                "EventHubTransportOptions.ConnectionString must be configured and non-empty.");
+        }
+
         var publisherName = string.IsNullOrEmpty(name) ? Options.DefaultName : name;
         var pubOpts = _publisherOptions.Get(publisherName);
 

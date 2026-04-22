@@ -67,7 +67,7 @@ Consumer
 
 ## Health Check Reference
 
-The health check at `/health` reports three states:
+The health check (mapped to `/health/internal` in the sample publishers) reports three states:
 
 | State         | Condition                           | What It Means                                   |
 | ------------- | ----------------------------------- | ----------------------------------------------- |
